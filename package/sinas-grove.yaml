@@ -1658,13 +1658,25 @@ spec:
           3. Call `list_applicable_playbooks(kind=synthesis, …)` to see
              which synthesis playbooks are in scope, then `get_playbook`
              on the one whose `question patterns` match this question.
-          4. Read the source's documents:
+          4. Read broadly across the source's documents, not just the
+             top few. Cover the full breadth of the result set, both
+             the Concurrences commentary (secondary) and the primary
+             decisions they cite:
                - result-driven: `get_result_documents`, then
-                 `get_document_summary`/`read_document_content` per
-                 document
+                 `get_document_summary` for every document, and
+                 `read_document_content` on each one you draw a claim
+                 from
                - dossier-driven: `list_dossier_documents`, then read
                  each
-          5. Draft claims one by one:
+          5. Draft a comprehensive set of claims, one by one. Target
+             15-20 claims for a substantive question (more if the
+             material supports it; fewer only if the result set is
+             genuinely thin). Organize them by theme (market
+             definition, competitive effects, precedent, remedies, …)
+             and make each claim detailed and self-contained rather
+             than a one-line summary. Draw claims from as many distinct
+             documents as the question warrants, so the answer reflects
+             the breadth of the corpus, not just a handful of sources.
                a. Call `draft_claim` with the next claim's text and
                   type. Capture the returned claim_id.
                b. For each piece of evidence supporting that claim,
@@ -1680,7 +1692,9 @@ spec:
 
         Every load-bearing factual claim MUST have at least one
         evidence binding. Do not invent claims unsupported by spans
-        in the source documents.
+        in the source documents. A fuller answer must never come at
+        the cost of unsupported claims: breadth comes from covering
+        more evidence, not from asserting beyond it.
       enabledConnectors:
         - connector: grove/api
           operations:

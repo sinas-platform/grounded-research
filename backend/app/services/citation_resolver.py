@@ -139,13 +139,14 @@ decided AS (
 ),
 final AS (
     SELECT d.*,
+        -- A decision other than 'park' requires a concrete target entity.
+        -- Identifier matches with >1 candidate (ambiguous) have a NULL target and
+        -- therefore park rather than emit a proposal with no target_id.
         CASE
-            WHEN d.path IN ('ecli','celex','case_number') AND d.id_count = 1 THEN 'auto'
-            WHEN d.path IN ('ecli','celex','case_number') AND d.id_count > 1 THEN 'propose'
-            WHEN d.path IN ('name','legal_instrument') AND d.top1 >= :auto AND (d.top1 - d.top2) >= :margin THEN 'auto'
-            WHEN d.path IN ('name','legal_instrument') AND d.top1 >= :auto AND (d.top1 - d.top2) <  :margin THEN 'propose'
-            WHEN d.path IN ('name','legal_instrument') AND d.top1 >= :review THEN 'propose'
-            ELSE 'park'
+            WHEN d.target_entity_id IS NULL THEN 'park'
+            WHEN d.path IN ('ecli','celex','case_number') THEN 'auto'
+            WHEN d.top1 >= :auto AND (d.top1 - d.top2) >= :margin THEN 'auto'
+            ELSE 'propose'
         END AS decision,
         CASE WHEN d.path IN ('ecli','celex','case_number') THEN 0.98
              WHEN d.path IN ('name','legal_instrument') THEN d.top1 ELSE NULL END AS match_conf,

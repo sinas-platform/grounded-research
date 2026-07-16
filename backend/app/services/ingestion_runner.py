@@ -337,6 +337,13 @@ _RATE_LIMIT_MARKERS = (
     "usage limits",
     "api usage limits",
     "you have reached your specified api usage limits",
+    # Account credit exhausted. Anthropic returns this as a separate 400 from
+    # the spend cap above ("your credit balance is too low to access the
+    # anthropic api"). Same silent empty-success: the unit reports COMPLETED
+    # but writes no data. "credit balance" is the broad guard; the full phrase
+    # records the exact string that fired.
+    "credit balance is too low",
+    "credit balance",
     # Context-length overflow. A doc larger than the model context window
     # returns a 400 ("prompt is too long: N tokens > 200000 maximum"). The
     # message differs from the usage-cap one above, so without these markers

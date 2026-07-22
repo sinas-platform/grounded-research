@@ -518,6 +518,19 @@ async def record_relationship(
     payload: RelationshipIn, session: AsyncSession = Depends(get_session)
 ):
     rdef = await _check_relationship_mode(session, payload.relationship_definition_id)
+
+    # Guard 1 — reject a self-referential edge (source == target). Entity
+    # resolution can hand back the same node for both ends (name matching is
+    # substring-based), which would otherwise persist a self-loop.
+    mode = _guard_mode("grove_guard_self_reference")
+    if mode != "off" and payload.source_id == payload.target_id:
+        if _guard_decide(
+            "self_reference", mode, f"definition={rdef.name} node={payload.source_id}"
+        ):
+            return RelationshipResolution(
+                kind="rejected", id=None, creation_mode=rdef.creation_mode  # type: ignore[arg-type]
+            )
+
     data = payload.model_dump()
     span = data.pop("evidence_span", None)
 

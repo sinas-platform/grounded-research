@@ -41,6 +41,21 @@ class Settings(BaseSettings):
         default=5, validation_alias="GROVE_RERUN_CONCURRENCY"
     )
 
+    # Precision guards on the ingestion write path (see api/v1/ingestion.py).
+    # Each is "reject" (skip the write + log), "warn" (log but still write), or
+    # "off". The rule each guard enforces is always read from the active
+    # schema/config at runtime; these settings only pick the enforcement
+    # policy, which a framework should not hardcode for every consumer.
+    grove_guard_self_reference: Literal["reject", "warn", "off"] = Field(
+        default="reject", validation_alias="GROVE_GUARD_SELF_REFERENCE"
+    )
+    grove_guard_relationship_type: Literal["reject", "warn", "off"] = Field(
+        default="reject", validation_alias="GROVE_GUARD_RELATIONSHIP_TYPE"
+    )
+    grove_guard_mention_in_body: Literal["reject", "warn", "off"] = Field(
+        default="reject", validation_alias="GROVE_GUARD_MENTION_IN_BODY"
+    )
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.grove_cors_origins.split(",") if o.strip()]

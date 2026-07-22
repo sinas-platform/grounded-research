@@ -7,6 +7,7 @@ set_document_summary, set_property_value, etc.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Literal
@@ -17,6 +18,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
+from app.config import get_settings
 from app.db import get_session
 from app.models import (
     Document,
@@ -45,6 +47,35 @@ from app.schemas.runtime import (
 )
 
 router = APIRouter(prefix="/ingest", tags=["ingestion"])
+
+logger = logging.getLogger(__name__)
+
+
+def _guard_mode(setting: str) -> str:
+    """Read a precision guard's enforcement policy (reject | warn | off) from
+    settings. The policy is a deployment choice, never derived from any
+    particular schema; the rule each guard enforces is read from config at
+    the call site.
+    """
+    return getattr(get_settings(), setting, "reject")
+
+
+def _guard_decide(guard: str, mode: str, detail: str) -> bool:
+    """Log a precision-guard hit and report whether the write must be skipped.
+
+    `mode` is the deployment policy (reject | warn). reject → skip + log and
+    return True; warn → log and return False so the write proceeds. The log
+    line is structured (stable key=value fields) so rejections and warnings
+    are countable downstream.
+    """
+    logger.warning(
+        "precision_guard guard=%s mode=%s action=%s %s",
+        guard,
+        mode,
+        "reject" if mode == "reject" else "warn",
+        detail,
+    )
+    return mode == "reject"
 
 
 # ─────────────────────────── post-upload registration ───────────────────────────
@@ -246,7 +277,8 @@ class EntityIn(BaseModel):
 
 
 class EntityResolution(BaseModel):
-    kind: Literal["entity", "proposal", "unresolved", "blocked"]
+    # "rejected" (id is None) is returned when a precision guard skips the write.
+    kind: Literal["entity", "proposal", "unresolved", "blocked", "rejected"]
     id: uuid.UUID | None = None
     canonical_form: str
     creation_mode: Literal["open", "review", "closed"]
@@ -470,8 +502,9 @@ async def _check_relationship_mode(
 
 
 class RelationshipResolution(BaseModel):
-    kind: Literal["relationship", "proposal"]
-    id: uuid.UUID
+    # "rejected" (id is None) is returned when a precision guard skips the write.
+    kind: Literal["relationship", "proposal", "rejected"]
+    id: uuid.UUID | None = None
     creation_mode: Literal["open", "review", "closed"]
 
 

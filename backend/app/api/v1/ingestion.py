@@ -313,6 +313,49 @@ async def _alias_match(
     return aliased
 
 
+async def _content_md(
+    session: AsyncSession,
+    document_id: uuid.UUID,
+    document_version_id: uuid.UUID | None,
+) -> str | None:
+    """Load the body a mention should appear in: the named version if given,
+    else the document's current version. None when there is no text (e.g. a
+    binary document registered without extracted content)."""
+    if document_version_id is not None:
+        dv = await session.get(DocumentVersion, document_version_id)
+        return dv.content_md if dv else None
+    doc = await session.get(Document, document_id)
+    if doc is None or doc.current_version_id is None:
+        return None
+    dv = await session.get(DocumentVersion, doc.current_version_id)
+    return dv.content_md if dv else None
+
+
+def _span_in_body(span: dict, content_md: str) -> tuple[bool, str]:
+    """Check a mention's span points at real text in `content_md`.
+
+    Verifies the recorded offsets rather than substring-searching a canonical
+    form: canonical forms legitimately differ from the surface text (aliases,
+    abbreviations, normalised names), so a substring check would false-reject.
+    Prefers char offsets, then a line range; a span carrying neither is
+    unverifiable and allowed. Returns (ok, reason)."""
+    char_from, char_to = span.get("char_from"), span.get("char_to")
+    if char_from is not None and char_to is not None:
+        n = len(content_md)
+        if not (0 <= char_from < char_to <= n):
+            return False, f"char span [{char_from},{char_to}] out of bounds (len={n})"
+        if not content_md[char_from:char_to].strip():
+            return False, f"char span [{char_from},{char_to}] is whitespace only"
+        return True, "char span ok"
+    line_from, line_to = span.get("line_from"), span.get("line_to")
+    if line_from is not None and line_to is not None:
+        n_lines = content_md.count("\n") + 1
+        if not (1 <= line_from <= line_to <= n_lines):
+            return False, f"line span [{line_from},{line_to}] out of bounds (lines={n_lines})"
+        return True, "line span ok"
+    return True, "no offsets, unverifiable"
+
+
 @router.post(
     "/entities",
     response_model=EntityResolution,
@@ -334,6 +377,23 @@ async def propose_new_entity(
             canonical_form=matched.canonical_form,
             creation_mode=et.creation_mode,  # type: ignore[arg-type]
         )
+
+    # Guard 3 — when evidence is supplied, verify its span points at real body
+    # text before creating anything from it.
+    mode = _guard_mode("grove_guard_mention_in_body")
+    if mode != "off" and payload.document_id is not None and payload.span is not None:
+        body = await _content_md(session, payload.document_id, payload.document_version_id)
+        if body:
+            ok, reason = _span_in_body(payload.span, body)
+            if not ok and _guard_decide(
+                "mention_in_body", mode, f"document={payload.document_id} {reason}"
+            ):
+                return EntityResolution(
+                    kind="rejected",
+                    id=None,
+                    canonical_form=payload.canonical_form,
+                    creation_mode=et.creation_mode,  # type: ignore[arg-type]
+                )
 
     if et.creation_mode == "open":
         row = Entity(
@@ -419,11 +479,23 @@ class EntityMentionInWithBody(BaseModel):
 async def record_entity_mention(
     payload: EntityMentionInWithBody, session: AsyncSession = Depends(get_session)
 ):
+    # Guard 3 — verify the mention's span points at real text in the body.
+    mode = _guard_mode("grove_guard_mention_in_body")
+    if mode != "off":
+        body = await _content_md(
+            session, payload.document_id, payload.document_version_id
+        )
+        if body:  # unverifiable without body text (e.g. binary docs) → allow
+            ok, reason = _span_in_body(payload.span, body)
+            if not ok and _guard_decide(
+                "mention_in_body", mode, f"document={payload.document_id} {reason}"
+            ):
+                return {"id": None, "rejected": True, "reason": reason}
     row = EntityMention(**payload.model_dump())
     session.add(row)
     await session.commit()
     await session.refresh(row)
-    return {"id": row.id}
+    return {"id": row.id, "rejected": False}
 
 
 class FindEntityIn(BaseModel):

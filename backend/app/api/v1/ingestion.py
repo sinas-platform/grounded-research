@@ -23,6 +23,7 @@ from app.db import get_session
 from app.models import (
     Document,
     DocumentVersion,
+    Dossier,
     Entity,
     EntityAlias,
     EntityMention,
@@ -501,6 +502,37 @@ async def _check_relationship_mode(
     return rdef
 
 
+# Maps a relationship definition's ref_type to the (model, type-column) that
+# identifies a node's type. The keys are the ref_types Grove supports; the
+# expected type id always comes from the definition, so this stays agnostic to
+# any particular schema.
+_REF_TYPE_NODE = {
+    "entity_type": (Entity, "entity_type_id"),
+    "document_class": (Document, "document_class_id"),
+    "dossier_class": (Dossier, "dossier_class_id"),
+}
+
+
+async def _ref_type_mismatch(
+    session: AsyncSession, ref_type: str, ref_id: uuid.UUID, node_id: uuid.UUID
+) -> str | None:
+    """Return a reason string if `node_id`'s declared type differs from the
+    `ref_id` the definition expects, else None. The (model, column) is chosen
+    by `ref_type`, which the definition declares; an unknown ref_type cannot be
+    checked from config and is left unenforced (returns None)."""
+    resolver = _REF_TYPE_NODE.get(ref_type)
+    if resolver is None:
+        return None
+    model, column = resolver
+    node = await session.get(model, node_id)
+    if node is None:
+        return f"{ref_type} node {node_id} not found"
+    actual = getattr(node, column)
+    if actual != ref_id:
+        return f"{ref_type} expected {ref_id} got {actual}"
+    return None
+
+
 class RelationshipResolution(BaseModel):
     # "rejected" (id is None) is returned when a precision guard skips the write.
     kind: Literal["relationship", "proposal", "rejected"]
@@ -530,6 +562,24 @@ async def record_relationship(
             return RelationshipResolution(
                 kind="rejected", id=None, creation_mode=rdef.creation_mode  # type: ignore[arg-type]
             )
+
+    # Guard 2 — validate each endpoint against the type the definition declares
+    # (source_ref_type / target_ref_type + the matching *_ref_id). The rule is
+    # read entirely from the definition, so whatever a given schema declares is
+    # what gets enforced.
+    mode = _guard_mode("grove_guard_relationship_type")
+    if mode != "off":
+        for end, ref_type, ref_id, node_id in (
+            ("source", rdef.source_ref_type, rdef.source_ref_id, payload.source_id),
+            ("target", rdef.target_ref_type, rdef.target_ref_id, payload.target_id),
+        ):
+            reason = await _ref_type_mismatch(session, ref_type, ref_id, node_id)
+            if reason is not None and _guard_decide(
+                "relationship_type", mode, f"definition={rdef.name} {end} {reason}"
+            ):
+                return RelationshipResolution(
+                    kind="rejected", id=None, creation_mode=rdef.creation_mode  # type: ignore[arg-type]
+                )
 
     data = payload.model_dump()
     span = data.pop("evidence_span", None)

@@ -150,3 +150,100 @@ async def test_self_reference_warn_mode_still_writes(monkeypatch):
     # warn logs but does not skip: the self-loop is still written.
     assert out.kind == "relationship"
     assert len(session.added) == 1
+
+
+# ─────────────────────────────────────────────────────────────
+# Guard 2 — target/source type validation against the definition
+# ─────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_relationship_type_allows_matching_types(monkeypatch):
+    from app.api.v1.ingestion import record_relationship
+
+    _patch_settings(monkeypatch)
+    rdef = _reldef()  # source/target are distinct entity_types
+    a, b = uuid.uuid4(), uuid.uuid4()
+    ea = Entity(id=a, entity_type_id=rdef.source_ref_id, canonical_form="A")
+    eb = Entity(id=b, entity_type_id=rdef.target_ref_id, canonical_form="B")
+    session = _FakeSession(gets={rdef.id: rdef, a: ea, b: eb})
+
+    out = await record_relationship(_rel_payload(rdef, a, b), session=session)
+
+    assert out.kind == "relationship"
+    assert len(session.added) == 1
+
+
+@pytest.mark.asyncio
+async def test_relationship_type_rejects_wrong_target(monkeypatch):
+    from app.api.v1.ingestion import record_relationship
+
+    _patch_settings(monkeypatch)
+    rdef = _reldef()
+    a, b = uuid.uuid4(), uuid.uuid4()
+    ea = Entity(id=a, entity_type_id=rdef.source_ref_id, canonical_form="A")
+    # target is some other entity_type, not the one the definition declares.
+    eb = Entity(id=b, entity_type_id=uuid.uuid4(), canonical_form="B")
+    session = _FakeSession(gets={rdef.id: rdef, a: ea, b: eb})
+
+    out = await record_relationship(_rel_payload(rdef, a, b), session=session)
+
+    assert out.kind == "rejected"
+    assert out.id is None
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_relationship_type_rejects_missing_node(monkeypatch):
+    from app.api.v1.ingestion import record_relationship
+
+    _patch_settings(monkeypatch)
+    rdef = _reldef()
+    a, b = uuid.uuid4(), uuid.uuid4()
+    ea = Entity(id=a, entity_type_id=rdef.source_ref_id, canonical_form="A")
+    # target node not present at all.
+    session = _FakeSession(gets={rdef.id: rdef, a: ea})
+
+    out = await record_relationship(_rel_payload(rdef, a, b), session=session)
+
+    assert out.kind == "rejected"
+    assert session.added == []
+
+
+@pytest.mark.asyncio
+async def test_relationship_type_polymorphic_document_class(monkeypatch):
+    """A definition whose target is a document_class validates the target
+    against Document.document_class_id — the rule follows ref_type generically."""
+    from app.api.v1.ingestion import record_relationship
+
+    _patch_settings(monkeypatch)
+    doc_class = uuid.uuid4()
+    rdef = _reldef(target_ref_type="document_class", target_ref_id=doc_class)
+    a, b = uuid.uuid4(), uuid.uuid4()
+    ea = Entity(id=a, entity_type_id=rdef.source_ref_id, canonical_form="A")
+
+    ok_doc = Document(id=b, document_class_id=doc_class, filename="f")
+    session = _FakeSession(gets={rdef.id: rdef, a: ea, b: ok_doc})
+    out = await record_relationship(_rel_payload(rdef, a, b), session=session)
+    assert out.kind == "relationship"
+
+    wrong_doc = Document(id=b, document_class_id=uuid.uuid4(), filename="f")
+    session = _FakeSession(gets={rdef.id: rdef, a: ea, b: wrong_doc})
+    out = await record_relationship(_rel_payload(rdef, a, b), session=session)
+    assert out.kind == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_relationship_type_unknown_ref_type_not_enforced(monkeypatch):
+    """An unrecognised ref_type cannot be checked from config, so it is left
+    unenforced rather than blocking the write."""
+    from app.api.v1.ingestion import record_relationship
+
+    _patch_settings(monkeypatch)
+    rdef = _reldef(target_ref_type="something_new", target_ref_id=uuid.uuid4())
+    a, b = uuid.uuid4(), uuid.uuid4()
+    ea = Entity(id=a, entity_type_id=rdef.source_ref_id, canonical_form="A")
+    session = _FakeSession(gets={rdef.id: rdef, a: ea})  # b intentionally absent
+
+    out = await record_relationship(_rel_payload(rdef, a, b), session=session)
+
+    assert out.kind == "relationship"
+    assert len(session.added) == 1

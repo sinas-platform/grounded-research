@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.25"
+  version: "0.1.26"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -2445,6 +2445,23 @@ spec:
           operations:
             - list_run_candidates
             - submit_consolidated_proposal
+
+    - namespace: grove
+      name: front-matter-agent
+      description: Stateless one-shot front-matter extractor (class, summary, properties, entities) invoked per document by Grove's one-shot ingestion path.
+      llmProviderName: ${{ vars.CHEAP_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You extract structured front matter from ONE document in a single
+        reply. The user message contains everything you need: the document
+        classes to choose from, the entity types, any property schema, the
+        entities already recorded, and the document text itself.
+
+        Reply with ONLY the requested JSON object — no prose, no code
+        fences, no commentary. Be factual and conservative: a null property
+        beats a guessed one; an omitted entity beats an invented one.
+        Entity names must appear in the document. Never repeat an entity
+        from the already-recorded list.
 
     - namespace: grove
       name: evidence-check-agent

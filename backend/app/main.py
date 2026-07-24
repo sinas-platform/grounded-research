@@ -26,6 +26,12 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     logging.basicConfig(level=settings.grove_log_level)
     log.info("starting sinas-grove backend")
     log.info("auth mode: %s", settings.grove_auth_mode)
+    if settings.grove_auth_mode == "simplified":
+        log.warning(
+            "GROVE_AUTH_MODE=simplified — every request runs as the admin "
+            "identity (a presented bearer must still match SINAS_API_KEY). "
+            "Local development only; never expose this mode beyond localhost."
+        )
     log.info("sinas url: %s", settings.sinas_url)
     # No background workers: ingestion + discovery submit batches to Sinas
     # at API request time and reconcile via live-fetch on GET.

@@ -90,11 +90,41 @@ async def _resolve_simplified_identity() -> CallerIdentity:
         return _simplified_identity
 
 
+# Tokens already validated against Sinas in simplified mode (bounded cache;
+# accepts-for-process-lifetime is a deliberate dev-mode laxity).
+_seen_valid_tokens: set[str] = set()
+
+
 async def get_caller(
     authorization: Annotated[str | None, Header()] = None,
 ) -> CallerIdentity:
     settings = get_settings()
     if settings.grove_auth_mode == "simplified":
+        # Simplified mode maps every caller to the admin identity, but a
+        # PRESENTED bearer must still be real: the configured api key, or a
+        # token Sinas recognises. Accepting arbitrary tokens hides client
+        # misconfiguration and turns the mode into no-auth-at-all.
+        if authorization:
+            if not authorization.lower().startswith("bearer "):
+                raise HTTPException(
+                    status.HTTP_401_UNAUTHORIZED, "malformed authorization header"
+                )
+            token = authorization.split(" ", 1)[1].strip()
+            if token != (settings.sinas_api_key or "") and token not in _seen_valid_tokens:
+                client = SinasClient(base_url=settings.sinas_url, token=token)
+                try:
+                    await asyncio.to_thread(client.auth.get_me)
+                except SinasAuthError as exc:
+                    raise HTTPException(
+                        status.HTTP_401_UNAUTHORIZED, "invalid token"
+                    ) from exc
+                except SinasAPIError as exc:
+                    raise HTTPException(
+                        status.HTTP_502_BAD_GATEWAY, f"sinas: {exc}"
+                    ) from exc
+                if len(_seen_valid_tokens) > 256:
+                    _seen_valid_tokens.clear()
+                _seen_valid_tokens.add(token)
         return await _resolve_simplified_identity()
 
     if not authorization or not authorization.lower().startswith("bearer "):

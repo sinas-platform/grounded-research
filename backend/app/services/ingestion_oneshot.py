@@ -27,6 +27,7 @@ document, with no chats and no tool loops.
 from __future__ import annotations
 
 import asyncio
+import logging
 import json
 import re
 import uuid
@@ -184,7 +185,7 @@ def _front_matter_prompt(
 ) -> str:
     class_lines = "\n".join(f"- {n}: {d or ''}" for n, d in classes)
     type_lines = "\n".join(
-        f"- {t['name']}: {t['guidance'][:220]}" for t in entity_types
+        f"- {t['name']}: {t['guidance']}" for t in entity_types
     )
     known = ", ".join(sorted(known_entities)[:120]) or "(none)"
     hint = (
@@ -454,7 +455,7 @@ async def oneshot_ingest_document(
         chunk_prompts = [
             _ENTITY_CHUNK_PROMPT.format(
                 types=", ".join(t["name"] for t in entity_types),
-                type_guidance="\n".join(f"- {t['name']}: {t['guidance'][:220]}" for t in entity_types),
+                type_guidance="\n".join(f"- {t['name']}: {t['guidance']}" for t in entity_types),
                 known=known_names,
                 i=i,
                 n=len(chunks),
@@ -587,6 +588,15 @@ async def oneshot_ingest(
             }
             for t in (await session.execute(select(EntityType))).scalars()
         ]
+        # Guidance is sent to the extractor IN FULL — never silently clipped.
+        # Warn on bloat instead: long guidance degrades extraction quality and
+        # inflates every chunk prompt.
+        for t in entity_types:
+            if len(t["guidance"]) > 2000:
+                logging.getLogger(__name__).warning(
+                    "entity type %r guidance is %d chars — consider tightening",
+                    t["name"], len(t["guidance"]),
+                )
 
     sem = asyncio.Semaphore(concurrency)
     results: list[dict[str, Any]] = []

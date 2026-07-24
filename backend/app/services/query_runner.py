@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import math
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -44,10 +43,10 @@ MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
 # converging runs finish instead of dying at an arbitrary budget.
 HARD_VALIDATE_ROUNDS = 8
-# Floor for drop-before-fail: publishing after dropping unverifiable claims
-# is allowed only if what survives is still a substantive answer.
-MIN_PUBLISH_CLAIMS = 4
-MIN_PUBLISH_FRACTION = 0.5
+# After drops, the surviving answer must still ANSWER THE QUESTION — judged
+# holistically by the answer-gate agent, with at most this many redraft
+# cycles before the run fails loudly. (Replaces the old counting floor.)
+ANSWER_GATE_CYCLES = 1
 REMEDIATION_WINDOW_S = 8 * 60
 MIN_CLAIMS = 6
 # effort → maximum sub-query fan-out. The bound is enforced here (truncation)
@@ -439,15 +438,23 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
         await _tele(run_id, "draft", started=_iso(), chat_id=chat_id)
 
     nudges = 0
-    deadline = asyncio.get_event_loop().time() + DRAFT_TIMEOUT_S
-    last_n, stable_at = -1, asyncio.get_event_loop().time()
-    while asyncio.get_event_loop().time() < deadline:
+    # DRAFT_TIMEOUT_S bounds IDLE time, not productive work: every sign of
+    # progress (a new claim, chat activity) pushes the deadline out. A run is
+    # only "timed out" after a full quiet window — killing a drafter that
+    # wrote a claim 46 seconds ago is how run f7049916 died.
+    loop_t = asyncio.get_event_loop().time
+    deadline = loop_t() + DRAFT_TIMEOUT_S
+    hard_deadline = loop_t() + 3 * DRAFT_TIMEOUT_S  # runaway backstop
+    last_n, stable_at = -1, loop_t()
+    while loop_t() < min(deadline, hard_deadline):
         await asyncio.sleep(POLL_S)
         n = await _claim_count(answer_id)
         if n != last_n:
-            last_n, stable_at = n, asyncio.get_event_loop().time()
+            last_n, stable_at = n, loop_t()
+            deadline = loop_t() + DRAFT_TIMEOUT_S
             continue
         if not await _chat_is_idle(sinas, chat_id):
+            deadline = loop_t() + DRAFT_TIMEOUT_S
             continue
         settled = asyncio.get_event_loop().time() - stable_at > IDLE_DEAD_S
         if n >= MIN_CLAIMS and settled:
@@ -465,7 +472,120 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     raise RuntimeError("synthesis drafting timed out")
 
 
-async def _stage_validate_publish(run_id: uuid.UUID, sinas: _Sinas) -> None:
+async def _gate_answer(
+    sinas: _Sinas, run_question: str, answer_id: uuid.UUID
+) -> tuple[bool, str, list[str]]:
+    """Judge whether the surviving claims still answer the question, and
+    surface quality findings. Generic by construction: no claim-type
+    vocabulary, no counting floors — one holistic verdict from a stateless
+    judge. Returns (publishable, missing, issues). `publishable` is the hard
+    gate; `issues` are best-effort remediation targets that must never block
+    publication on their own."""
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(AnswerClaim.sequence, AnswerClaim.claim_text)
+                .where(AnswerClaim.answer_id == answer_id)
+                .order_by(AnswerClaim.sequence)
+            )
+        ).all()
+        cited = set(
+            (
+                await session.execute(
+                    select(Document.filename)
+                    .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
+                    .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+                    .where(AnswerClaim.answer_id == answer_id)
+                )
+            ).scalars().all()
+        )
+        parent_result_id = (
+            await session.execute(
+                select(QueryRun.parent_result_id).where(QueryRun.answer_id == answer_id)
+            )
+        ).scalar_one_or_none()
+        sources: list[tuple[str, str]] = []
+        if parent_result_id:
+            sources = [
+                (fn, (summ or "").replace("\n", " ")[:220])
+                for fn, summ in (
+                    await session.execute(
+                        select(Document.filename, Document.summary)
+                        .join(ResultDocument, ResultDocument.document_id == Document.id)
+                        .where(ResultDocument.result_id == parent_result_id)
+                    )
+                ).all()
+            ]
+    claims = "\n".join(f"{seq}. {text}" for seq, text in rows)
+    source_lines = "\n".join(
+        f"- [{'CITED' if fn in cited else 'uncited'}] {fn}: {summ}" for fn, summ in sources
+    ) or "(working set unavailable)"
+    reply = await sinas.invoke(
+        "grove/answer-gate-agent",
+        "QUESTION:\n" + run_question + "\n\nCLAIMS OF THE DRAFT ANSWER:\n" + claims
+        + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
+        + '\n\nReply ONLY JSON: {"publishable": true|false,'
+        ' "missing": "<if not publishable: the one thing the claims fail to deliver on>",'
+        ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
+        ' "tension": "<claims that contradict each other with no claim reconciling them, or null>",'
+        ' "unused_sources": ["<filename>: <why it is plainly more direct or authoritative for a point made than the source cited for it>", ...]}',
+    )
+    try:
+        cleaned = reply.strip().strip("`").removeprefix("json").strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        data = json.loads(cleaned[start : end + 1])
+        issues: list[str] = []
+        seqs = [s for s in (data.get("unresponsive") or []) if isinstance(s, (int, str))]
+        if seqs:
+            issues.append(
+                "Claims " + ", ".join(str(s) for s in seqs) + " only describe their source "
+                "document; each must state what that source contributes to answering the "
+                "question, or be dropped."
+            )
+        if data.get("tension"):
+            issues.append(
+                "Unreconciled tension: " + str(data["tension"]) + " Add a claim that "
+                "reconciles these positions (grounded in evidence), or revise them."
+            )
+        for src in (data.get("unused_sources") or [])[:3]:
+            issues.append(
+                "Stronger source unused: " + str(src) + " Use it for the point it speaks "
+                "to (or keep the current citation only if it is genuinely the better fit)."
+            )
+        return bool(data.get("publishable")), str(data.get("missing") or ""), issues
+    except Exception:
+        # an unparseable verdict must never block publication of a fully
+        # validated answer — log via telemetry and treat as pass
+        return True, "(gate verdict unparseable — treated as pass)", []
+
+
+def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
+    parts = ([f"The verified claims no longer fully answer the question. Missing: {missing}"]
+             if missing else []) + issues
+    return (
+        "Answer review found problems to fix before publication:\n- "
+        + "\n- ".join(parts)
+        + "\nGround every new or revised claim ONLY in evidence you can bind "
+        "(read documents with numbered:true and copy the visible line numbers "
+        "into spans). Revise an existing claim by re-posting its sequence "
+        "number. Then reply REMEDIATION COMPLETE."
+    )
+
+
+async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) -> None:
+    from app.models import Answer
+
+    async with AsyncSessionLocal() as session:
+        row = await session.get(Answer, answer_id)
+        row.status = "published"
+        row.published_at = _now()
+        await session.commit()
+    await _tele(run_id, "validate", published=_iso(), **tele)
+
+
+async def _stage_validate_publish(
+    run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int = ANSWER_GATE_CYCLES
+) -> None:
     from app.services.faithfulness import validate_answer_evidence
 
     async with AsyncSessionLocal() as session:
@@ -511,15 +631,32 @@ async def _stage_validate_publish(run_id: uuid.UUID, sinas: _Sinas) -> None:
                         .where(ClaimEvidence.validated.is_(False))
                     )
                 ).scalars().first()
-                if pending is None:
-                    from app.models import Answer
-
-                    row = await session.get(Answer, answer_id)
-                    row.status = "published"
-                    row.published_at = _now()
-                    await session.commit()
-            await _tele(run_id, "validate", published=_iso())
-            return
+            if pending is None:
+                async with AsyncSessionLocal() as session:
+                    question = (await session.get(QueryRun, run_id)).question
+                ok, missing, issues = await _gate_answer(sinas, question, answer_id)
+                if ok and (not issues or gate_cycles <= 0):
+                    # quality issues never block publication on their own —
+                    # unremediated ones are recorded, not fatal
+                    tele = {"quality_issues": issues} if issues else {}
+                    await _publish_answer(run_id, answer_id, **tele)
+                    return
+                if not ok and gate_cycles <= 0:
+                    raise RuntimeError(
+                        f"answer gate: claims validate but no longer answer the question — {missing}"
+                    )
+                await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
+                sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
+                t0 = asyncio.get_event_loop().time()
+                saw = False
+                while asyncio.get_event_loop().time() - t0 < REMEDIATION_WINDOW_S:
+                    await asyncio.sleep(POLL_S)
+                    idle = await _chat_is_idle(sinas, chat_id)
+                    if not idle:
+                        saw = True
+                    elif saw:
+                        break
+                return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
         failures = "\n".join(
             f"- claim seq {f['claim_sequence']} (claim_id {f['claim_id']}, evidence {f['evidence_id']}): {f['reason']}"
             for f in verdict["failed"]
@@ -541,17 +678,11 @@ async def _stage_validate_publish(run_id: uuid.UUID, sinas: _Sinas) -> None:
             elif saw_activity:
                 break  # worked, then went quiet — remediation done
 
-    # Rounds exhausted without convergence. Before failing the run, apply the
-    # drop rule deterministically: remove the claims that still carry
-    # unvalidated evidence and publish what survives — but only if the
-    # surviving answer is still substantive (the completeness floor). A gutted
-    # stub is worse than a visible failure.
+    # Rounds exhausted without convergence. Drop the claims that still carry
+    # unvalidated evidence, then let the answer gate decide: the surviving
+    # claims must still answer the question, or the drafter gets ONE redraft
+    # cycle, or the run fails loudly. No counting floors.
     async with AsyncSessionLocal() as session:
-        all_claim_ids = (
-            await session.execute(
-                select(AnswerClaim.id).where(AnswerClaim.answer_id == answer_id)
-            )
-        ).scalars().all()
         failing_ids = set(
             (
                 await session.execute(
@@ -562,49 +693,45 @@ async def _stage_validate_publish(run_id: uuid.UUID, sinas: _Sinas) -> None:
                 )
             ).scalars().all()
         )
-        surviving = len(all_claim_ids) - len(failing_ids)
-        floor = max(
-            MIN_PUBLISH_CLAIMS,
-            math.ceil(len(all_claim_ids) * MIN_PUBLISH_FRACTION),
-        )
-        if not failing_ids:
-            # The final remediation round left nothing failing (e.g. the
-            # drafter deleted the stubborn claims itself) — the answer is
-            # fully validated; publish it rather than failing on a stale
-            # round budget.
-            from app.models import Answer
-
-            row = await session.get(Answer, answer_id)
-            row.status = "published"
-            row.published_at = _now()
-            await session.commit()
-            await _tele(run_id, "validate", published=_iso())
-            return
-        if surviving >= floor:
-            from app.models import Answer
-
-            for cid in failing_ids:
-                await session.execute(
-                    ClaimEvidence.__table__.delete().where(ClaimEvidence.claim_id == cid)
-                )
-                await session.execute(
-                    AnswerClaim.__table__.delete().where(AnswerClaim.id == cid)
-                )
-            row = await session.get(Answer, answer_id)
-            row.status = "published"
-            row.published_at = _now()
-            await session.commit()
-            await _tele(
-                run_id, "validate",
-                dropped_claims=len(failing_ids), surviving_claims=surviving,
-                published=_iso(),
+        for cid in failing_ids:
+            await session.execute(
+                ClaimEvidence.__table__.delete().where(ClaimEvidence.claim_id == cid)
             )
-            return
-    raise RuntimeError(
-        "validation did not converge within round budget "
-        f"(surviving claims {surviving} below completeness floor {floor} — "
-        "refusing to publish a gutted answer)"
+            await session.execute(
+                AnswerClaim.__table__.delete().where(AnswerClaim.id == cid)
+            )
+        await session.commit()
+        question = (await session.get(QueryRun, run_id)).question
+    ok, missing, issues = await _gate_answer(sinas, question, answer_id)
+    if ok and (not issues or gate_cycles <= 0):
+        tele = {"quality_issues": issues} if issues else {}
+        await _publish_answer(
+            run_id, answer_id, dropped_claims=len(failing_ids), **tele
+        )
+        return
+    if not ok and gate_cycles <= 0:
+        raise RuntimeError(
+            "validation exhausted and the surviving claims do not answer the "
+            f"question — {missing}"
+        )
+    await _tele(
+        run_id, "validate",
+        gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
+    prefix = (
+        "Several claims were dropped as unverifiable.\n" if failing_ids else ""
+    )
+    sinas.send_detached(chat_id, prefix + _gate_remediation_msg(missing, issues))
+    t0 = asyncio.get_event_loop().time()
+    saw = False
+    while asyncio.get_event_loop().time() - t0 < REMEDIATION_WINDOW_S:
+        await asyncio.sleep(POLL_S)
+        idle = await _chat_is_idle(sinas, chat_id)
+        if not idle:
+            saw = True
+        elif saw:
+            break
+    return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 
 
 # ── entrypoint ──────────────────────────────────────────────────────────────

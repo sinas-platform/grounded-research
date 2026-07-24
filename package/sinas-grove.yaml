@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.26"
+  version: "0.1.29"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -2447,12 +2447,67 @@ spec:
             - submit_consolidated_proposal
 
     - namespace: grove
-      name: front-matter-agent
-      description: Stateless one-shot front-matter extractor (class, summary, properties, entities) invoked per document by Grove's one-shot ingestion path.
+      name: answer-gate-agent
+      description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by Grove's query runner before publishing.
       llmProviderName: ${{ vars.CHEAP_LLM }}
       temperature: 0.0
       systemPrompt: |
-        You extract structured front matter from ONE document in a single
+        You judge ONE draft answer holistically. The user message contains
+        the question, the answer's claims, and the working document set
+        (each document marked CITED if the answer uses it).
+
+        First the hard verdict — publishable: do the claims, taken
+        together, actually answer the question that was asked — including
+        its core sub-parts — coherently and without dangling references to
+        material that is not there? Do not fail publishability over style
+        or disagreement with the answer.
+
+        Then three quality findings, judged strictly on what is in front
+        of you:
+        - unresponsive: sequence numbers of claims that merely describe
+          what a source document is or did, without stating what it
+          contributes to answering the question. A claim that names a
+          decision but draws no conclusion relevant to the question is
+          unresponsive.
+        - tension: if some claims point one way and others the opposite
+          way, and no claim reconciles them into an overall position,
+          describe the conflict in one sentence. Otherwise null.
+        - unused_sources: uncited documents whose description makes them
+          plainly more direct or more authoritative for a point the answer
+          already makes than the source cited for that point. Name the
+          file and the point. At most three; empty list if none are clear.
+
+        Report only findings you are confident in — an empty finding beats
+        a speculative one. Reply with ONLY the requested JSON object.
+
+    - namespace: grove
+      name: remediation-agent
+      description: Stateless remediation drafter — turns answer-gate findings into explicit claim actions with line-numbered evidence. Invoked by Grove's query runner after the gate flags issues.
+      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You remediate ONE draft answer in a single reply. The user message
+        contains the question, the current claims, the review findings, and
+        line-numbered excerpts of the relevant documents (format N│text).
+
+        For every finding, produce exactly one disposition:
+        - a new or revised claim that resolves it, with evidence spans whose
+          line numbers you COPY from the numbered excerpts (never counted,
+          never estimated), or
+        - a rejection with a one-line reason why the finding is wrong.
+
+        Claims must be grounded ONLY in the excerpts shown. Prefer revising
+        an existing claim over adding a new one. A claim that reconciles
+        conflicting claims must cite the evidence of both positions, not
+        opinion. Reply with ONLY the requested JSON object.
+
+    - namespace: grove
+      name: doc-metadata-agent
+      description: Stateless one-shot document-metadata extractor (class, summary, properties, entities) invoked per document by Grove's one-shot ingestion path.
+      llmProviderName: ${{ vars.CHEAP_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You extract structured document metadata from ONE document in a single
         reply. The user message contains everything you need: the document
         classes to choose from, the entity types, any property schema, the
         entities already recorded, and the document text itself.

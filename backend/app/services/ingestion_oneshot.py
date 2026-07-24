@@ -41,7 +41,7 @@ from app.models.config import DocumentClassProperty, EntityType
 from app.models.runtime import EntityProposal, PropertyValue
 from app.services.query_runner import _Sinas
 
-FRONT_MATTER_AGENT = "grove/front-matter-agent"
+DOC_METADATA_AGENT = "grove/doc-metadata-agent"
 GAZETTEER_MIN_ALIAS_LEN = 4
 RULE_WRITE_CONFIDENCE = 0.95  # rules at/above this write the class directly
 
@@ -143,7 +143,11 @@ TYPE GUIDANCE (follow exactly):
 Be EXHAUSTIVE: every named company, competition authority, court,
 decision/case, legal instrument (treaty articles, acts, regulations),
 jurisdiction and market in the text — including every item of long
-enumerations. Do not invent names; do not stop early; no duplicates.
+enumerations. Lists of cases or decisions (often italicised, starred or
+comma-separated) must be unpacked: one entity PER item, named exactly as
+written (keep any year in parentheses); never merge list items into one
+name and never append words like "cartel" or "decision" that the text
+does not use. Do not invent names; do not stop early; no duplicates.
 Skip entities from this already-recorded list: {known}
 
 CHUNK {i}/{n} OF DOCUMENT {filename}:
@@ -157,6 +161,9 @@ def _presence_filter(name: str, content_lower: str) -> bool:
     words = re.sub(r"[^\w\s]", " ", name.lower()).split()
     if not words:
         return False
+    # short acronyms (NCA, SCA, ECN …) pass on an exact word-boundary hit
+    if len(words) == 1 and len(words[0]) <= 4:
+        return re.search(rf"\b{re.escape(words[0])}\b", content_lower) is not None
     for k in (len(words), 4, 3, 2):
         if k <= len(words):
             probe = " ".join(words[:k])
@@ -352,7 +359,7 @@ async def oneshot_ingest_document(
         class_hint=hint,
         properties=class_props,
     )
-    reply = await sinas.invoke(FRONT_MATTER_AGENT, prompt)
+    reply = await sinas.invoke(DOC_METADATA_AGENT, prompt)
     report["llm_calls"] += 1
     data = _parse_json_reply(reply)
 
@@ -394,7 +401,7 @@ async def oneshot_ingest_document(
                     class_hint=(cls_name, 1.0, "already classified"),
                     properties=class_props,
                 )
-                reply2 = await sinas.invoke(FRONT_MATTER_AGENT, prop_prompt)
+                reply2 = await sinas.invoke(DOC_METADATA_AGENT, prop_prompt)
                 report["llm_calls"] += 1
                 data2 = _parse_json_reply(reply2)
                 data["properties"] = data2.get("properties") or {}
@@ -457,7 +464,7 @@ async def oneshot_ingest_document(
             for i, chunk in enumerate(chunks, start=1)
         ]
         replies = await asyncio.gather(
-            *(sinas.invoke(FRONT_MATTER_AGENT, p) for p in chunk_prompts)
+            *(sinas.invoke(DOC_METADATA_AGENT, p) for p in chunk_prompts)
         )
         report["llm_calls"] += len(chunk_prompts)
         for r in replies:
@@ -535,6 +542,16 @@ async def oneshot_ingest_document(
     report["hallucinations_filtered"] = filtered_out
     report["entity_chunks"] = len(chunks)
     if not write:  # evaluation mode: expose the full extracted set
+        seen_typed=set()
+        typed=[]
+        for c,_ in known.values():
+            typed.append({"name": c, "type": "(known entity)", "source": "gazetteer"})
+        for e in all_entities:
+            nm=str(e.get("name") or "").strip()
+            if nm and nm.lower() in seen_names and nm.lower() not in seen_typed and _presence_filter(nm, content_lower):
+                seen_typed.add(nm.lower())
+                typed.append({"name": nm, "type": str(e.get("type") or "?"), "source": "llm"})
+        report["extracted_typed"] = typed
         report["extracted_names"] = sorted(
             {c for c, _ in known.values()}
             | {

@@ -126,11 +126,32 @@ async def draft_claim(
     caller: CallerIdentity = Depends(get_caller),
 ):
     await _writable_answer_or_404(answer_id, session, caller)
-    row = AnswerClaim(
-        answer_id=answer_id,
-        **payload.model_dump(exclude={"evidence"}),
-    )
-    session.add(row)
+    # Idempotent on (answer_id, sequence): a re-posted claim (agent retry or
+    # remediation restatement) REPLACES the earlier row and its evidence
+    # instead of duplicating it.
+    existing = (
+        await session.execute(
+            select(AnswerClaim).where(
+                AnswerClaim.answer_id == answer_id,
+                AnswerClaim.sequence == payload.sequence,
+            )
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        await session.execute(
+            ClaimEvidence.__table__.delete().where(
+                ClaimEvidence.claim_id == existing.id
+            )
+        )
+        existing.claim_text = payload.claim_text
+        existing.claim_type = payload.claim_type
+        row = existing
+    else:
+        row = AnswerClaim(
+            answer_id=answer_id,
+            **payload.model_dump(exclude={"evidence"}),
+        )
+        session.add(row)
     await session.flush()  # claim id for the evidence FKs
     ev_rows = [
         ClaimEvidence(

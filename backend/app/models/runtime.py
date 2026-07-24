@@ -96,6 +96,13 @@ class Entity(Base, TimestampMixin):
     )
     canonical_form: Mapped[str] = mapped_column(String(500), nullable=False)
     extra_metadata: Mapped[dict | None] = mapped_column("metadata", JSONB)
+    # package-declared identity (e.g. a case number, an act+year signature);
+    # unique per type among live (unmerged) entities
+    natural_key: Mapped[str | None] = mapped_column(String(300))
+    # merge tombstone: set when this entity was merged into another
+    merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entity.id", ondelete="SET NULL")
+    )
 
 
 class EntityAlias(Base, TimestampMixin):
@@ -110,6 +117,10 @@ class EntityAlias(Base, TimestampMixin):
 
 
 class EntityMention(Base, TimestampMixin):
+    """Ground truth of extraction: the text as written, typed, with the
+    document-local resolved form. Linking to a canonical entity is a
+    re-computable annotation performed by services/entity_resolver."""
+
     __tablename__ = "entity_mention"
 
     id: Mapped[uuid.UUID] = uuid_pk()
@@ -117,11 +128,21 @@ class EntityMention(Base, TimestampMixin):
         UUID(as_uuid=True), ForeignKey("document.id", ondelete="CASCADE"), index=True
     )
     document_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
-    entity_id: Mapped[uuid.UUID] = mapped_column(
+    entity_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("entity.id", ondelete="CASCADE"), index=True
     )
     span: Mapped[dict] = mapped_column(JSONB, nullable=False)
     confidence: Mapped[float | None] = mapped_column(Float)
+    # ground truth
+    surface_form: Mapped[str | None] = mapped_column(String(500))
+    resolved_form: Mapped[str | None] = mapped_column(String(500))
+    entity_type_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("entity_type.id", ondelete="SET NULL")
+    )
+    # link annotation: natural_key | alias | adjudicated | created | legacy | manual
+    link_method: Mapped[str | None] = mapped_column(String(20))
+    link_confidence: Mapped[float | None] = mapped_column(Float)
+    link_evidence: Mapped[dict | None] = mapped_column(JSONB)
 
 
 class EntityProposal(Base, TimestampMixin):

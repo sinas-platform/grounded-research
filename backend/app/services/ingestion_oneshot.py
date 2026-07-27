@@ -76,6 +76,14 @@ def _boundary_ok(text: str, start: int, end: int) -> bool:
     return not _WORD.match(before) and not _WORD.match(after)
 
 
+def _lower_keep_len(text: str) -> str:
+    """Lowercase WITHOUT changing string length. Some characters lowercase
+    to multiple codepoints ('İ' -> 'i' + combining dot), which would shift
+    every character offset computed after them. Offsets computed on this
+    string index directly into the original text."""
+    return "".join(c if len(c.lower()) != 1 else c.lower() for c in text)
+
+
 async def _load_gazetteer(session: AsyncSession) -> list[tuple[str, uuid.UUID, str]]:
     """(alias_lower, entity_id, canonical_form) for every alias and every
     canonical form long enough to match safely."""
@@ -84,11 +92,11 @@ async def _load_gazetteer(session: AsyncSession) -> list[tuple[str, uuid.UUID, s
     canon_by_id = {eid: cf for eid, cf in ents}
     for eid, cf in ents:
         if len(cf) >= GAZETTEER_MIN_ALIAS_LEN:
-            out.append((cf.lower(), eid, cf))
+            out.append((_lower_keep_len(cf), eid, cf))
     aliases = (await session.execute(select(EntityAlias.alias, EntityAlias.entity_id))).all()
     for alias, eid in aliases:
         if len(alias) >= GAZETTEER_MIN_ALIAS_LEN and eid in canon_by_id:
-            out.append((alias.lower(), eid, canon_by_id[eid]))
+            out.append((_lower_keep_len(alias), eid, canon_by_id[eid]))
     # longest first so overlapping shorter aliases don't shadow longer ones
     out.sort(key=lambda t: -len(t[0]))
     return out
@@ -99,7 +107,7 @@ def gazetteer_scan(
 ) -> dict[uuid.UUID, tuple[str, int]]:
     """entity_id → (canonical_form, first_offset) for every entity whose
     alias appears in the content on a word boundary."""
-    lowered = content.lower()
+    lowered = _lower_keep_len(content)
     found: dict[uuid.UUID, tuple[str, int]] = {}
     for alias, eid, canon in gazetteer:
         if eid in found:
@@ -195,6 +203,122 @@ def _presence_filter(name: str, content_lower: str) -> bool:
     return _locate(name, content_lower) is not None
 
 
+def _find_exact(
+    name: str, content_lower: str, start: int = 0, end: int | None = None
+) -> tuple[int, int] | None:
+    """First boundary-checked occurrence of the FULL name (case-insensitive,
+    punctuation intact) within [start, end) of the document. The boundary
+    check keeps 'Coop' from matching inside 'Cooperation'. content_lower
+    must come from _lower_keep_len so offsets index the original text."""
+    probe = _lower_keep_len(name)
+    if not probe:
+        return None
+    stop = len(content_lower) if end is None else min(end, len(content_lower))
+    i = content_lower.find(probe, start, stop)
+    while i != -1:
+        j = i + len(probe)
+        if _boundary_ok(content_lower, i, j):
+            return (i, j)
+        i = content_lower.find(probe, i + 1, stop)
+    return None
+
+
+def build_mention_plan(
+    emissions: list[tuple[dict, int, int]],
+    content: str,
+    *,
+    alias_map: dict[str, tuple[Any, str]] | None = None,
+    existing_span_keys: set[tuple[str, int, int]] | None = None,
+    existing_unlocated: set[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Occurrence-level mention planning (CNAI-872). Pure and DB-free so it
+    can be tested against a document body without running extraction.
+
+    Each emission is (entity dict, window_start, window_end): the window is
+    the chunk (or clipped front-matter view) that produced the name. The
+    name is located at its first exact occurrence WITHIN that window,
+    falling back to the whole document; mentions are deduped BY SPAN, not
+    by name, so the same occurrence surfaced by two overlapping chunks (or
+    a prior run) collapses to one row while genuinely distinct occurrences
+    all persist. A name present only in normalised/composed form gets ONE
+    offset-less mention flagged not_found_verbatim; a name found nowhere
+    stays filtered out entirely (hallucination guard).
+
+    Returns (mention specs, counters). Counters keep 'unique names' and
+    'mention occurrences' strictly separate: they answer different
+    questions and must never be conflated.
+    """
+    alias_map = alias_map or {}
+    content_lower = _lower_keep_len(content)
+    # loose lowering for the presence GUARD only (never for offsets): plain
+    # .lower() folds 'İ' the same way on both sides, so a surface form the
+    # extractor normalised to ASCII still counts as present in the document
+    content_loose = content.lower()
+    seen_spans: set[tuple[str, int, int]] = set(existing_span_keys or ())
+    seen_unlocated: set[str] = set(existing_unlocated or ())
+    unique_names: set[str] = set()
+    specs: list[dict[str, Any]] = []
+    counters = {
+        "unique_names": 0,
+        "mention_occurrences": 0,
+        "mentions_located": 0,
+        "mentions_not_found_verbatim": 0,
+        "mentions_unlinked": 0,
+        "hallucinations_filtered": 0,
+    }
+    for ent, w_start, w_end in emissions:
+        name = str(ent.get("name") or "").strip()
+        etype = str(ent.get("type") or "").strip()
+        if not name or len(name) < 3:
+            continue
+        key = _lower_keep_len(name)
+        g = _find_exact(name, content_lower, w_start, w_end)
+        if g is None:
+            g = _find_exact(name, content_lower)  # cross-window fallback
+        if g is not None:
+            span_key = (key, g[0], g[1])
+            if span_key in seen_spans:
+                continue  # same occurrence surfaced again -> one row
+            seen_spans.add(span_key)
+            span = {"method": "oneshot", "char_start": g[0], "char_end": g[1]}
+            counters["mentions_located"] += 1
+        else:
+            if (
+                _locate(name, content_lower) is None
+                and _locate(name, content_loose) is None
+            ):
+                counters["hallucinations_filtered"] += 1
+                continue  # nowhere in the document at all
+            if key in seen_unlocated:
+                continue  # one flagged row per name per document
+            seen_unlocated.add(key)
+            span = {
+                "method": "oneshot",
+                "char_start": None,
+                "char_end": None,
+                "flag": "not_found_verbatim",
+            }
+            counters["mentions_not_found_verbatim"] += 1
+        hit = alias_map.get(key)
+        if not hit:
+            counters["mentions_unlinked"] += 1
+        unique_names.add(key)
+        specs.append(
+            {
+                "name": name,
+                "type": etype,
+                "confidence": float(ent.get("confidence") or 0.8),
+                "span": span,
+                "hit": hit,
+            }
+        )
+    counters["unique_names"] = len(unique_names)
+    counters["mention_occurrences"] = (
+        counters["mentions_located"] + counters["mentions_not_found_verbatim"]
+    )
+    return specs, counters
+
+
 def _front_matter_prompt(
     *,
     filename: str,
@@ -273,18 +397,38 @@ def _parse_json_reply(reply: str) -> dict:
 # ── writers ────────────────────────────────────────────────────────────────
 
 
-async def _existing_mention_entity_ids(
+async def _existing_mention_state(
     session: AsyncSession, document_id: uuid.UUID
-) -> set[uuid.UUID]:
-    return set(
-        (
-            await session.execute(
-                select(EntityMention.entity_id).where(
-                    EntityMention.document_id == document_id
-                )
-            )
-        ).scalars()
-    )
+) -> tuple[set[uuid.UUID], set[tuple[str, int, int]], set[str]]:
+    """Cross-run idempotency state for a document: (linked entity_ids,
+    occupied span keys, names already flagged not_found_verbatim). Span
+    keys are (lowered surface_form, char_start, char_end); legacy rows
+    without offsets occupy no span and never block new occurrence rows."""
+    rows = (
+        await session.execute(
+            select(
+                EntityMention.entity_id,
+                EntityMention.surface_form,
+                EntityMention.span,
+            ).where(EntityMention.document_id == document_id)
+        )
+    ).all()
+    entity_ids: set[uuid.UUID] = set()
+    span_keys: set[tuple[str, int, int]] = set()
+    unlocated: set[str] = set()
+    for eid, surface, span in rows:
+        if eid is not None:
+            entity_ids.add(eid)
+        if not surface:
+            continue
+        key = _lower_keep_len(surface)
+        s = (span or {}).get("char_start")
+        e = (span or {}).get("char_end")
+        if isinstance(s, int) and isinstance(e, int):
+            span_keys.add((key, s, e))
+        elif (span or {}).get("flag") == "not_found_verbatim":
+            unlocated.add(key)
+    return entity_ids, span_keys, unlocated
 
 
 async def oneshot_ingest_document(
@@ -329,7 +473,9 @@ async def oneshot_ingest_document(
 
     # 2. gazetteer
     known = gazetteer_scan(content, gazetteer)
-    already = await _existing_mention_entity_ids(session, document_id)
+    already, existing_span_keys, existing_unlocated = await _existing_mention_state(
+        session, document_id
+    )
     new_gaz = {eid: v for eid, v in known.items() if eid not in already}
     if write:
         for eid, (canon, offset) in new_gaz.items():
@@ -350,10 +496,12 @@ async def oneshot_ingest_document(
                     confidence=0.97,
                 )
             )
+    # gazetteer writes ONE row per entity at its first occurrence; these are
+    # entity-level counts, not occurrence counts
     report["gazetteer_mentions"] = {
-        "matched": len(known),
-        "new": len(new_gaz),
-        "already_recorded": len(known) - len(new_gaz),
+        "unique_entities_matched": len(known),
+        "new_mention_rows": len(new_gaz),
+        "entities_already_recorded": len(known) - len(new_gaz),
     }
 
     # 3. one-shot LLM pass (single call when the class is already known)
@@ -473,12 +621,15 @@ async def oneshot_ingest_document(
             written_props += 1
     report["properties_written"] = written_props
 
-    # residual entities → mention (known alias) or proposal (new).
-    # Long documents get exhaustive per-chunk entity extraction (the
-    # front-matter call's entities only cover its clipped window), and
-    # every candidate must pass the deterministic presence filter.
-    content_lower = content.lower()
-    all_entities: list[dict] = list(data.get("entities") or [])
+    # residual entities: exhaustive per-chunk extraction for long documents
+    # (the front-matter call's entities only cover its clipped window).
+    # Every emitted name is tagged with the window that produced it so its
+    # occurrence can be located inside THAT window first (CNAI-872).
+    content_lower = _lower_keep_len(content)
+    emissions: list[tuple[dict, int, int]] = [
+        (e, 0, min(len(content), _MAX_CONTENT_CHARS))
+        for e in (data.get("entities") or [])
+    ]
     chunks = _entity_chunks(content)
     if len(chunks) > 1:
         known_names = ", ".join(sorted(c for c, _ in known.values())[:120]) or "(none)"
@@ -498,84 +649,86 @@ async def oneshot_ingest_document(
             *(sinas.invoke(DOC_METADATA_AGENT, p) for p in chunk_prompts)
         )
         report["llm_calls"] += len(chunk_prompts)
-        for r in replies:
+        for ci, r in enumerate(replies):
+            w_start = ci * _ENTITY_CHUNK_CHARS
+            w_end = w_start + _ENTITY_CHUNK_CHARS + _ENTITY_CHUNK_OVERLAP
             try:
-                all_entities.extend(_parse_json_reply(r).get("entities") or [])
+                parsed = _parse_json_reply(r).get("entities") or []
             except Exception:
                 continue
+            emissions.extend((e, w_start, w_end) for e in parsed)
 
-    # ── mentions-first persistence (ticket 4.1.1) ─────────────────────────
-    # Every surviving extracted name becomes a RAW mention: surface_form as
-    # extracted, exact character offsets from the locator, entity_id NULL.
-    # Ingestion no longer creates entities or proposals — linking, creation
-    # and creation_mode enforcement are the resolver's job (re-runnable at
-    # any time against these rows). The one exception: a name that exactly
-    # equals a known alias links immediately (link_method='alias') — same
-    # safety class as the gazetteer scan, and the resolver may re-link it.
+    # ── mentions-first persistence, occurrence-level (4.1.1 + CNAI-872) ──
+    # Every emission becomes a RAW mention located in its producing window:
+    # surface_form as extracted, exact character offsets, entity_id NULL
+    # unless the name exactly equals a known alias (link_method='alias').
+    # Mentions are deduped BY SPAN, not by name: one row per occurrence.
+    # The plan is computed by build_mention_plan (pure, testable); this
+    # block only resolves link fields and persists.
     alias_map = {a: (eid, canon) for a, eid, canon in gazetteer}
     type_by_name = {t["name"]: t for t in entity_types}
-    mentions_added = 0
-    mentions_unlinked = 0
-    filtered_out = 0
-    seen_names: set[str] = set()
-    for ent in all_entities:
-        name = str(ent.get("name") or "").strip()
-        etype = str(ent.get("type") or "").strip()
-        if not name or len(name) < 3 or name.lower() in seen_names:
-            continue
-        seen_names.add(name.lower())
-        loc = _locate(name, content_lower)
-        if loc is None:
-            filtered_out += 1
-            continue
-        span = {"method": "oneshot", "char_start": loc[0], "char_end": loc[1]}
-        confidence = float(ent.get("confidence") or 0.8)
-        tinfo = type_by_name.get(etype)
-        hit = alias_map.get(name.lower())
-        if hit and (hit[0] in already or hit[0] in new_gaz):
-            continue  # this entity's presence is already recorded for the doc
-        if write:
+    # the gazetteer rows written this run occupy their spans too
+    run_span_keys = set(existing_span_keys)
+    for eid, (canon, offset) in new_gaz.items():
+        run_span_keys.add((_lower_keep_len(canon), offset, offset + len(canon)))
+    specs, counters = build_mention_plan(
+        emissions,
+        content,
+        alias_map=alias_map,
+        existing_span_keys=run_span_keys,
+        existing_unlocated=existing_unlocated,
+    )
+    if write:
+        for spec in specs:
+            hit = spec["hit"]
+            tinfo = type_by_name.get(spec["type"])
             session.add(
                 EntityMention(
                     document_id=document_id,
                     document_version_id=version.id,
                     entity_id=hit[0] if hit else None,
                     entity_type_id=tinfo["id"] if tinfo else None,
-                    surface_form=name[:500],
-                    span=span,
+                    surface_form=spec["name"][:500],
+                    span=spec["span"],
                     link_method="alias" if hit else None,
                     link_confidence=0.95 if hit else None,
                     link_evidence={"alias": hit[1]} if hit else None,
-                    confidence=confidence,
+                    confidence=spec["confidence"],
                 )
             )
-        mentions_added += 1
-        if not hit:
-            mentions_unlinked += 1
-    report["entity_mentions_llm"] = mentions_added
-    report["entity_mentions_unlinked"] = mentions_unlinked
-    report["hallucinations_filtered"] = filtered_out
+    # counts: unique NAMES and mention OCCURRENCES answer different
+    # questions — every key names which one it is.
+    report["llm_unique_names"] = counters["unique_names"]
+    report["llm_mention_occurrences"] = counters["mention_occurrences"]
+    report["llm_mentions_located"] = counters["mentions_located"]
+    report["llm_mentions_not_found_verbatim"] = counters["mentions_not_found_verbatim"]
+    report["llm_mentions_unlinked"] = counters["mentions_unlinked"]
+    report["hallucinations_filtered"] = counters["hallucinations_filtered"]
     report["entity_chunks"] = len(chunks)
-    if not write:  # evaluation mode: expose the full extracted set
-        seen_typed=set()
-        typed=[]
-        for c,_ in known.values():
+    if not write:  # evaluation mode: expose the extracted set (NAME-level)
+        planned = {_lower_keep_len(s["name"]) for s in specs}
+        seen_typed: set[str] = set()
+        typed = []
+        for c, _ in known.values():
             typed.append({"name": c, "type": "(known entity)", "source": "gazetteer"})
-        for e in all_entities:
-            nm=str(e.get("name") or "").strip()
-            if nm and nm.lower() in seen_names and nm.lower() not in seen_typed and _presence_filter(nm, content_lower):
-                seen_typed.add(nm.lower())
-                typed.append({"name": nm, "type": str(e.get("type") or "?"), "source": "llm"})
-        report["extracted_typed"] = typed
-        report["extracted_names"] = sorted(
+        for ent, _, _ in emissions:
+            nm = str(ent.get("name") or "").strip()
+            key = _lower_keep_len(nm) if nm else ""
+            if key and key in planned and key not in seen_typed:
+                seen_typed.add(key)
+                typed.append({"name": nm, "type": str(ent.get("type") or "?"), "source": "llm"})
+        report["extracted_typed"] = typed  # unique names, not occurrences
+        report["extracted_names"] = sorted(  # unique names, not occurrences
             {c for c, _ in known.values()}
             | {
-                str(e.get("name")).strip()
-                for e in all_entities
-                if str(e.get("name") or "").strip().lower() in seen_names
-                and _presence_filter(str(e.get("name")), content_lower)
+                str(ent.get("name")).strip()
+                for ent, _, _ in emissions
+                if _lower_keep_len(str(ent.get("name") or "").strip()) in planned
             }
         )
+        report["mention_plan"] = [  # occurrence-level, for span inspection
+            {"name": s["name"], "type": s["type"], "span": s["span"]} for s in specs
+        ]
 
     if write:
         await session.commit()

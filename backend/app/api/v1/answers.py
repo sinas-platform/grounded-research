@@ -78,6 +78,8 @@ async def get_answer_claims(
             .order_by(AnswerClaim.sequence)
         )
     ).scalars().all()
+    for i, row in enumerate(rows, start=1):
+        row.display_number = i
     return rows
 
 
@@ -104,6 +106,8 @@ async def get_answer_evidence(
             .order_by(AnswerClaim.sequence)
         )
     ).scalars().all()
+    for i, c in enumerate(claims, start=1):
+        c.display_number = i
     ev_stmt = (
         select(ClaimEvidence)
         .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)

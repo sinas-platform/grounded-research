@@ -468,8 +468,33 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
                 "claims with evidence per the playbook target, then reply DRAFTING COMPLETE.",
             )
         else:
-            raise RuntimeError(f"synthesis drafting dead at {n} claims after {MAX_NUDGES} nudges")
-    raise RuntimeError("synthesis drafting timed out")
+            outage = await _dead_chat_diagnosis(sinas, chat_id)
+            raise RuntimeError(
+                outage or f"synthesis drafting dead at {n} claims after {MAX_NUDGES} nudges"
+            )
+    outage = await _dead_chat_diagnosis(sinas, chat_id)
+    raise RuntimeError(outage or "synthesis drafting timed out")
+
+
+
+async def _dead_chat_diagnosis(sinas: _Sinas, chat_id: str) -> str | None:
+    """When a drafter dies producing nothing, check whether the chat shows an
+    infrastructure failure rather than a model failure: if (nearly) every tool
+    call errored, the story is a connector outage, and the run error should
+    say so instead of blaming the drafter (run a20feca3: 40+ failed calls,
+    reported as 'drafting dead at 0 claims')."""
+    msgs = await sinas.chat_messages(chat_id)
+    results = [m for m in msgs if m.get("role") == "tool"]
+    if len(results) < 3:
+        return None
+    errored = [m for m in results if str(m.get("content") or "").lstrip().startswith('{"error"')]
+    if len(errored) / len(results) < 0.9:
+        return None
+    sample = str(errored[-1].get("content") or "")[:200]
+    return (
+        f"connector outage: {len(errored)}/{len(results)} tool calls in the "
+        f"synthesis chat failed — last error: {sample}"
+    )
 
 
 async def _gate_answer(

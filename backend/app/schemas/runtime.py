@@ -224,6 +224,9 @@ class AnswerOut(OwnedOut):
 class ClaimOut(TimestampedOut):
     answer_id: uuid.UUID
     sequence: int
+    # Consecutive position for display (1..n). Validation drops leave gaps in
+    # `sequence` (a stable identifier); readers should number by this field.
+    display_number: int | None = None
     claim_text: str
     claim_type: str | None = None
 

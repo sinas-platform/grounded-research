@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db import AsyncSessionLocal
 from app.models import Document, DocumentClass, Entity, EntityAlias, EntityMention
 from app.models.config import DocumentClassProperty, EntityType
-from app.models.runtime import EntityProposal, PropertyValue
+from app.models.runtime import PropertyValue
 from app.services.query_runner import _Sinas
 
 DOC_METADATA_AGENT = "grove/doc-metadata-agent"
@@ -148,29 +148,51 @@ enumerations. Lists of cases or decisions (often italicised, starred or
 comma-separated) must be unpacked: one entity PER item, named exactly as
 written (keep any year in parentheses); never merge list items into one
 name and never append words like "cartel" or "decision" that the text
-does not use. Do not invent names; do not stop early; no duplicates.
+does not use. If an entity appears only by a shortened or generic
+reference, extract that reference exactly as written — never expand it
+to a fuller name the text does not contain. When both a full name and
+short references to the same entity appear, the fullest form suffices.
+Do not invent names; do not stop early; no duplicates.
 Skip entities from this already-recorded list: {known}
 
 CHUNK {i}/{n} OF DOCUMENT {filename}:
 {chunk}"""
 
 
-def _presence_filter(name: str, content_lower: str) -> bool:
-    """Deterministic hallucination guard: an extracted entity must actually
-    occur in the document. Match on the full normalized name or a 3-word
-    prefix (survives 'Authority (ACRONYM)' style tails)."""
+def _locate(name: str, content_lower: str) -> tuple[int, int] | None:
+    """Deterministic hallucination guard AND locator: an extracted entity
+    must actually occur in the document; return the (start, end) character
+    offsets of the best occurrence, or None. Match on the full normalized
+    name or a 3-word prefix (survives 'Authority (ACRONYM)' style tails).
+    Offsets make every mention re-inspectable forever: context around a
+    mention is a string slice, never a re-extraction."""
     words = re.sub(r"[^\w\s]", " ", name.lower()).split()
     if not words:
-        return False
+        return None
     # short acronyms (NCA, SCA, ECN …) pass on an exact word-boundary hit
     if len(words) == 1 and len(words[0]) <= 4:
-        return re.search(rf"\b{re.escape(words[0])}\b", content_lower) is not None
+        m = re.search(rf"\b{re.escape(words[0])}\b", content_lower)
+        return (m.start(), m.end()) if m else None
+    # exact full string first (punctuation intact), then normalized probes
+    i = content_lower.find(name.lower())
+    if i != -1:
+        return (i, i + len(name))
     for k in (len(words), 4, 3, 2):
         if k <= len(words):
             probe = " ".join(words[:k])
-            if len(probe) >= 4 and probe in content_lower:
-                return True
-    return len(words) == 1 and words[0] in content_lower
+            if len(probe) >= 4:
+                i = content_lower.find(probe)
+                if i != -1:
+                    return (i, i + len(probe))
+    if len(words) == 1:
+        i = content_lower.find(words[0])
+        if i != -1:
+            return (i, i + len(words[0]))
+    return None
+
+
+def _presence_filter(name: str, content_lower: str) -> bool:
+    return _locate(name, content_lower) is not None
 
 
 def _front_matter_prompt(
@@ -316,7 +338,15 @@ async def oneshot_ingest_document(
                     document_id=document_id,
                     document_version_id=version.id,
                     entity_id=eid,
-                    span={"method": "gazetteer", "char_offset": offset},
+                    surface_form=canon[:500],
+                    span={
+                        "method": "gazetteer",
+                        "char_start": offset,
+                        "char_end": offset + len(canon),
+                    },
+                    link_method="gazetteer",
+                    link_confidence=0.97,
+                    link_evidence={"alias": canon},
                     confidence=0.97,
                 )
             )
@@ -474,9 +504,18 @@ async def oneshot_ingest_document(
             except Exception:
                 continue
 
+    # ── mentions-first persistence (ticket 4.1.1) ─────────────────────────
+    # Every surviving extracted name becomes a RAW mention: surface_form as
+    # extracted, exact character offsets from the locator, entity_id NULL.
+    # Ingestion no longer creates entities or proposals — linking, creation
+    # and creation_mode enforcement are the resolver's job (re-runnable at
+    # any time against these rows). The one exception: a name that exactly
+    # equals a known alias links immediately (link_method='alias') — same
+    # safety class as the gazetteer scan, and the resolver may re-link it.
     alias_map = {a: (eid, canon) for a, eid, canon in gazetteer}
+    type_by_name = {t["name"]: t for t in entity_types}
     mentions_added = 0
-    proposals_added = 0
+    mentions_unlinked = 0
     filtered_out = 0
     seen_names: set[str] = set()
     for ent in all_entities:
@@ -485,61 +524,36 @@ async def oneshot_ingest_document(
         if not name or len(name) < 3 or name.lower() in seen_names:
             continue
         seen_names.add(name.lower())
-        if not _presence_filter(name, content_lower):
+        loc = _locate(name, content_lower)
+        if loc is None:
             filtered_out += 1
             continue
+        span = {"method": "oneshot", "char_start": loc[0], "char_end": loc[1]}
+        confidence = float(ent.get("confidence") or 0.8)
+        tinfo = type_by_name.get(etype)
         hit = alias_map.get(name.lower())
-        if hit:
-            eid = hit[0]
-            if eid not in already and eid not in new_gaz:
-                if write:
-                    session.add(
-                        EntityMention(
-                            document_id=document_id,
-                            document_version_id=version.id,
-                            entity_id=eid,
-                            span={"method": "oneshot"},
-                            confidence=float(ent.get("confidence") or 0.8),
-                        )
-                    )
-                mentions_added += 1
-            continue
-        tinfo = next((t for t in entity_types if t["name"] == etype), None)
-        if tinfo is None or tinfo["creation_mode"] == "closed":
-            continue
-        if tinfo["creation_mode"] == "open":
-            # open types: the extractor may create the entity directly
-            if write:
-                new_ent = Entity(
-                    entity_type_id=tinfo["id"], canonical_form=name[:500]
+        if hit and (hit[0] in already or hit[0] in new_gaz):
+            continue  # this entity's presence is already recorded for the doc
+        if write:
+            session.add(
+                EntityMention(
+                    document_id=document_id,
+                    document_version_id=version.id,
+                    entity_id=hit[0] if hit else None,
+                    entity_type_id=tinfo["id"] if tinfo else None,
+                    surface_form=name[:500],
+                    span=span,
+                    link_method="alias" if hit else None,
+                    link_confidence=0.95 if hit else None,
+                    link_evidence={"alias": hit[1]} if hit else None,
+                    confidence=confidence,
                 )
-                session.add(new_ent)
-                await session.flush()
-                session.add(
-                    EntityMention(
-                        document_id=document_id,
-                        document_version_id=version.id,
-                        entity_id=new_ent.id,
-                        span={"method": "oneshot"},
-                        confidence=float(ent.get("confidence") or 0.8),
-                    )
-                )
-            mentions_added += 1
-        else:  # review
-            if write:
-                session.add(
-                    EntityProposal(
-                        entity_type_id=tinfo["id"],
-                        canonical_form=name[:500],
-                        proposing_agent="front-matter-oneshot",
-                        reasoning=f"named in {doc.filename}",
-                        evidence_document_id=document_id,
-                        status="pending",
-                    )
-                )
-            proposals_added += 1
+            )
+        mentions_added += 1
+        if not hit:
+            mentions_unlinked += 1
     report["entity_mentions_llm"] = mentions_added
-    report["entity_proposals"] = proposals_added
+    report["entity_mentions_unlinked"] = mentions_unlinked
     report["hallucinations_filtered"] = filtered_out
     report["entity_chunks"] = len(chunks)
     if not write:  # evaluation mode: expose the full extracted set

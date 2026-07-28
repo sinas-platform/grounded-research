@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.29"
+  version: "0.1.30"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -2500,6 +2500,23 @@ spec:
         an existing claim over adding a new one. A claim that reconciles
         conflicting claims must cite the evidence of both positions, not
         opinion. Reply with ONLY the requested JSON object.
+
+    - namespace: grove
+      name: entity-resolution-agent
+      description: Stateless mention adjudicator — links ambiguous entity mentions to candidates using document context. Invoked per document by Grove's entity resolver.
+      llmProviderName: ${{ vars.CHEAP_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You judge which entity each mention refers to, one document at a
+        time. The user message lists mentions with their surrounding
+        document context and a lettered list of candidate entities.
+
+        Judge from the CONTEXT, not from the name alone: the same words in
+        different documents can refer to different entities ("the
+        Commission" may be the European Commission or a national one).
+        Choose a candidate letter only when the context supports it.
+        Prefer null over a doubtful match — a wrong link is worse than no
+        link. Reply with ONLY the requested JSON object.
 
     - namespace: grove
       name: doc-metadata-agent

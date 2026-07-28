@@ -9,12 +9,15 @@ from pydantic import BaseModel, Field
 from app.schemas.common import ORMModel
 
 Stage = Literal[
+    # current stages
+    "oneshot",
+    "relationship_extractor",
+    "dossier_assigner",
+    # legacy names, accepted for back-compat — normalized to "oneshot"
     "classifier",
     "summarizer",
     "property_extractor",
     "entity_extractor",
-    "relationship_extractor",
-    "dossier_assigner",
 ]
 
 
@@ -22,9 +25,16 @@ class RunFilter(BaseModel):
     """How to select documents for the run.
 
     Empty filter = all documents. Combine fields = AND.
+    Unknown fields are REJECTED: a typo'd filter must fail loudly, not
+    silently select the whole corpus (which is what an ignored field
+    plus the empty-filter default would do).
     """
 
+    model_config = {"extra": "forbid"}
+
     document_ids: list[uuid.UUID] | None = None
+    # Cap the selection (applied after all other clauses; ordered by created_at).
+    limit: int | None = None
     document_class_ids: list[uuid.UUID] | None = None
     include_unclassified: bool = False
     # Upper bound on classification_confidence — used to target the "doubtful"

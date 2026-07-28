@@ -25,6 +25,7 @@ from app.services.ingestion_runner import (
     STAGES,
     expand_filter,
     materialize_run,
+    normalize_stages,
     progress as ingestion_progress,
     submit_run,
 )
@@ -56,7 +57,8 @@ async def create_run(
     caller: CallerIdentity = Depends(get_caller),
 ):
     doc_ids = await expand_filter(session, payload.filter)
-    unit_count = len(doc_ids) * len(payload.stages)
+    stages = normalize_stages(list(payload.stages))
+    unit_count = len(doc_ids) * len(stages)
 
     if payload.dry_run:
         return RunCreateOut(
@@ -74,7 +76,7 @@ async def create_run(
 
     run = IngestionRun(
         status="pending",
-        stages=list(payload.stages),
+        stages=stages,
         filter=payload.filter.model_dump(mode="json"),
         total_units=unit_count,
         done_units=0,
@@ -184,7 +186,7 @@ async def reprocess_document(
     """Reprocess a single document — creates a 1-doc ingestion run."""
     run = IngestionRun(
         status="pending",
-        stages=list(payload.stages),
+        stages=stages,
         filter=RunFilter(document_ids=[doc_id]).model_dump(mode="json"),
         total_units=len(payload.stages),
         done_units=0,

@@ -44,18 +44,13 @@ from app.schemas.ingestion import RunFilter
 log = logging.getLogger(__name__)
 
 
-# Per-stage agent assignment.
+# Per-stage assignment. The former classifier/summarizer/property/entity
+# agent stages are replaced by the in-process one-shot path (classify +
+# metadata + verbatim mentions + resolution — see ingestion_oneshot and
+# entity_resolver). Relationship extraction and dossier assignment stay
+# agentic: they need graph context.
 STAGES: dict[str, dict[str, Any]] = {
-    "classifier": {"agent": ("grove", "classifier-agent"), "label": "Classification"},
-    "summarizer": {"agent": ("grove", "summarizer-agent"), "label": "Summarization"},
-    "property_extractor": {
-        "agent": ("grove", "property-extractor-agent"),
-        "label": "Property extraction",
-    },
-    "entity_extractor": {
-        "agent": ("grove", "entity-extractor-agent"),
-        "label": "Entity extraction",
-    },
+    "oneshot": {"label": "Classify + extract + resolve (one-shot)", "inprocess": True},
     "relationship_extractor": {
         "agent": ("grove", "relationship-extractor-agent"),
         "label": "Relationship extraction",
@@ -66,12 +61,27 @@ STAGES: dict[str, dict[str, Any]] = {
     },
 }
 
-# Stages that depend on classifier having assigned a class. When classifier
-# is among the requested stages, these wait until classifier is terminal.
-_CLASSIFIER_DEPENDENT_STAGES = {
-    "summarizer",
-    "property_extractor",
-    "entity_extractor",
+# Old stage names accepted for API back-compat; all collapse to one-shot.
+_STAGE_ALIASES = {
+    "classifier": "oneshot",
+    "summarizer": "oneshot",
+    "property_extractor": "oneshot",
+    "entity_extractor": "oneshot",
+}
+
+
+def normalize_stages(stages: list[str]) -> list[str]:
+    out: list[str] = []
+    for st in stages:
+        st = _STAGE_ALIASES.get(st, st)
+        if st not in out:
+            out.append(st)
+    return out
+
+
+# Stages that depend on the one-shot pass having run (class + entities in
+# place). When oneshot is among the requested stages, these wait for it.
+_ONESHOT_DEPENDENT_STAGES = {
     "relationship_extractor",
     "dossier_assigner",
 }
@@ -92,14 +102,13 @@ _SECONDARY_CLAIMED_KEY = "_secondary_claimed"
 async def _wipe_for_stage(session: AsyncSession, document_id: uuid.UUID, stage: str) -> None:
     """Delete stale auto-extracted artifacts so a rerun doesn't duplicate.
     Manually-authored / locked entries are preserved."""
-    if stage == "property_extractor":
+    if stage == "oneshot":
         await session.execute(
             delete(PropertyValue)
             .where(PropertyValue.document_id == document_id)
             .where(PropertyValue.method == "auto")
             .where(PropertyValue.locked.is_(False))
         )
-    elif stage == "entity_extractor":
         await session.execute(
             delete(EntityMention).where(EntityMention.document_id == document_id)
         )
@@ -129,6 +138,8 @@ async def _select_documents(session: AsyncSession, f: RunFilter) -> list[uuid.UU
         stmt = stmt.where(Document.created_at >= f.created_since)
     if f.created_until:
         stmt = stmt.where(Document.created_at <= f.created_until)
+    if f.limit is not None and f.limit > 0:
+        stmt = stmt.order_by(Document.created_at).limit(f.limit)
     rows = (await session.execute(stmt)).scalars().all()
     return list(rows)
 
@@ -170,29 +181,13 @@ async def materialize_run(session: AsyncSession, run: IngestionRun) -> int:
 # read as orchestration jargon — the classifier replied conversationally ("I have
 # no reprocess function") instead of acting. {d} is filled with the document id.
 _STAGE_MESSAGE: dict[str, str] = {
-    "classifier": (
-        "Classify document {d}. Call get_document_classes, read the document "
-        "content, pick the best-matching class, and call set_document_class."
-    ),
-    "summarizer": (
-        "Summarize document {d}. Read its content and call set_document_summary "
-        "with a concise summary and a toc."
-    ),
-    "property_extractor": (
-        "Extract property values for document {d}. Get its class properties, "
-        "find each value in the content, and call set_property_value."
-    ),
-    "entity_extractor": (
-        "Extract entity mentions from document {d}. Get the entity types for its "
-        "class, then call propose_new_entity and record_entity_mention as needed."
-    ),
     "relationship_extractor": (
-        "Extract relationships explicitly stated in document {d}. Get the "
-        "relationship definitions, then record each via the appropriate ingest op."
+        "Extract relationships for document {d}. Read its content and recorded "
+        "entities, then record the relationships the text supports."
     ),
     "dossier_assigner": (
-        "Assign document {d} to dossiers where it fits. If no dossier classes "
-        "are configured, do nothing."
+        "Assign document {d} to dossiers. Inspect its class, properties and "
+        "entities, then link it to the dossiers it belongs to."
     ),
 }
 
@@ -272,6 +267,57 @@ async def _submit_stage(
     run.sinas_batch_ids = {**(run.sinas_batch_ids or {}), stage: batch_id}
 
 
+
+async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
+    """Execute the one-shot stage in-process: per document, wipe stale
+    artifacts, run classify+extract, then resolve mentions. Unit rows and
+    run counters update per document, so progress is live."""
+    from app.services.entity_resolver import resolve_unlinked
+    from app.services.ingestion_oneshot import oneshot_ingest
+
+    for did in doc_ids:
+        # honor cancellation between documents
+        async with AsyncSessionLocal() as session:
+            run = await session.get(IngestionRun, run_id)
+            if run is None or run.status in ("cancelled", "failed"):
+                log.info("oneshot run %s stopped (status=%s)", run_id,
+                         run.status if run else "gone")
+                return
+        error: str | None = None
+        try:
+            async with AsyncSessionLocal() as session:
+                await _wipe_for_stage(session, did, "oneshot")
+                await session.commit()
+            reports = await oneshot_ingest([did], write=True, concurrency=1)
+            rep = reports[0] if reports else {}
+            if rep.get("error"):
+                error = str(rep["error"])[:500]
+            else:
+                await resolve_unlinked([did], write=True)
+        except Exception as exc:  # noqa: BLE001 — per-doc isolation
+            error = str(exc)[:500]
+        async with AsyncSessionLocal() as session:
+            unit = (
+                await session.execute(
+                    select(IngestionRunUnit)
+                    .where(IngestionRunUnit.run_id == run_id)
+                    .where(IngestionRunUnit.document_id == did)
+                    .where(IngestionRunUnit.stage == "oneshot")
+                )
+            ).scalar_one_or_none()
+            run = await session.get(IngestionRun, run_id)
+            if unit is not None and unit.status == "running":
+                unit.status = "failed" if error else "succeeded"
+                unit.error = error
+                unit.completed_at = datetime.now(timezone.utc)
+                if run is not None:
+                    run.done_units += 1
+                    if error:
+                        run.failed_units += 1
+            await session.commit()
+    await _mark_run_terminal_if_done(run_id)
+
+
 async def submit_run(
     session: AsyncSession, run: IngestionRun, client: SinasClient
 ) -> None:
@@ -302,14 +348,20 @@ async def submit_run(
     run.status = "running"
     run.started_at = datetime.now(timezone.utc)
 
-    has_classifier = "classifier" in by_stage and "classifier" in run.stages
-    if has_classifier:
-        # Phase 1: classifier only. Secondary stages stay pending; their
-        # units sit unchanged in DB. The progress endpoint fires them when
-        # classifier is terminal.
-        await _submit_stage(session, run, "classifier", by_stage["classifier"], client)
+    if "oneshot" in by_stage:
+        # Phase 1: the in-process one-shot pass. Agentic stages
+        # (relationships, dossiers) stay pending; the progress endpoint
+        # fires them when every oneshot unit is terminal.
+        now = datetime.now(timezone.utc)
+        for u in by_stage["oneshot"]:
+            u.status = "running"
+            u.started_at = now
+            u.attempts += 1
+        run.sinas_batch_ids = {**(run.sinas_batch_ids or {}), "oneshot": "inprocess"}
+        doc_ids = [u.document_id for u in by_stage["oneshot"]]
+        asyncio.get_event_loop().create_task(_run_oneshot_inprocess(run.id, doc_ids))
     else:
-        # No classifier in this run — submit everything at once.
+        # No one-shot stage — submit the agentic batches directly.
         for stage, stage_units in by_stage.items():
             if stage in STAGES:
                 await _submit_stage(session, run, stage, stage_units, client)
@@ -457,7 +509,7 @@ async def _submit_secondary_stages(run_id: uuid.UUID, client: SinasClient) -> No
                     select(IngestionRunUnit)
                     .where(IngestionRunUnit.run_id == run_id)
                     .where(IngestionRunUnit.status == "pending")
-                    .where(IngestionRunUnit.stage != "classifier")
+                    .where(IngestionRunUnit.stage != "oneshot")
                     .order_by(IngestionRunUnit.created_at)
                 )
             ).scalars().all()
@@ -509,9 +561,33 @@ async def progress(run: IngestionRun, client: SinasClient) -> dict[str, Any]:
         "stages": {},  # stage_name -> Sinas batch status dict
     }
 
-    # Pull live status for every submitted stage.
+    # Pull live status for every submitted stage. The in-process oneshot
+    # stage has no Sinas batch — its status comes from the unit rows.
+    oneshot_terminal = False
     for stage, batch_id in visible_batches.items():
         if stage not in STAGES:
+            continue
+        if stage == "oneshot":
+            async with AsyncSessionLocal() as s_:
+                counts = dict(
+                    (
+                        await s_.execute(
+                            select(IngestionRunUnit.status, func.count())
+                            .where(IngestionRunUnit.run_id == run.id)
+                            .where(IngestionRunUnit.stage == "oneshot")
+                            .group_by(IngestionRunUnit.status)
+                        )
+                    ).all()
+                )
+            total = sum(counts.values())
+            done = counts.get("succeeded", 0) + counts.get("failed", 0)
+            oneshot_terminal = total > 0 and done == total
+            snapshot["stages"]["oneshot"] = {
+                "status": "completed" if oneshot_terminal else "running",
+                "total": total,
+                "succeeded": counts.get("succeeded", 0),
+                "failed": counts.get("failed", 0),
+            }
             continue
         try:
             status = await asyncio.to_thread(client.batches.get, batch_id)
@@ -522,14 +598,12 @@ async def progress(run: IngestionRun, client: SinasClient) -> dict[str, Any]:
         if status.get("status") in _TERMINAL_BATCH_STATUSES:
             await _reconcile_stage_units(client, run.id, stage, batch_id)
 
-    # If classifier is in stages and just turned terminal, fire secondary stages.
-    classifier_batch_id = visible_batches.get("classifier")
-    if classifier_batch_id is not None:
-        classifier_status = snapshot["stages"].get("classifier", {}).get("status")
-        if classifier_status in _TERMINAL_BATCH_STATUSES:
+    # If oneshot just turned terminal, fire the agentic secondary stages.
+    if oneshot_terminal:
+        if True:
             secondary_pending = any(
                 stage not in visible_batches and stage in run.stages
-                for stage in _CLASSIFIER_DEPENDENT_STAGES
+                for stage in _ONESHOT_DEPENDENT_STAGES
             )
             if secondary_pending:
                 won = await _claim_secondary_submission(run.id)

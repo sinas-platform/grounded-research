@@ -25,9 +25,11 @@ Matching rules (kind is a weak hint; the target_key value-shape decides):
     target entity. Auto only when exactly one entity is reached
     (ambiguous -> park).
   - fuzzy (name / legal_instrument in the default config): trigram against
-    canonical_form of one entity type. Auto only when the top match clears
-    --auto-threshold AND beats the runner-up by --margin (clear top-1);
-    otherwise it drops to a proposal.
+    canonical_form of one entity type. Auto only when the path allows it
+    (auto_resolve) and the top match clears --auto-threshold AND beats the
+    runner-up by --margin (clear top-1); otherwise it drops to a proposal.
+    The default config caps the legal_instrument path at propose: numbered
+    instruments trigram-match on the shared prefix, not the number.
 
 Run inside the grove container:
   docker compose exec grove python -m app.services.citation_resolver            # dry run
@@ -113,11 +115,17 @@ class KindRule:
 @dataclass(frozen=True)
 class FuzzyPath:
     """A fuzzy path label, the entity type its candidates come from, and the
-    method name written to notes/reasoning."""
+    method name written to notes/reasoning.
+
+    auto_resolve=False caps the path at propose: even a match clearing the
+    auto threshold and margin goes to human review. Use it where trigram
+    similarity is known to confuse near-identical forms (numbered legal
+    instruments, versioned titles)."""
 
     label: str
     entity_type: str
     method: str
+    auto_resolve: bool = True
 
 
 @dataclass(frozen=True)
@@ -205,7 +213,13 @@ CONCURRENCES_CONFIG = ResolverConfig(
     ),
     fuzzy_paths=(
         FuzzyPath(label="name", entity_type="Competition Decision / Case", method="fuzzy_name"),
-        FuzzyPath(label="legal_instrument", entity_type="Legal Instrument", method="fuzzy_instrument"),
+        # auto_resolve=False: instrument names differ by number alone
+        # (Regulation 1218/2010 vs 1400/2002, Article 101(3) vs 102
+        # Guidelines) and trigram scores the shared prefix, not the number.
+        # Both false autos observed live were on this path; matches here
+        # always go to review.
+        FuzzyPath(label="legal_instrument", entity_type="Legal Instrument",
+                  method="fuzzy_instrument", auto_resolve=False),
     ),
 )
 
@@ -313,6 +327,9 @@ def build_match_sql(cfg: ResolverConfig) -> str:
         f"             WHEN d.path = {_sql_quote(f.label)} THEN {_sql_quote(f.method)}"
         for f in cfg.fuzzy_paths
     )
+    auto_fuzzy_labels = _in_list(
+        tuple(f.label for f in cfg.fuzzy_paths if f.auto_resolve)
+    )
 
     return rf"""
 WITH parked AS (
@@ -382,7 +399,8 @@ final AS (
         CASE
             WHEN d.target_entity_id IS NULL THEN 'park'
             WHEN d.path IN {id_labels} THEN 'auto'
-            WHEN d.top1 >= :auto AND (d.top1 - d.top2) >= :margin THEN 'auto'
+            WHEN d.path IN {auto_fuzzy_labels}
+                 AND d.top1 >= :auto AND (d.top1 - d.top2) >= :margin THEN 'auto'
             ELSE 'propose'
         END AS decision,
         CASE WHEN d.path IN {id_labels} THEN {cfg.identifier_confidence}
@@ -464,7 +482,10 @@ async def resolve(execute: bool, auto: float, review: float, margin: float,
                     auto_written += 1
 
             elif dec == "propose" and write_proposals:
-                if r["prop_exists"] or key in seen_prop:
+                # rel_exists too: a relationship already satisfying this
+                # citation needs no review, and approving a redundant
+                # proposal would duplicate it.
+                if r["prop_exists"] or r["rel_exists"] or key in seen_prop:
                     skipped_dupe += 1
                     continue
                 seen_prop.add(key)

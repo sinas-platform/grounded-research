@@ -401,7 +401,7 @@ SELECT f.ur_id, f.reldef_id, f.reldef_name, f.source_id, f.evidence_document_id,
             SELECT 1 FROM relationship_proposal rp
             WHERE rp.relationship_definition_id = f.reldef_id
               AND rp.source_id = f.source_id AND rp.target_id = f.target_entity_id
-              AND rp.status = 'pending')) AS prop_exists
+              AND rp.status IN ('pending','rejected'))) AS prop_exists
 FROM final f
 """
 

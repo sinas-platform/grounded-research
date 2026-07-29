@@ -437,6 +437,13 @@ async def resolve(execute: bool, auto: float, review: float, margin: float,
                   config: ResolverConfig = CONCURRENCES_CONFIG) -> dict:
     match_sql = text(build_match_sql(config))
     async with AsyncSessionLocal() as session:
+        if execute:
+            # Serialize concurrent executes: the idempotency flags are read
+            # by the match query, so two simultaneous runs would both pass
+            # them and double-write. Held until commit/rollback.
+            await session.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext('grove-citation-resolver'))")
+            )
         rows = (
             await session.execute(match_sql, {"auto": auto, "review": review, "margin": margin})
         ).mappings().all()

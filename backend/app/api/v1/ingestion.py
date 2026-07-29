@@ -18,6 +18,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
+from app.services import citation_resolver as resolver_defaults
+from app.services.citation_resolver import resolve as run_citation_resolver
 from app.models import (
     Document,
     DocumentVersion,
@@ -553,3 +555,33 @@ async def record_unresolved_relationship(
     await session.commit()
     await session.refresh(row)
     return row
+
+
+class ResolveCitationsIn(BaseModel):
+    dry_run: bool = True
+    auto_threshold: float = resolver_defaults.DEFAULT_AUTO_THRESHOLD
+    review_threshold: float = resolver_defaults.DEFAULT_REVIEW_THRESHOLD
+    margin: float = resolver_defaults.DEFAULT_MARGIN
+    write_proposals: bool = True
+
+
+@router.post(
+    "/resolve-citations",
+    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+)
+async def resolve_citations(payload: ResolveCitationsIn) -> dict:
+    """Run the citation-target resolver over parked unresolved_relationship rows.
+
+    Dry run by default: returns the projected auto / propose / park split
+    without writing. With dry_run=false, promotes unambiguous matches to
+    relationships and medium-confidence matches to pending proposals; proposals
+    are never auto-approved. See services/citation_resolver.py for the
+    matching rules and configuration.
+    """
+    return await run_citation_resolver(
+        execute=not payload.dry_run,
+        auto=payload.auto_threshold,
+        review=payload.review_threshold,
+        margin=payload.margin,
+        write_proposals=payload.write_proposals,
+    )

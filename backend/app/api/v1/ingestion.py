@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -559,10 +559,22 @@ async def record_unresolved_relationship(
 
 class ResolveCitationsIn(BaseModel):
     dry_run: bool = True
-    auto_threshold: float = resolver_defaults.DEFAULT_AUTO_THRESHOLD
-    review_threshold: float = resolver_defaults.DEFAULT_REVIEW_THRESHOLD
-    margin: float = resolver_defaults.DEFAULT_MARGIN
+    auto_threshold: float = Field(
+        default=resolver_defaults.DEFAULT_AUTO_THRESHOLD, ge=0.0, le=1.0
+    )
+    review_threshold: float = Field(
+        default=resolver_defaults.DEFAULT_REVIEW_THRESHOLD, ge=0.0, le=1.0
+    )
+    margin: float = Field(default=resolver_defaults.DEFAULT_MARGIN, ge=0.0, le=1.0)
     write_proposals: bool = True
+
+    @model_validator(mode="after")
+    def _review_not_above_auto(self):
+        # review > auto would hand the auto tier rows the review tier was
+        # meant to hold back; reject the combination outright.
+        if self.review_threshold > self.auto_threshold:
+            raise ValueError("review_threshold must not exceed auto_threshold")
+        return self
 
 
 @router.post(

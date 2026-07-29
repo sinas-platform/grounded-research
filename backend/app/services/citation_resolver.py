@@ -14,7 +14,7 @@ as pending proposals and are NOT auto-approved.
 Matching rules (kind is a weak hint; the target_key value-shape decides):
   - identifier (ecli / celex / case_number): exact value -> property_value ->
     document -> is_full_text_of -> decision entity. Auto only when exactly one
-    entity is reached (ambiguous -> proposal).
+    entity is reached (ambiguous -> park).
   - fuzzy (name -> Competition Decision / Case, legal_instrument -> Legal
     Instrument): trigram against canonical_form. Auto only when the top match
     clears --auto-threshold AND beats the runner-up by --margin (clear top-1);

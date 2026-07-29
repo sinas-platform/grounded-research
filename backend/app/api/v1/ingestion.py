@@ -18,7 +18,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
-from app.services import citation_resolver as resolver_defaults
+from app.services.citation_resolver import (
+    DEFAULT_AUTO_THRESHOLD,
+    DEFAULT_MARGIN,
+    DEFAULT_REVIEW_THRESHOLD,
+    build_match_sql,
+    config_from_dict,
+)
 from app.services.citation_resolver import resolve as run_citation_resolver
 from app.models import (
     Document,
@@ -558,14 +564,14 @@ async def record_unresolved_relationship(
 
 
 class ResolveCitationsIn(BaseModel):
+    # The deployment's ResolverConfig as a plain dict; the engine stores no
+    # domain config, so every call carries its own (config_from_dict defines
+    # the shape).
+    config: dict
     dry_run: bool = True
-    auto_threshold: float = Field(
-        default=resolver_defaults.DEFAULT_AUTO_THRESHOLD, ge=0.0, le=1.0
-    )
-    review_threshold: float = Field(
-        default=resolver_defaults.DEFAULT_REVIEW_THRESHOLD, ge=0.0, le=1.0
-    )
-    margin: float = Field(default=resolver_defaults.DEFAULT_MARGIN, ge=0.0, le=1.0)
+    auto_threshold: float = Field(default=DEFAULT_AUTO_THRESHOLD, ge=0.0, le=1.0)
+    review_threshold: float = Field(default=DEFAULT_REVIEW_THRESHOLD, ge=0.0, le=1.0)
+    margin: float = Field(default=DEFAULT_MARGIN, ge=0.0, le=1.0)
     write_proposals: bool = True
 
     @model_validator(mode="after")
@@ -587,13 +593,19 @@ async def resolve_citations(payload: ResolveCitationsIn) -> dict:
     Dry run by default: returns the projected auto / propose / park split
     without writing. With dry_run=false, promotes unambiguous matches to
     relationships and medium-confidence matches to pending proposals; proposals
-    are never auto-approved. See services/citation_resolver.py for the
-    matching rules and configuration.
+    are never auto-approved. The resolver config arrives in the body; see
+    services/citation_resolver.py for the matching rules and the dict shape.
     """
+    try:
+        cfg = config_from_dict(payload.config)
+        build_match_sql(cfg)  # surface config errors as 422 before any DB work
+    except ValueError as e:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(e))
     return await run_citation_resolver(
         execute=not payload.dry_run,
         auto=payload.auto_threshold,
         review=payload.review_threshold,
         margin=payload.margin,
         write_proposals=payload.write_proposals,
+        config=cfg,
     )

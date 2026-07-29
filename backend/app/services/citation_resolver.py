@@ -6,13 +6,14 @@ review), by matching each target_key against in-corpus identifiers (document
 properties reached through a bridge relationship) and entity canonical_forms
 (trigram).
 
-The engine is domain-agnostic: it classifies each target_key with an ordered
-rule list, canonicalizes both sides with named string transforms, and matches
-either exactly (identifier rules) or by trigram with a top-2 margin guard
-(fuzzy paths). Which relationships it sweeps, which identifier shapes exist,
-which entity types the fuzzy paths search, and the kind-hint vocabularies are
-all configuration; CONCURRENCES_CONFIG below carries the deployment defaults,
-the same way CLASS_RULES does in ingestion_oneshot.
+The engine is domain-agnostic and holds no deployment values. Which
+relationships it sweeps, which identifier families exist (a DOI, a docket
+number, a report code: each is a label, classifier patterns, canonicalization
+transforms and the document property that stores it), which entity types the
+fuzzy paths search, and the kind-hint vocabularies all arrive as a
+ResolverConfig. The deployment owns that config and supplies it to resolve(),
+to the API endpoint in the request body, or to the CLI as a JSON file
+(config_from_dict defines the shape).
 
 Read-only by default: prints the projected resolve / propose / park split and
 exits without writing. Pass --execute to write. Even with --execute, only
@@ -20,27 +21,27 @@ high-confidence auto-resolves become relationships; medium matches are written
 as pending proposals and are NOT auto-approved.
 
 Matching rules (kind is a weak hint; the target_key value-shape decides):
-  - identifier (ecli / celex / case_number in the default config): exact
-    canonical value -> property_value -> document -> bridge relationship ->
-    target entity. Auto only when exactly one entity is reached
-    (ambiguous -> park).
-  - fuzzy (name / legal_instrument in the default config): trigram against
-    canonical_form of one entity type. Auto only when the path allows it
-    (auto_resolve) and the top match clears --auto-threshold AND beats the
-    runner-up by --margin (clear top-1); otherwise it drops to a proposal.
-    The default config caps the legal_instrument path at propose: numbered
-    instruments trigram-match on the shared prefix, not the number.
+  - identifier: exact canonical value -> property_value -> document -> bridge
+    relationship -> target entity. Auto only when exactly one entity is
+    reached (ambiguous -> park).
+  - fuzzy: trigram against canonical_form of one entity type. Auto only when
+    the path allows it (auto_resolve) and the top match clears
+    --auto-threshold AND beats the runner-up by --margin (clear top-1);
+    otherwise it drops to a proposal. Cap a path at propose where titles
+    differ only by a number and trigram scores the shared prefix.
 
 Run inside the grove container:
-  docker compose exec grove python -m app.services.citation_resolver            # dry run
-  docker compose exec grove python -m app.services.citation_resolver --execute  # write
+  python -m app.services.citation_resolver --config cfg.json            # dry run
+  python -m app.services.citation_resolver --config cfg.json --execute  # write
 
-Or over the API: POST /api/v1/ingestion/resolve-citations (dry run by default).
+Or over the API: POST /api/v1/ingestion/resolve-citations (config in the
+body, dry run by default).
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -48,7 +49,7 @@ DEFAULT_AUTO_THRESHOLD = 0.55
 DEFAULT_REVIEW_THRESHOLD = 0.40
 DEFAULT_MARGIN = 0.08
 
-# ── configuration (pure stdlib; importable without app context) ──────────────
+# ── configuration types (pure stdlib; importable without app context) ────────
 
 
 def _sql_quote(s: str) -> str:
@@ -104,7 +105,8 @@ class KindRule:
     """One fuzzy-classification arm, evaluated in order after the identifier
     rules: route a target_key to `path` when the raw key matches `key_regex`
     (case-insensitive), or its target_key_kind is in `kinds`, or matches
-    `kind_regex`. Path 'non_resolvable' is a terminal park bucket."""
+    `kind_regex`. A path no fuzzy path or identifier rule claims is a
+    terminal park bucket."""
 
     path: str
     key_regex: str | None = None
@@ -119,8 +121,8 @@ class FuzzyPath:
 
     auto_resolve=False caps the path at propose: even a match clearing the
     auto threshold and margin goes to human review. Use it where trigram
-    similarity is known to confuse near-identical forms (numbered legal
-    instruments, versioned titles)."""
+    similarity is known to confuse near-identical forms (numbered or
+    versioned titles that differ only in the number)."""
 
     label: str
     entity_type: str
@@ -140,88 +142,49 @@ class ResolverConfig:
     proposing_agent: str = "citation-resolver"
 
 
-# Deployment defaults for the Concurrences corpus. The identifier rules are
-# EU-legal shapes (ECLI, CELEX, EC and EU-court case numbers). The kind-hint
-# vocabularies in kind_rules and the case-name regex are coupled to what the
-# Concurrences extraction agents emit as target_key_kind: they are deployment
-# config, not engine behavior, and another corpus needs its own lists.
-CONCURRENCES_CONFIG = ResolverConfig(
-    citation_reldefs=("cites", "cites_legal_instrument"),
-    reldef_path_overrides={"cites_legal_instrument": "legal_instrument"},
-    bridge_reldefs=("is_full_text_of", "is_full_text_of_court"),
-    identifier_rules=(
-        IdentifierRule(
-            label="ecli",
-            patterns=(r"^ECLI:[A-Z]{2}:[A-Z]{1,2}:[0-9]{4}:[0-9]+$",),
-            classify_transforms=("trim", "uppercase"),
-            key_transforms=("trim", "uppercase"),
-            value_transforms=("trim", "uppercase"),
-            malformed_pattern=r"^ECLI:",
-        ),
-        IdentifierRule(
-            label="celex",
-            patterns=(r"^[0-9]{5}[A-Z][0-9A-Z]+$",),
-            classify_transforms=("trim", "strip_spaces", "uppercase"),
-            key_transforms=("trim", "strip_spaces", "uppercase"),
-            value_transforms=("trim", "strip_spaces", "uppercase"),
-        ),
-        IdentifierRule(
-            label="case_number",
-            patterns=(
-                r"^(COMP/)?M\.[0-9]+",
-                r"^AT\.[0-9]+",
-                r"^COMP/[0-9]",
-                r"^[TC]-[0-9]+/[0-9]+",
+def config_from_dict(d: dict) -> ResolverConfig:
+    """Build a ResolverConfig from its plain-dict form (the JSON shape used
+    by the CLI --config file and the API request body). Raises ValueError on
+    a missing or misshapen field."""
+    try:
+        return ResolverConfig(
+            citation_reldefs=tuple(d["citation_reldefs"]),
+            reldef_path_overrides=dict(d.get("reldef_path_overrides") or {}),
+            bridge_reldefs=tuple(d.get("bridge_reldefs") or ()),
+            identifier_rules=tuple(
+                IdentifierRule(
+                    label=r["label"],
+                    patterns=tuple(r["patterns"]),
+                    classify_transforms=tuple(r["classify_transforms"]),
+                    key_transforms=tuple(r["key_transforms"]),
+                    value_transforms=tuple(r["value_transforms"]),
+                    malformed_pattern=r.get("malformed_pattern"),
+                )
+                for r in d.get("identifier_rules") or ()
             ),
-            classify_transforms=("trim", "uppercase"),
-            key_transforms=("trim", "strip_prefix:^COMP/", "uppercase"),
-            value_transforms=("trim", "uppercase"),
-        ),
-    ),
-    kind_rules=(
-        KindRule(
-            path="name",
-            key_regex=r"( v\.? | versus |^in re|^re:)",
-            kinds=("case_name", "case_citation", "merger_name"),
-        ),
-        KindRule(
-            path="legal_instrument",
-            kinds=(
-                "legal_instrument", "regulation", "directive", "notice", "statute",
-                "treaty", "law", "royal_decree", "guideline", "guidelines", "regulation_id",
-                "directive_number", "regulation_number", "legal_provision", "national_law",
-                "tfeu_article", "treaty_article", "convention", "communication", "recommendation",
-                "charter", "commission_notice", "international_agreement", "international_convention",
-                "spanish_law_id", "official_journal", "legal_article", "legal_instrument_name",
+            kind_rules=tuple(
+                KindRule(
+                    path=k["path"],
+                    key_regex=k.get("key_regex"),
+                    kinds=tuple(k.get("kinds") or ()),
+                    kind_regex=k.get("kind_regex"),
+                )
+                for k in d.get("kind_rules") or ()
             ),
-        ),
-        KindRule(
-            path="non_resolvable",
-            kinds=(
-                "work", "academic_work", "press_release", "eu_press_release", "game_title",
-                "report", "publication", "working_paper", "us_reporter", "oecd_cartel", "antitrust_opinion",
-                "scientific_authority", "scientific_committee", "expert_group", "expert_committee", "policy",
-                "principle", "standard", "organization_name", "company", "company_name", "undertaking",
-                "authority", "competition_authority", "court_name", "entity_name", "country", "ftc_report",
-                "ftc_opinion", "legislative_report", "report_reference",
+            fuzzy_paths=tuple(
+                FuzzyPath(
+                    label=f["label"],
+                    entity_type=f["entity_type"],
+                    method=f["method"],
+                    auto_resolve=bool(f.get("auto_resolve", True)),
+                )
+                for f in d.get("fuzzy_paths") or ()
             ),
-        ),
-        KindRule(
-            path="name",
-            kind_regex=r"(case|decision|merger|competition_case|nca_case|administrative_proceeding)",
-        ),
-    ),
-    fuzzy_paths=(
-        FuzzyPath(label="name", entity_type="Competition Decision / Case", method="fuzzy_name"),
-        # auto_resolve=False: instrument names differ by number alone
-        # (Regulation 1218/2010 vs 1400/2002, Article 101(3) vs 102
-        # Guidelines) and trigram scores the shared prefix, not the number.
-        # Both false autos observed live were on this path; matches here
-        # always go to review.
-        FuzzyPath(label="legal_instrument", entity_type="Legal Instrument",
-                  method="fuzzy_instrument", auto_resolve=False),
-    ),
-)
+            identifier_confidence=float(d.get("identifier_confidence", 0.98)),
+            proposing_agent=str(d.get("proposing_agent", "citation-resolver")),
+        )
+    except (KeyError, TypeError) as e:
+        raise ValueError(f"invalid resolver config: {e}") from e
 
 
 def _in_list(values: tuple[str, ...]) -> str:
@@ -433,8 +396,12 @@ from app.models import Relationship, RelationshipProposal, UnresolvedRelationshi
 
 
 async def resolve(execute: bool, auto: float, review: float, margin: float,
-                  write_proposals: bool,
-                  config: ResolverConfig = CONCURRENCES_CONFIG) -> dict:
+                  write_proposals: bool, config: ResolverConfig) -> dict:
+    if config is None:
+        raise ValueError(
+            "resolve() requires a ResolverConfig; the engine ships no "
+            "deployment defaults"
+        )
     match_sql = text(build_match_sql(config))
     async with AsyncSessionLocal() as session:
         if execute:
@@ -548,6 +515,8 @@ def _print(report: dict, auto: float, review: float, margin: float) -> None:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Citation-target resolver.")
+    ap.add_argument("--config", required=True,
+                    help="path to a ResolverConfig JSON file (see config_from_dict)")
     ap.add_argument("--execute", action="store_true",
                     help="write changes (default: dry run, read-only)")
     ap.add_argument("--auto-threshold", type=float, default=DEFAULT_AUTO_THRESHOLD)
@@ -558,12 +527,16 @@ def main() -> None:
                     help="with --execute, promote autos only and do not write proposals")
     args = ap.parse_args()
 
+    with open(args.config, encoding="utf-8") as fh:
+        config = config_from_dict(json.load(fh))
+
     report = asyncio.run(resolve(
         execute=args.execute,
         auto=args.auto_threshold,
         review=args.review_threshold,
         margin=args.margin,
         write_proposals=not args.no_proposals,
+        config=config,
     ))
     _print(report, args.auto_threshold, args.review_threshold, args.margin)
 

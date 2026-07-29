@@ -1,16 +1,16 @@
 """Tests for the citation-target resolver.
 
-Pure tests (no DB): the golden generated SQL, config validation, the endpoint
-model bounds, and the config-level cap on instrument fuzzy autos.
-
-DB tests (skipped when no database is reachable): decision semantics and the
-false-auto regressions, run against self-contained fixtures created inside a
-transaction that is always rolled back. They use their own ResolverConfig with
-t877-prefixed names, so they do not depend on any deployment configuration.
+Pure tests (no DB): the golden generated SQL for a neutral test config,
+config validation, and the endpoint model bounds. DB tests (skipped when no
+database is reachable): decision semantics and the false-auto regressions,
+run against self-contained fixtures created inside a transaction that is
+always rolled back. Everything here uses t877-prefixed neutral names; the
+engine carries no deployment config and neither do these tests.
 
 Run from the backend directory: `python -m pytest tests/test_citation_resolver.py`
 """
 
+import dataclasses
 import re
 import uuid
 from pathlib import Path
@@ -20,32 +20,15 @@ from pydantic import ValidationError
 from sqlalchemy import text
 
 from app.services.citation_resolver import (
-    CONCURRENCES_CONFIG,
     FuzzyPath,
     IdentifierRule,
     KindRule,
     ResolverConfig,
     build_match_sql,
+    config_from_dict,
 )
 
 PARAMS = {"auto": 0.55, "review": 0.40, "margin": 0.08}
-
-
-def _norm(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
-
-
-# ── pure: golden SQL ─────────────────────────────────────────────────────────
-
-
-def test_default_config_matches_golden_sql():
-    golden = (Path(__file__).parent / "golden_citation_resolver.sql").read_text(
-        encoding="utf-8"
-    )
-    assert _norm(build_match_sql(CONCURRENCES_CONFIG)) == _norm(golden)
-
-
-# ── pure: config validation ──────────────────────────────────────────────────
 
 
 def _id_rule(label="t877_id", patterns=(r"^T877-[0-9]+$",)):
@@ -56,6 +39,43 @@ def _id_rule(label="t877_id", patterns=(r"^T877-[0-9]+$",)):
         key_transforms=("trim", "uppercase"),
         value_transforms=("trim", "uppercase"),
     )
+
+
+def _t877_config(instrument_auto: bool) -> ResolverConfig:
+    return ResolverConfig(
+        citation_reldefs=("t877_refs", "t877_cli"),
+        reldef_path_overrides={"t877_cli": "legal_instrument"},
+        bridge_reldefs=("t877_full_text_of",),
+        identifier_rules=(_id_rule(),),
+        kind_rules=(KindRule(path="name", kinds=("t877_name",)),),
+        fuzzy_paths=(
+            FuzzyPath(label="name", entity_type="T877 Type", method="fuzzy_name"),
+            FuzzyPath(label="legal_instrument", entity_type="T877 Instrument",
+                      method="fuzzy_instrument", auto_resolve=instrument_auto),
+        ),
+    )
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", " ", s).strip()
+
+
+# ── pure: golden SQL ─────────────────────────────────────────────────────────
+
+
+def test_generated_sql_matches_golden():
+    golden = (Path(__file__).parent / "golden_citation_resolver.sql").read_text(
+        encoding="utf-8"
+    )
+    assert _norm(build_match_sql(_t877_config(instrument_auto=False))) == _norm(golden)
+
+
+def test_config_round_trips_through_dict():
+    cfg = _t877_config(instrument_auto=False)
+    assert config_from_dict(dataclasses.asdict(cfg)) == cfg
+
+
+# ── pure: config validation ──────────────────────────────────────────────────
 
 
 def test_empty_citation_reldefs_raises():
@@ -97,27 +117,25 @@ def test_minimal_identifier_only_config_builds():
     assert "WITH parked" in sql and "IN ()" not in sql
 
 
-# ── pure: the instrument cap stays in the default config ─────────────────────
+# ── pure: endpoint model ─────────────────────────────────────────────────────
 
 
-def test_default_config_caps_instrument_autos():
-    instrument = [f for f in CONCURRENCES_CONFIG.fuzzy_paths if f.label == "legal_instrument"]
-    assert instrument and instrument[0].auto_resolve is False
-
-
-# ── pure: endpoint model bounds ──────────────────────────────────────────────
+def _cfg_dict() -> dict:
+    return dataclasses.asdict(_t877_config(instrument_auto=False))
 
 
 def test_endpoint_thresholds_bounded():
     from app.api.v1.ingestion import ResolveCitationsIn
 
-    assert ResolveCitationsIn().dry_run is True
+    assert ResolveCitationsIn(config=_cfg_dict()).dry_run is True
     with pytest.raises(ValidationError):
-        ResolveCitationsIn(margin=-0.1)
+        ResolveCitationsIn(config=_cfg_dict(), margin=-0.1)
     with pytest.raises(ValidationError):
-        ResolveCitationsIn(auto_threshold=1.5)
+        ResolveCitationsIn(config=_cfg_dict(), auto_threshold=1.5)
     with pytest.raises(ValidationError):
-        ResolveCitationsIn(auto_threshold=0.5, review_threshold=0.9)
+        ResolveCitationsIn(config=_cfg_dict(), auto_threshold=0.5, review_threshold=0.9)
+    with pytest.raises(ValidationError):
+        ResolveCitationsIn()  # config is required
 
 
 def test_endpoint_has_permission_dependency():
@@ -125,6 +143,17 @@ def test_endpoint_has_permission_dependency():
 
     route = next(r for r in router.routes if r.path.endswith("/resolve-citations"))
     assert route.dependencies
+
+
+@pytest.mark.asyncio
+async def test_endpoint_rejects_invalid_config():
+    from fastapi import HTTPException
+
+    import app.api.v1.ingestion as ing
+
+    with pytest.raises(HTTPException) as exc:
+        await ing.resolve_citations(ing.ResolveCitationsIn(config={"citation_reldefs": []}))
+    assert exc.value.status_code == 422
 
 
 @pytest.mark.asyncio
@@ -138,8 +167,9 @@ async def test_endpoint_default_body_is_dry_run(monkeypatch):
         return {"executed": kwargs["execute"]}
 
     monkeypatch.setattr(ing, "run_citation_resolver", _fake_resolver)
-    out = await ing.resolve_citations(ing.ResolveCitationsIn())
+    out = await ing.resolve_citations(ing.ResolveCitationsIn(config=_cfg_dict()))
     assert captured["execute"] is False and out == {"executed": False}
+    assert captured["config"] == _t877_config(instrument_auto=False)
 
 
 # ── DB tests: fixtures in a rolled-back transaction ──────────────────────────
@@ -161,7 +191,7 @@ async def _insert_universe(session):
     ids = {k: uuid.uuid4() for k in (
         "et", "et_instr", "dc", "prop", "d1", "d2", "e1", "e2", "e3", "e4",
         "bridge", "refs", "cli", "ur_ambig", "ur_none", "ur_tie",
-        "ur_g101", "ur_r1218", "owner",
+        "ur_handbook", "ur_reg", "owner",
     )}
     x = session.execute
 
@@ -184,10 +214,13 @@ async def _insert_universe(session):
                       ("e3", "Tie Target Alpha", "et"), ("e4", "Tie Target Alpha", "et")):
         await x(text("INSERT INTO entity (id, entity_type_id, canonical_form) "
                      "VALUES (:i, :t, :c)"), {"i": ids[e], "t": ids[et], "c": cf})
-    for cf in ("Draft Article 102 Guidelines",
-               "Guidelines on the application of Article 101(3) TFEU",
-               "Commission Regulation 1400/2002",
-               "Commission Regulation (EC) No 802/2004"):
+    # the false-auto shape: candidates share a long prefix with the key and
+    # differ only in the number; the runner-up is distant so the margin gate
+    # alone would not stop an auto
+    for cf in ("Draft Section 102 Handbook",
+               "Handbook on the application of Section 101(3)",
+               "Common Framework Regulation 1400/2002",
+               "Interim Notice 77/2001"):
         await x(text("INSERT INTO entity (id, entity_type_id, canonical_form) "
                      "VALUES (:i, :t, :c)"),
                 {"i": uuid.uuid4(), "t": ids["et_instr"], "c": cf})
@@ -206,8 +239,8 @@ async def _insert_universe(session):
         ("ur_ambig", "refs", "T877-0001", None),
         ("ur_none", "refs", "T877-0002", None),
         ("ur_tie", "refs", "Tie Target Alpha", "t877_name"),
-        ("ur_g101", "cli", "Article 101(3) Guidelines", "guidelines"),
-        ("ur_r1218", "cli", "Commission Regulation 1218/2010", "regulation"),
+        ("ur_handbook", "cli", "Section 101(3) Handbook", "handbook"),
+        ("ur_reg", "cli", "Common Framework Regulation 1218/2010", "framework"),
     )
     for key, rd, tk, kind in rows:
         await x(text("INSERT INTO unresolved_relationship "
@@ -215,21 +248,6 @@ async def _insert_universe(session):
                      "VALUES (:i, :rd, :s, :tk, :k, 'unresolved')"),
                 {"i": ids[key], "rd": ids[rd], "s": uuid.uuid4(), "tk": tk, "k": kind})
     return ids
-
-
-def _t877_config(instrument_auto: bool) -> ResolverConfig:
-    return ResolverConfig(
-        citation_reldefs=("t877_refs", "t877_cli"),
-        reldef_path_overrides={"t877_cli": "legal_instrument"},
-        bridge_reldefs=("t877_full_text_of",),
-        identifier_rules=(_id_rule(),),
-        kind_rules=(KindRule(path="name", kinds=("t877_name",)),),
-        fuzzy_paths=(
-            FuzzyPath(label="name", entity_type="T877 Type", method="fuzzy_name"),
-            FuzzyPath(label="legal_instrument", entity_type="T877 Instrument",
-                      method="fuzzy_instrument", auto_resolve=instrument_auto),
-        ),
-    )
 
 
 async def _decisions(session, cfg):
@@ -257,12 +275,12 @@ async def test_decision_semantics_and_false_auto_regression():
         assert tie["decision"] == "propose"  # top1 == top2, margin gate holds
         assert tie["target_entity_id"] is not None
 
-        # the two live false autos must never auto again
-        for key in ("ur_g101", "ur_r1218"):
+        # the false-auto shape must never auto on a capped path
+        for key in ("ur_handbook", "ur_reg"):
             row = by_id[str(ids[key])]
             assert row["decision"] != "auto", row["path"]
 
-        # every propose verdict carries a concrete target (5.1.2 regression)
+        # every propose verdict carries a concrete target
         for row in by_id.values():
             if row["decision"] == "propose":
                 assert row["target_entity_id"] is not None
@@ -272,7 +290,7 @@ async def test_decision_semantics_and_false_auto_regression():
         by_id_open = await _decisions(session, _t877_config(instrument_auto=True))
         reproduced = [
             by_id_open[str(ids[k])]["decision"] == "auto"
-            for k in ("ur_g101", "ur_r1218")
+            for k in ("ur_handbook", "ur_reg")
         ]
         assert any(reproduced)
     finally:

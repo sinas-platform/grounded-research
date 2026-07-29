@@ -211,6 +211,10 @@ CONCURRENCES_CONFIG = ResolverConfig(
 
 
 def _in_list(values: tuple[str, ...]) -> str:
+    # (NULL) is valid SQL that matches nothing, so an empty optional set
+    # degrades to a never-true clause instead of an IN () syntax error.
+    if not values:
+        return "(NULL)"
     return "(" + ",".join(_sql_quote(v) for v in values) + ")"
 
 
@@ -219,6 +223,18 @@ def build_match_sql(cfg: ResolverConfig) -> str:
     classify each parked key, canonicalize, match (exact identifier via the
     property/bridge hop, fuzzy via trigram top-2), decide auto/propose/park,
     and flag rows whose relationship or pending proposal already exists."""
+    if not cfg.citation_reldefs:
+        raise ValueError("ResolverConfig.citation_reldefs is empty: nothing to sweep")
+    if not cfg.identifier_rules and not cfg.fuzzy_paths:
+        raise ValueError(
+            "ResolverConfig needs at least one identifier rule or fuzzy path"
+        )
+    if cfg.identifier_rules and not cfg.bridge_reldefs:
+        raise ValueError(
+            "ResolverConfig.bridge_reldefs is empty: the identifier path "
+            "resolves through a bridge relationship"
+        )
+
     # classification arms, in order: reldef overrides, identifier rules
     # (each optionally followed by its malformed arm), kind rules.
     arms: list[str] = []
@@ -250,26 +266,49 @@ def build_match_sql(cfg: ResolverConfig) -> str:
             "            WHEN " + "\n              OR ".join(tests)
             + f" THEN {_sql_quote(kr.path)}"
         )
-    classify_arms = "\n".join(arms)
+    if arms:
+        path_expr = (
+            "CASE\n" + "\n".join(arms) + "\n            ELSE 'unclassified'\n        END AS path"
+        )
+    else:
+        # no overrides, no identifier rules, no kind rules: nothing routes,
+        # every row parks as unclassified
+        path_expr = "'unclassified' AS path"
 
     id_labels = _in_list(tuple(r.label for r in cfg.identifier_rules))
     fuzzy_labels = _in_list(tuple(f.label for f in cfg.fuzzy_paths))
 
-    key_norm_arms = "\n".join(
-        f"            WHEN {_sql_quote(r.label)} THEN {_apply('c.tk', r.key_transforms)}"
-        for r in cfg.identifier_rules
-    )
-    value_expr = "pv.value->>'_'"
-    value_norm_arms = "\n                  ".join(
-        f"WHEN {_sql_quote(r.label)} THEN {_apply(value_expr, r.value_transforms)}"
-        for r in cfg.identifier_rules
-    )
-    fuzzy_type_arms = "\n".join(
-        f"        CASE WHEN c.path = {_sql_quote(f.label)} THEN {_sql_quote(f.entity_type)}"
-        if i == 0
-        else f"             WHEN c.path = {_sql_quote(f.label)} THEN {_sql_quote(f.entity_type)}"
-        for i, f in enumerate(cfg.fuzzy_paths)
-    )
+    if cfg.identifier_rules:
+        key_norm_arms = "\n".join(
+            f"            WHEN {_sql_quote(r.label)} THEN {_apply('c.tk', r.key_transforms)}"
+            for r in cfg.identifier_rules
+        )
+        id_norm_expr = (
+            "CASE c.path\n" + key_norm_arms + "\n            ELSE NULL\n        END AS id_norm"
+        )
+        value_expr = "pv.value->>'_'"
+        value_norm_arms = "\n                  ".join(
+            f"WHEN {_sql_quote(r.label)} THEN {_apply(value_expr, r.value_transforms)}"
+            for r in cfg.identifier_rules
+        )
+        value_match_clause = (
+            "WHERE (CASE n.path\n                  " + value_norm_arms
+            + "\n               END) = n.id_norm"
+        )
+    else:
+        id_norm_expr = "NULL::text AS id_norm"
+        value_match_clause = "WHERE FALSE"
+
+    if cfg.fuzzy_paths:
+        fuzzy_type_arms = "\n".join(
+            f"        CASE WHEN c.path = {_sql_quote(f.label)} THEN {_sql_quote(f.entity_type)}"
+            if i == 0
+            else f"             WHEN c.path = {_sql_quote(f.label)} THEN {_sql_quote(f.entity_type)}"
+            for i, f in enumerate(cfg.fuzzy_paths)
+        )
+        fuzzy_type_expr = fuzzy_type_arms + "\n             ELSE NULL END AS fuzzy_type"
+    else:
+        fuzzy_type_expr = "        NULL::text AS fuzzy_type"
     method_arms = "\n".join(
         f"             WHEN d.path = {_sql_quote(f.label)} THEN {_sql_quote(f.method)}"
         for f in cfg.fuzzy_paths
@@ -287,20 +326,13 @@ WITH parked AS (
 ),
 classified AS (
     SELECT p.*,
-        CASE
-{classify_arms}
-            ELSE 'unclassified'
-        END AS path
+        {path_expr}
     FROM parked p
 ),
 norm AS (
     SELECT c.*,
-        CASE c.path
-{key_norm_arms}
-            ELSE NULL
-        END AS id_norm,
-{fuzzy_type_arms}
-             ELSE NULL END AS fuzzy_type,
+        {id_norm_expr},
+{fuzzy_type_expr},
         lower(regexp_replace(trim(c.tk),'\s+',' ','g')) AS fuzzy_key
     FROM classified c
 ),
@@ -314,9 +346,7 @@ matched AS (
         JOIN relationship r ON r.source_id = pv.document_id
         JOIN relationship_definition rd2 ON rd2.id = r.relationship_definition_id
              AND rd2.name IN {_in_list(cfg.bridge_reldefs)}
-        WHERE (CASE n.path
-                  {value_norm_arms}
-               END) = n.id_norm
+        {value_match_clause}
     ) idm ON n.path IN {id_labels}
     LEFT JOIN LATERAL (
         SELECT array_agg(x.eid ORDER BY x.sim DESC) AS eids,

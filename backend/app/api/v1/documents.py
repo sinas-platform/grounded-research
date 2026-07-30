@@ -230,6 +230,10 @@ async def read_document_content(
     if dv.content_md is None:
         return {
             "document_id": doc_id,
+            # The version's UUID, not just its number: writers that reference
+            # this exact version (mentions, property values) need the id, and
+            # this response is the only place a reading agent can get it.
+            "document_version_id": dv.id,
             "version": version,
             "line_from": None,
             "line_to": None,
@@ -281,6 +285,8 @@ async def read_document_content(
 
     return {
         "document_id": doc_id,
+        # See the empty-content branch: the UUID a writer must reference.
+        "document_version_id": dv.id,
         "version": version,
         "line_from": actual_start_1,
         "line_to": actual_end_1,

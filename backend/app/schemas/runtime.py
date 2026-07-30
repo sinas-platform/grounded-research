@@ -213,6 +213,16 @@ class ResultDocumentOut(TimestampedOut):
     summary: str | None = None
 
 
+class ResultDocumentCompactOut(BaseModel):
+    """Minimal projection of an attached document, for size-sensitive readers
+    (an agent paging through a large result): identity and ordering only."""
+
+    document_id: uuid.UUID
+    filename: str | None = None
+    document_class_name: str | None = None
+    rank: int | None = None
+
+
 class AnswerOut(OwnedOut):
     source_result_id: uuid.UUID | None = None
     source_dossier_id: uuid.UUID | None = None

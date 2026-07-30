@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,7 +15,7 @@ from app.models import Document, DocumentClass, Result, ResultDocument, ResultTr
 from app.services.introspect import SUMMARY_PREVIEW_CHARS
 from app.services.result_filter import load_visible_result
 from app.schemas.common import TraceOut
-from app.schemas.runtime import ResultDocumentOut, ResultOut
+from app.schemas.runtime import ResultDocumentCompactOut, ResultDocumentOut, ResultOut
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/results", tags=["results"])
@@ -47,30 +48,55 @@ async def get_result(
     return await load_visible_result(session, caller, result_id, for_write=False)
 
 
-@router.get("/{result_id}/documents", response_model=list[ResultDocumentOut])
+@router.get(
+    "/{result_id}/documents",
+    response_model=list[ResultDocumentOut] | list[ResultDocumentCompactOut],
+)
 async def get_result_documents(
     result_id: uuid.UUID,
+    limit: Annotated[int | None, Query(ge=1, le=200)] = None,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    compact: bool = False,
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
     await load_visible_result(session, caller, result_id, for_write=False)
     """Attached documents with identifying fields joined in (filename, class
     name, summary preview), so a reader doesn't need a get_document call per
-    row to learn what each attachment is."""
-    rows = (
-        await session.execute(
-            select(
-                ResultDocument,
-                Document.filename,
-                DocumentClass.name,
-                func.left(Document.summary, SUMMARY_PREVIEW_CHARS),
-            )
-            .join(Document, Document.id == ResultDocument.document_id)
-            .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
-            .where(ResultDocument.result_id == result_id)
-            .order_by(ResultDocument.rank.nulls_last())
+    row to learn what each attachment is.
+
+    Defaults return the full rows, unpaged, as before. `limit`/`offset` page
+    through large results (ordered by rank, then id, so pages are stable);
+    `compact=true` returns only the identity fields, so a caller that needs
+    just "which documents, in what order" gets many more rows per response.
+    """
+    stmt = (
+        select(
+            ResultDocument,
+            Document.filename,
+            DocumentClass.name,
+            func.left(Document.summary, SUMMARY_PREVIEW_CHARS),
         )
-    ).all()
+        .join(Document, Document.id == ResultDocument.document_id)
+        .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
+        .where(ResultDocument.result_id == result_id)
+        .order_by(ResultDocument.rank.nulls_last(), ResultDocument.id)
+    )
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
+    rows = (await session.execute(stmt)).all()
+    if compact:
+        return [
+            ResultDocumentCompactOut(
+                document_id=rd.document_id,
+                filename=filename,
+                document_class_name=class_name,
+                rank=rd.rank,
+            )
+            for rd, filename, class_name, _ in rows
+        ]
     return [
         ResultDocumentOut(
             **ResultDocumentOut.model_validate(rd).model_dump(

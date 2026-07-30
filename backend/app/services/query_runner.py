@@ -36,6 +36,10 @@ from app.models.query import QueryRun
 
 POLL_S = 12
 SEARCH_TIMEOUT_S = 25 * 60
+# Decompose runs on the same chat pattern as the other stages; the window is
+# generous because an over-eager orchestrator may work before replying, and
+# the run degrades to the undecomposed question rather than failing.
+DECOMPOSE_TIMEOUT_S = 10 * 60
 DRAFT_TIMEOUT_S = 20 * 60
 IDLE_DEAD_S = 150
 MAX_NUDGES = 2
@@ -115,6 +119,15 @@ class _Sinas:
                 return []
             return r.json().get("messages") or []
 
+    async def chat_delete(self, chat_id: str) -> None:
+        """Best-effort: a failed delete never raises (teardown must not mask
+        the error that triggered it)."""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as c:
+                await c.delete(f"{self.base}/chats/{chat_id}", headers=self.headers)
+        except Exception:
+            pass
+
     async def chat_last_activity(self, chat_id: str) -> datetime | None:
         msgs = await self.chat_messages(chat_id)
         if not msgs:
@@ -162,6 +175,58 @@ async def _chat_is_idle(sinas: _Sinas, chat_id: str) -> bool:
     return (_now() - last).total_seconds() > IDLE_DEAD_S
 
 
+def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list[str]:
+    """Every sinas chat a run has opened, read from the state the stages
+    already record: telemetry entries carrying a chat_id (decompose, draft,
+    discovery) and the per-sub-query search chats. Order-stable, deduped."""
+    ids: list[str] = []
+    for entry in (telemetry or {}).values():
+        if isinstance(entry, dict) and isinstance(entry.get("chat_id"), str):
+            ids.append(entry["chat_id"])
+    for meta in (searches or {}).values():
+        if isinstance(meta, dict) and isinstance(meta.get("chat_id"), str):
+            ids.append(meta["chat_id"])
+    return list(dict.fromkeys(ids))
+
+
+async def _teardown_chats(sinas: _Sinas, chat_ids: list[str]) -> None:
+    """Delete each chat a failed run opened, so no agent keeps working for
+    nobody. Best-effort throughout: one failed delete never blocks the rest."""
+    for chat_id in chat_ids:
+        try:
+            await sinas.chat_delete(chat_id)
+        except Exception:
+            _log.warning("teardown of chat %s failed", chat_id)
+
+
+async def _await_reply(
+    sinas: _Sinas, chat_id: str, window_s: float, poll_s: float = POLL_S
+) -> str | None:
+    """Poll a chat until the agent posts a non-empty assistant message;
+    return its content, or None when the window closes first."""
+    deadline = asyncio.get_event_loop().time() + window_s
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(poll_s)
+        for m in reversed(await sinas.chat_messages(chat_id)):
+            if m.get("role") == "assistant" and (m.get("content") or "").strip():
+                return m["content"]
+    return None
+
+
+def _parse_subqueries(reply: str, question: str, max_fanout: int) -> tuple[list[str], bool]:
+    """The decompose reply must be a JSON array of strings; anything else
+    falls back to the question itself — decomposition is an optimization,
+    never a failure mode. Returns (subqueries, parsed_ok)."""
+    try:
+        cleaned = reply.strip().strip("`")
+        cleaned = cleaned.removeprefix("json").strip()
+        subs = json.loads(cleaned)
+        assert isinstance(subs, list) and subs and all(isinstance(x, str) for x in subs)
+    except Exception:
+        return [question], False
+    return subs[:max_fanout], True
+
+
 # ── stages ──────────────────────────────────────────────────────────────────
 
 
@@ -174,21 +239,31 @@ async def _stage_decompose(run_id: uuid.UUID, sinas: _Sinas) -> list[str]:
         max_fanout = EFFORT_FANOUT.get(run.effort, 2)
     await _mark(run_id, status="decomposing")
     await _tele(run_id, "decompose", started=_iso(), max_fanout=max_fanout)
-    reply = await sinas.invoke(
-        "grove/search-orchestrator",
+    # House pattern (chat + observed completion) instead of a one-shot invoke:
+    # a long-lived HTTP read is a timeout waiting to happen when the agent
+    # decides to work before replying, and the server keeps executing after
+    # the client gives up. The chat id lands in telemetry so a failed run's
+    # teardown can find it.
+    chat_id = await sinas.chat_create("grove/search-orchestrator", "[query-run] decompose")
+    await _tele(run_id, "decompose", chat_id=chat_id)
+    sinas.send_detached(
+        chat_id,
         "Decompose the following question into independent retrieval sub-queries. "
         f"Use AT MOST {max_fanout} sub-quer{'y' if max_fanout == 1 else 'ies'}; "
         "fewer is better when the question does not demand parallel angles. "
-        "Reply with ONLY a JSON array of strings.\n\n"
+        "Reply with ONLY a JSON array of strings. Do not run searches or call "
+        "any tools first; reply directly.\n\n"
         f"Question: {question}",
     )
-    try:
-        cleaned = reply.strip().strip("`")
-        cleaned = cleaned.removeprefix("json").strip()
-        subs = json.loads(cleaned)
-        assert isinstance(subs, list) and subs and all(isinstance(x, str) for x in subs)
-    except Exception:
-        subs = [question]
+    reply = await _await_reply(sinas, chat_id, DECOMPOSE_TIMEOUT_S)
+    if reply is None:
+        subs, ok = [question], False
+    else:
+        subs, ok = _parse_subqueries(reply, question, max_fanout)
+    if not ok:
+        # Window closed or off-script reply: proceed with the question itself
+        # and stop the chat so no agent keeps working for a stage that moved on.
+        await sinas.chat_delete(chat_id)
     subs = subs[:max_fanout]
     await _mark(run_id, subqueries=subs)
     await _tele(run_id, "decompose", completed=_iso(), subqueries=subs)
@@ -786,4 +861,18 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
         _log.info("query run %s published", run_id)
     except Exception as exc:
         _log.exception("query run %s failed", run_id)
-        await _mark(run_id, status="failed", error=str(exc)[:2000], completed_at=_now())
+        # str(exc) can be empty (e.g. httpx.ReadTimeout); keep the class name
+        # so the run row never carries a blank error.
+        await _mark(
+            run_id,
+            status="failed",
+            error=(str(exc) or type(exc).__name__)[:2000],
+            completed_at=_now(),
+        )
+        try:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(QueryRun, run_id)
+                chat_ids = _chat_ids_for_cleanup(run.telemetry, run.searches)
+            await _teardown_chats(sinas, chat_ids)
+        except Exception:
+            _log.warning("post-failure chat teardown failed for run %s", run_id)

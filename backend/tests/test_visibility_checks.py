@@ -16,6 +16,7 @@ exercised against a real database elsewhere.
 Run from the backend directory: `python -m pytest tests/test_visibility_checks.py`
 """
 
+import types
 import uuid
 
 import pytest
@@ -132,7 +133,9 @@ async def test_get_answer_claims_404_when_answer_invisible():
 
 @pytest.mark.asyncio
 async def test_get_answer_claims_returns_rows_when_visible():
-    claims = [object(), object()]
+    # SimpleNamespace, not object(): the endpoint stamps display_number on
+    # each returned row.
+    claims = [types.SimpleNamespace(), types.SimpleNamespace()]
     session = _FakeSession([_ExecResult(scalar=_answer()), _ExecResult(rows=claims)])
     out = await get_answer_claims(uuid.uuid4(), session=session, caller=_FakeCaller())
     assert out == claims

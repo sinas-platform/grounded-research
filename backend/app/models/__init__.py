@@ -1,4 +1,5 @@
 from app.models.config import (
+    AnnotationDefinition,
     DocumentClass,
     DocumentClassEntityType,
     DocumentClassProperty,
@@ -20,6 +21,7 @@ from app.models.discovery import (
 from app.models.ingestion import IngestionRun, IngestionRunUnit
 from app.models.query import QueryRun
 from app.models.runtime import (
+    AnnotationValue,
     Answer,
     AnswerClaim,
     ClaimEvidence,
@@ -43,6 +45,8 @@ from app.models.runtime import (
 )
 
 __all__ = [
+    "AnnotationDefinition",
+    "AnnotationValue",
     "DocumentClass",
     "DocumentClassProperty",
     "DocumentClassEntityType",

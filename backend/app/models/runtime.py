@@ -3,7 +3,17 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -216,6 +226,28 @@ class UnresolvedEntityMention(Base, TimestampMixin):
     resolved_entity_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("entity.id", ondelete="SET NULL")
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# Annotation values (materialized derived fields)
+# ─────────────────────────────────────────────────────────────
+class AnnotationValue(Base, TimestampMixin):
+    """Materialized value of an annotation for one subject. Written by
+    services/annotations.materialize(); absent = the path reached nothing."""
+
+    __tablename__ = "annotation_value"
+    __table_args__ = (
+        UniqueConstraint("annotation_definition_id", "subject_id", name="uq_annotation_subject"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    annotation_definition_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("annotation_definition.id", ondelete="CASCADE"),
+        index=True,
+    )
+    subject_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False, index=True)
+    value: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
 
 # ─────────────────────────────────────────────────────────────

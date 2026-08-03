@@ -129,6 +129,32 @@ class RelationshipState(Base, TimestampMixin):
 
 
 # ─────────────────────────────────────────────────────────────
+# Annotation definitions (derived fields over the relationship graph)
+# ─────────────────────────────────────────────────────────────
+class AnnotationDefinition(Base, TimestampMixin):
+    """Config-declared derived field: a relationship path plus a reducer.
+
+    `path` uses the small path language in services/annotations.py; `reduce`
+    is a reducer name or a {output_key: reducer} mapping, stored as given.
+    `subject_ref_type` is derived at import from the path's first hop
+    (document_class | entity_type | dossier_class) so consumers know what
+    the subject ids refer to. Materialized definitions keep their computed
+    values in annotation_value; the rest compute on request.
+    """
+
+    __tablename__ = "annotation_definition"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
+    description: Mapped[str | None] = mapped_column(Text)
+    path: Mapped[str] = mapped_column(Text, nullable=False)
+    reduce: Mapped[dict | str] = mapped_column(JSONB, nullable=False)
+    materialize: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    subject_ref_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    managed_by: Mapped[str | None] = mapped_column(String(128), index=True)
+
+
+# ─────────────────────────────────────────────────────────────
 # Dossier configuration (optional — only used when configured)
 # ─────────────────────────────────────────────────────────────
 class DossierClass(Base, TimestampMixin):

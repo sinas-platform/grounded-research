@@ -27,6 +27,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import (
+    AnnotationDefinition,
     DocumentClass,
     DocumentClassEntityType,
     DocumentClassProperty,
@@ -40,6 +41,11 @@ from app.models import (
     RelationshipState,
 )
 from app.schemas.config import slugify
+from app.services.annotations import (
+    AnnotationConfigError,
+    normalize_reduce,
+    parse_path,
+)
 from app.schemas.package import (
     GrovePackage,
     PackageDiff,
@@ -107,6 +113,24 @@ def validate_crossrefs(pkg: GrovePackage) -> tuple[list[str], list[str]]:
                     f"relationship '{rdef.name}' {side} references {ref.type} '{ref.name}' which is not defined in the package"
                 )
 
+    rdef_names = {r.name for r in pkg.spec.relationship_definitions}
+    seen_annotations: set[str] = set()
+    for ann in pkg.spec.annotations:
+        if ann.name in seen_annotations:
+            errors.append(f"annotation '{ann.name}' is defined more than once")
+        seen_annotations.add(ann.name)
+        try:
+            path = parse_path(ann.path)
+            normalize_reduce(ann.reduce)
+        except AnnotationConfigError as exc:
+            errors.append(f"annotation '{ann.name}': {exc}")
+            continue
+        for missing in sorted(path.names - rdef_names):
+            warnings.append(
+                f"annotation '{ann.name}' references relationship '{missing}' not defined "
+                "in this package; it must already exist in the target Grove at import"
+            )
+
     for pb in pkg.spec.playbooks:
         for s in pb.scope:
             if s.document_class and s.document_class not in dc_names:
@@ -170,6 +194,7 @@ async def apply(
     await _apply_dossier_classes(ctx)
     await _apply_relationship_definitions(ctx)
     await _apply_playbooks(ctx)
+    await _apply_annotations(ctx)
 
     if prune:
         await _prune(ctx)
@@ -629,6 +654,71 @@ async def _apply_playbooks(ctx: _ApplyCtx) -> None:
         _track(ctx.diff, f"playbook/{pb.kind}", pb.name, created, changed)
 
 
+# ────────── annotations ──────────
+async def _apply_annotations(ctx: _ApplyCtx) -> None:
+    """Upsert annotation definitions. Loud validation against the REAL
+    relationship definitions now present (package ones were just applied):
+    unknown names, bad syntax, or unknown reducers abort the import."""
+    all_rdefs = {
+        r.name: r
+        for r in (
+            await ctx.session.execute(select(RelationshipDefinition))
+        ).scalars().all()
+    }
+
+    def _subject_ref_type(ann_name: str, path) -> str:
+        """The subject side of the path's first hop; every alternation member
+        must agree, otherwise the annotation is ambiguous."""
+        sides = set()
+        for step in path.terms[0].steps:
+            rdef = all_rdefs[step.name]
+            sides.add(rdef.target_ref_type if step.inverse else rdef.source_ref_type)
+        if len(sides) != 1:
+            raise ValueError(
+                f"annotation '{ann_name}': first-hop alternation members disagree on the "
+                f"subject type ({', '.join(sorted(sides))})"
+            )
+        return sides.pop()
+
+    existing = await _existing_managed(ctx, AnnotationDefinition)
+    for ann in ctx.pkg.spec.annotations:
+        try:
+            path = parse_path(ann.path)
+            normalize_reduce(ann.reduce)
+        except AnnotationConfigError as exc:
+            raise ValueError(f"annotation '{ann.name}': {exc}") from exc
+        unknown = sorted(path.names - set(all_rdefs))
+        if unknown:
+            raise ValueError(
+                f"annotation '{ann.name}' references unknown relationship definition(s): "
+                + ", ".join(unknown)
+            )
+        subject_ref_type = _subject_ref_type(ann.name, path)
+
+        row = existing.get(ann.name) or (
+            await ctx.session.execute(
+                select(AnnotationDefinition).where(AnnotationDefinition.name == ann.name)
+            )
+        ).scalar_one_or_none()
+        created = row is None
+        if row is None:
+            row = AnnotationDefinition(name=ann.name)
+            ctx.session.add(row)
+        changed = _assign_if_changed(
+            row,
+            {
+                "description": ann.description,
+                "path": ann.path,
+                "reduce": ann.reduce,
+                "materialize": ann.materialize,
+                "subject_ref_type": subject_ref_type,
+                "managed_by": ctx.tag,
+            },
+        )
+        await ctx.session.flush()
+        _track(ctx.diff, "annotation", ann.name, created, changed)
+
+
 # ────────── prune ──────────
 async def _prune(ctx: _ApplyCtx) -> None:
     manifest_names = {
@@ -636,12 +726,14 @@ async def _prune(ctx: _ApplyCtx) -> None:
         "document_class": {dc.name for dc in ctx.pkg.spec.document_classes},
         "dossier_class": {d.name for d in ctx.pkg.spec.dossier_classes},
         "relationship_definition": {r.name for r in ctx.pkg.spec.relationship_definitions},
+        "annotation": {a.name for a in ctx.pkg.spec.annotations},
     }
     model_for = {
         "entity_type": EntityType,
         "document_class": DocumentClass,
         "dossier_class": DossierClass,
         "relationship_definition": RelationshipDefinition,
+        "annotation": AnnotationDefinition,
     }
 
     for kind, model in model_for.items():
@@ -872,6 +964,25 @@ async def export_package(
                 }
             )
         spec["playbooks"] = out_pb
+
+    ann_rows = (
+        await session.execute(
+            select(AnnotationDefinition)
+            .where(AnnotationDefinition.managed_by == tag)
+            .order_by(AnnotationDefinition.name)
+        )
+    ).scalars().all()
+    if ann_rows:
+        spec["annotations"] = [
+            {
+                "name": a.name,
+                "description": a.description,
+                "path": a.path,
+                "reduce": a.reduce,
+                "materialize": a.materialize,
+            }
+            for a in ann_rows
+        ]
 
     doc = {
         "apiVersion": "grove.sinas.co/v1",

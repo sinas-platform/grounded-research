@@ -29,7 +29,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
-from app.models import Document, EntityMention
+from app.models import Document, Entity, EntityMention
 from app.models.runtime import DocumentVersion
 from app.services.query_runner import _Sinas
 
@@ -104,10 +104,23 @@ async def ground_document(
             .where(EntityMention.status == STATUS_ACTIVE)
         )
     ).scalars().all()
+    # legacy mentions (pre mentions-first) carry no surface_form and no
+    # span text; their extractor's claim survives only as the linked
+    # entity's canonical form — load those for the fallback
+    canonical: dict[uuid.UUID, str] = {}
+    linked_ids = [m.entity_id for m in mentions if m.entity_id is not None]
+    if linked_ids:
+        canonical = dict((
+            await session.execute(
+                select(Entity.id, Entity.canonical_form)
+                .where(Entity.id.in_(linked_ids))
+            )
+        ).all())
     report: dict[str, Any] = {
         "document": doc.filename if doc else str(document_id),
         "active": len(mentions),
         "verbatim": 0, "kept": 0, "rejected": 0, "unparsed_kept": 0,
+        "no_surface_skipped": 0,
         "llm_calls": 0,
     }
     if not mentions:
@@ -122,10 +135,22 @@ async def ground_document(
             )
         ).scalar_one_or_none() or ""
 
+    def surface_of(m: EntityMention) -> str:
+        return str(
+            m.surface_form
+            or (m.span or {}).get("text")
+            or canonical.get(m.entity_id)
+            or ""
+        ).strip()
+
     needs_judge: list[EntityMention] = []
     for m in mentions:
-        surface = m.surface_form or (m.span or {}).get("text") or ""
-        if is_verbatim(str(surface), content):
+        surface = surface_of(m)
+        if not surface:
+            # nothing to check against: no surface, no span text, no
+            # linked canonical form — never send "?" to the judge
+            report["no_surface_skipped"] += 1
+        elif is_verbatim(surface, content):
             report["verbatim"] += 1
         else:
             needs_judge.append(m)
@@ -134,7 +159,7 @@ async def ground_document(
 
     blocks = []
     for i, m in enumerate(needs_judge, start=1):
-        surface = m.surface_form or (m.span or {}).get("text") or "?"
+        surface = surface_of(m)
         line = f'NAME {i}: "{surface}"'
         ctx = _slice(content, m.span)
         if ctx:

@@ -30,9 +30,10 @@ CONTENT = (
 
 
 class _ExecResult:
-    def __init__(self, scalars=None, scalar=None):
+    def __init__(self, scalars=None, scalar=None, rows=None):
         self._scalars = scalars
         self._scalar = scalar
+        self._rows = rows or []
 
     def scalars(self):
         return SimpleNamespace(all=lambda: self._scalars)
@@ -40,11 +41,15 @@ class _ExecResult:
     def scalar_one_or_none(self):
         return self._scalar
 
+    def all(self):
+        return self._rows
+
 
 class _FakeSession:
-    def __init__(self, mentions, content=CONTENT):
+    def __init__(self, mentions, content=CONTENT, canonicals=None):
         self._mentions = mentions
         self._content = content
+        self._canonicals = canonicals or {}
         self.statements = []
         self.committed = False
 
@@ -53,9 +58,12 @@ class _FakeSession:
 
     async def execute(self, stmt):
         self.statements.append(stmt)
-        if len(self.statements) == 1:
+        s = str(stmt)
+        if "entity_mention" in s:
             return _ExecResult(scalars=self._mentions)
-        return _ExecResult(scalar=self._content)
+        if "document_version" in s:
+            return _ExecResult(scalar=self._content)
+        return _ExecResult(rows=list(self._canonicals.items()))
 
     async def commit(self):
         self.committed = True
@@ -72,6 +80,7 @@ class _FakeSinas:
 
 
 def _mention(surface, **kw):
+    kw.setdefault("entity_id", None)
     return SimpleNamespace(
         surface_form=surface, span={"text": surface},
         status=STATUS_ACTIVE, link_method=None, link_evidence=None, **kw
@@ -196,3 +205,37 @@ async def test_gate_and_consumers_query_only_active_mentions():
         rsession, _FakeSinas(), index, {}, uuid.uuid4()
     )
     assert "status" in str(rsession.statements[0])
+
+
+@pytest.mark.asyncio
+async def test_legacy_mention_falls_back_to_canonical_form():
+    # pre mentions-first rows: no surface_form, span without a text key,
+    # but linked to an entity whose canonical form is in the document
+    eid = uuid.uuid4()
+    m = SimpleNamespace(
+        surface_form=None, span={"line": 8, "start": 545, "end": 565},
+        status=STATUS_ACTIVE, link_method=None, link_evidence=None,
+        entity_id=eid,
+    )
+    session = _FakeSession([m], canonicals={eid: "Dow Benelux NV"})
+    sinas = _FakeSinas()
+    report = await ground_document(session, sinas, uuid.uuid4())
+    assert report["verbatim"] == 1
+    assert sinas.calls == []
+    assert m.status == STATUS_ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_no_derivable_surface_is_skipped_never_judged_as_question_mark():
+    m = SimpleNamespace(
+        surface_form=None, span={"line": 8, "start": 545, "end": 565},
+        status=STATUS_ACTIVE, link_method=None, link_evidence=None,
+        entity_id=None,
+    )
+    session = _FakeSession([m])
+    sinas = _FakeSinas()
+    report = await ground_document(session, sinas, uuid.uuid4())
+    assert report["no_surface_skipped"] == 1
+    assert report["llm_calls"] == 0
+    assert sinas.calls == []
+    assert m.status == STATUS_ACTIVE

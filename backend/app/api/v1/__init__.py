@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.v1 import (
+    annotations,
     answers,
     config,
     discovery,
@@ -44,6 +45,7 @@ api_router.include_router(results.router)
 api_router.include_router(synthesis.router)
 api_router.include_router(answers.router)
 api_router.include_router(relationships.router)
+api_router.include_router(annotations.router)
 api_router.include_router(entities.router)
 api_router.include_router(playbooks.router)
 api_router.include_router(query_runs.router)

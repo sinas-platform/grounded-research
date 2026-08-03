@@ -116,6 +116,23 @@ class PackageDossierClassEntry(_Strict):
         return v
 
 
+class PackageAnnotationEntry(_Strict):
+    """Config-declared derived field over the relationship graph.
+
+    `path` uses the annotation path language (`/` sequence, `*` closure,
+    `|` alternation, `^` inverse — nothing more); `reduce` is a reducer name
+    (`first`, `terminal`, `length`) or a mapping of output keys to reducers.
+    Syntax, reducers and referenced relationship names are validated loudly
+    at import.
+    """
+
+    name: str
+    description: str | None = None
+    path: str
+    reduce: str | dict[str, str]
+    materialize: bool = False
+
+
 PlaybookKind = Literal["retrieval", "synthesis"]
 
 
@@ -145,6 +162,7 @@ class PackageSpec(_Strict):
     relationship_definitions: list[PackageRelationshipDefinitionEntry] = Field(default_factory=list)
     dossier_classes: list[PackageDossierClassEntry] = Field(default_factory=list)
     playbooks: list[PackagePlaybookEntry] = Field(default_factory=list)
+    annotations: list[PackageAnnotationEntry] = Field(default_factory=list)
 
 
 class PackageMetadata(_Strict):

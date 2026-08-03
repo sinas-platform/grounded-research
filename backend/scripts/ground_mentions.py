@@ -41,7 +41,7 @@ async def main() -> int:
         print(json.dumps(r))
     total = {k: sum(r.get(k, 0) for r in reports) for k in
              ("active", "verbatim", "kept", "rejected", "unparsed_kept",
-              "llm_calls")}
+              "no_surface_skipped", "llm_calls")}
     print(json.dumps({"TOTAL": total}))
     return 0
 

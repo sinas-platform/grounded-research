@@ -89,7 +89,7 @@ def _mention(surface, **kw):
 
 def _verdict_reply(*verdicts):
     return json.dumps({"verdicts": [
-        {"name": i, **v} for i, v in enumerate(verdicts, start=1)
+        {"n": i, **v} for i, v in enumerate(verdicts, start=1)
     ]})
 
 
@@ -239,3 +239,24 @@ async def test_no_derivable_surface_is_skipped_never_judged_as_question_mark():
     assert report["llm_calls"] == 0
     assert sinas.calls == []
     assert m.status == STATUS_ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_judge_echoing_name_strings_still_parses(monkeypatch):
+    # observed with haiku: the reply carries the surface text in the key
+    # field instead of the number; verdicts must still map back
+    m1 = _mention("Skype Global S.a.r.l.")
+    m2 = _mention("Case COMP/M.6281 - Microsoft/Skype")
+    session = _FakeSession([m1, m2])
+    reply = json.dumps({"verdicts": [
+        {"name": "Skype Global S.a.r.l.", "grounded": True,
+         "confidence": 0.99, "reason": "named in title"},
+        {"name": "Case COMP/M.6281 - Microsoft/Skype", "grounded": False,
+         "confidence": 0.9, "reason": "not referenced"},
+    ]})
+    sinas = _FakeSinas(reply)
+    report = await ground_document(session, sinas, uuid.uuid4())
+    assert report["kept"] == 1
+    assert report["rejected"] == 1
+    assert m1.status == STATUS_ACTIVE
+    assert m2.status == STATUS_REJECTED

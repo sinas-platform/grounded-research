@@ -263,3 +263,94 @@ def test_package_rejects_duplicate_annotation_names():
         )
     )
     assert any("more than once" in e for e in errors)
+
+
+# ─────────────────────────────────────────────────────────────
+# Ordering
+# ─────────────────────────────────────────────────────────────
+from app.services.annotations import OrderKey, order_subjects  # noqa: E402
+
+
+def _subject(i):
+    return uuid.UUID(int=i)
+
+
+def _ann(jurisdiction=None, depth=None):
+    out = {}
+    if jurisdiction is not None:
+        out["jurisdiction"] = {"value": {"id": "x", "name": jurisdiction}}
+    if depth is not None:
+        out["authority_tier"] = {"depth": depth, "top": {"id": "y"}}
+    return out
+
+
+def test_order_carolina_rule_eu_question():
+    """The canonical case: a Spain-scoped question ranks EU bodies first,
+    then Spain by tier depth, then other member states alphabetically."""
+    subjects = {
+        _subject(1): _ann("Spain", depth=2),
+        _subject(2): _ann("EU", depth=1),
+        _subject(3): _ann("Germany", depth=1),
+        _subject(4): _ann("Spain", depth=0),
+        _subject(5): _ann("France", depth=0),
+    }
+    ordered = order_subjects(
+        list(subjects),
+        subjects,
+        group_by="jurisdiction.value.name",
+        precedence=["EU", "Spain"],
+        then_by=[OrderKey(by="authority_tier.depth", direction="desc")],
+    )
+    assert ordered[0] == _subject(2)            # EU first
+    assert ordered[1:3] == [_subject(1), _subject(4)]  # Spain, deeper tier first
+    assert ordered[3:] == [_subject(5), _subject(3)]   # others alphabetically: France, Germany
+
+
+def test_order_no_grouping_sorts_by_keys_only():
+    subjects = {
+        _subject(1): _ann(depth=3),
+        _subject(2): _ann(depth=1),
+        _subject(3): _ann(depth=2),
+    }
+    ordered = order_subjects(
+        list(subjects), subjects, then_by=[OrderKey(by="authority_tier.depth")]
+    )
+    assert ordered == [_subject(2), _subject(3), _subject(1)]
+
+
+def test_order_missing_values_sort_last():
+    subjects = {
+        _subject(1): {},
+        _subject(2): _ann("EU", depth=1),
+        _subject(3): _ann(depth=5),  # no jurisdiction bucket
+    }
+    ordered = order_subjects(
+        list(subjects),
+        subjects,
+        group_by="jurisdiction.value.name",
+        precedence=["EU"],
+        then_by=[OrderKey(by="authority_tier.depth")],
+    )
+    assert ordered[0] == _subject(2)
+    assert set(ordered[1:]) == {_subject(1), _subject(3)}
+    assert ordered[-1] == _subject(1)  # no bucket AND no depth: very last
+
+
+def test_order_is_deterministic_on_equal_inputs():
+    subjects = {_subject(9): _ann("EU", 1), _subject(4): _ann("EU", 1), _subject(7): _ann("EU", 1)}
+    a = order_subjects(
+        list(subjects), subjects, group_by="jurisdiction.value.name", precedence=["EU"]
+    )
+    b = order_subjects(
+        list(reversed(list(subjects))),
+        subjects,
+        group_by="jurisdiction.value.name",
+        precedence=["EU"],
+    )
+    assert a == b == sorted(subjects, key=str)
+
+
+def test_order_never_drops_or_adds():
+    subjects = {_subject(i): {} for i in range(1, 6)}
+    ordered = order_subjects(list(subjects), subjects, then_by=[OrderKey(by="nope.deep")])
+    assert sorted(ordered, key=str) == sorted(subjects, key=str)

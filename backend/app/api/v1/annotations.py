@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth.identity import CallerIdentity, get_caller
 from app.db import get_session
 from app.models import AnnotationDefinition
-from app.services.annotations import AnnotationConfigError, compute_annotations, materialize
+from app.services.annotations import (
+    AnnotationConfigError,
+    OrderKey,
+    compute_annotations,
+    materialize,
+    order_subjects,
+)
 
 router = APIRouter(prefix="/annotations", tags=["annotations"])
 
@@ -113,3 +119,58 @@ async def recompute(
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
     await session.commit()
     return RecomputeOut(written=written, subjects=len(body.subject_ids))
+
+
+class OrderKeyIn(BaseModel):
+    by: str = Field(description="Dotted path into annotation values, e.g. 'authority_tier.depth'.")
+    direction: str = Field(default="asc", pattern="^(asc|desc)$")
+
+
+class OrderIn(BaseModel):
+    """Generic, deterministic ordering over annotation values. Any domain
+    rule (e.g. which jurisdiction ranks first for this question) lives in
+    the caller's `precedence` list — Grove only sorts."""
+
+    subject_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    group_by: str | None = Field(
+        default=None,
+        description="Dotted path whose value buckets subjects, e.g. 'jurisdiction.value.name'.",
+    )
+    precedence: list[str] | None = Field(
+        default=None,
+        description="Bucket values that come first, in this order; the rest follow alphabetically.",
+    )
+    then_by: list[OrderKeyIn] = Field(default_factory=list)
+    names: list[str] | None = Field(
+        default=None, description="Annotations to compute; all when omitted."
+    )
+
+
+class OrderOut(BaseModel):
+    ordered: list[uuid.UUID]
+    annotations: dict[uuid.UUID, dict[str, dict | None]]
+
+
+@router.post("/order", response_model=OrderOut)
+async def order(
+    body: OrderIn,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """Compute annotations for the subjects and return them in sorted order.
+    Deterministic: equal inputs always produce equal output (final tie-break
+    is the subject id). Used as the agent-facing ordering tool and by result
+    readers."""
+    definitions = await _load_definitions(session, body.names)
+    try:
+        computed = await compute_annotations(session, body.subject_ids, definitions)
+    except AnnotationConfigError as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+    ordered = order_subjects(
+        body.subject_ids,
+        computed,
+        group_by=body.group_by,
+        precedence=body.precedence,
+        then_by=[OrderKey(by=k.by, direction=k.direction) for k in body.then_by],
+    )
+    return OrderOut(ordered=ordered, annotations=computed)

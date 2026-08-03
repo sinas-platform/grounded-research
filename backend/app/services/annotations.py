@@ -423,3 +423,76 @@ async def materialize(
                 written += 1
     await session.flush()
     return written
+
+
+# ─────────────────────────────────────────────────────────────
+# Ordering (generic sort over annotation values)
+# ─────────────────────────────────────────────────────────────
+def _value_at(annotations: dict[str, dict | None], dotted: str):
+    """Resolve 'annotation.key.subkey' against a subject's computed
+    annotations; None when anything along the way is absent."""
+    name, _, rest = dotted.partition(".")
+    node: object = annotations.get(name)
+    for part in rest.split(".") if rest else []:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+@dataclass(frozen=True)
+class OrderKey:
+    """One sort criterion: a dotted path into annotation values, ascending
+    or descending. Subjects missing the value sort last either way."""
+
+    by: str
+    direction: str = "asc"  # asc | desc
+
+
+def order_subjects(
+    subject_ids: list[uuid.UUID],
+    annotations: dict[uuid.UUID, dict[str, dict | None]],
+    group_by: str | None = None,
+    precedence: list[str] | None = None,
+    then_by: list[OrderKey] | None = None,
+) -> list[uuid.UUID]:
+    """Order subjects by their annotation values. Pure and deterministic.
+
+    `group_by` is a dotted path (e.g. 'jurisdiction.value.name') whose value
+    buckets the subjects; `precedence` lists bucket values first, in the given
+    order — the caller computes this list per request, which is where any
+    domain rule lives. Unlisted buckets follow, alphabetically; subjects
+    without a bucket value come last. Within a bucket, `then_by` criteria
+    apply in order; the final tie-break is the subject id, so equal inputs
+    always produce equal output.
+    """
+    prec_index = {v: i for i, v in enumerate(precedence or [])}
+    keys = then_by or []
+
+    def sort_key(sid: uuid.UUID):
+        ann = annotations.get(sid, {})
+        parts: list[tuple] = []
+        if group_by is not None:
+            bucket = _value_at(ann, group_by)
+            if bucket is not None and str(bucket) in prec_index:
+                parts.append((0, prec_index[str(bucket)], ""))
+            elif bucket is not None:
+                parts.append((1, 0, str(bucket)))
+            else:
+                parts.append((2, 0, ""))
+        for k in keys:
+            v = _value_at(ann, k.by)
+            if v is None:
+                parts.append((1, "", ""))  # missing sorts last in both directions
+            elif isinstance(v, int | float) and not isinstance(v, bool):
+                num = -v if k.direction == "desc" else v
+                parts.append((0, "n", num))
+            else:
+                s = str(v)
+                if k.direction == "desc":
+                    s = "".join(chr(0x10FFFF - ord(c)) for c in s)
+                parts.append((0, "s", s))
+        parts.append((str(sid),))
+        return tuple(parts)
+
+    return sorted(subject_ids, key=sort_key)

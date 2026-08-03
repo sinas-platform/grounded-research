@@ -67,8 +67,8 @@ actually refers to it. A name is grounded when the document names it, in any
 spelling, abbreviation or language, or unambiguously describes it. A name is
 ungrounded when nothing in the document refers to it. Prefer grounded when in
 doubt: wrongly hiding a real name is worse than keeping a doubtful one.
-Reply ONLY JSON:
-{{"verdicts": [{{"name": <n>, "grounded": true|false, "confidence": <0..1>, "reason": "<short>"}}]}}
+Reply ONLY JSON, where "n" is the NAME number from the list:
+{{"verdicts": [{{"n": <number>, "grounded": true|false, "confidence": <0..1>, "reason": "<short>"}}]}}
 
 DOCUMENT (beginning):
 {head}
@@ -77,16 +77,31 @@ NAMES:
 {names}"""
 
 
-def _parse_verdicts(reply: str) -> dict[int, dict] | None:
+def _parse_verdicts(
+    reply: str, surfaces: list[str]
+) -> dict[int, dict] | None:
+    """Map verdicts to 1-based mention numbers. Tolerant: the judge may
+    echo the name string instead of the number (observed with the "n"
+    field); such items are matched back by surface text. Only a reply
+    with no recoverable structure at all returns None."""
     try:
         cleaned = reply.strip().strip("`").removeprefix("json").strip()
         data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
-        out: dict[int, dict] = {}
-        for v in data.get("verdicts") or []:
-            out[int(v.get("name") or 0)] = v
-        return out
+        items = data.get("verdicts") or []
     except Exception:
         return None
+    lowered = [s.lower() for s in surfaces]
+    out: dict[int, dict] = {}
+    for v in items:
+        key = v.get("n", v.get("name"))
+        try:
+            out[int(key)] = v
+            continue
+        except (TypeError, ValueError):
+            pass
+        if isinstance(key, str) and key.lower() in lowered:
+            out[lowered.index(key.lower()) + 1] = v
+    return out
 
 
 async def ground_document(
@@ -170,7 +185,7 @@ async def ground_document(
     )
     reply = await sinas.invoke(GROUNDING_AGENT, prompt)
     report["llm_calls"] = 1
-    verdicts = _parse_verdicts(reply)
+    verdicts = _parse_verdicts(reply, [surface_of(m) for m in needs_judge])
     if verdicts is None:
         # unparseable judge reply: keep everything active, never mass-hide
         report["unparsed_kept"] = len(needs_judge)

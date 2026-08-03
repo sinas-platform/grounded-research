@@ -17,6 +17,7 @@ Run from the backend directory: `python -m pytest tests/test_visibility_checks.p
 """
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from app.api.v1.answers import get_answer_claims, get_claim_evidence
@@ -132,10 +133,13 @@ async def test_get_answer_claims_404_when_answer_invisible():
 
 @pytest.mark.asyncio
 async def test_get_answer_claims_returns_rows_when_visible():
-    claims = [object(), object()]
+    # SimpleNamespace, not object(): the endpoint stamps display_number onto
+    # each returned row.
+    claims = [SimpleNamespace(), SimpleNamespace()]
     session = _FakeSession([_ExecResult(scalar=_answer()), _ExecResult(rows=claims)])
     out = await get_answer_claims(uuid.uuid4(), session=session, caller=_FakeCaller())
     assert out == claims
+    assert [c.display_number for c in claims] == [1, 2]
 
 
 @pytest.mark.asyncio
@@ -274,7 +278,9 @@ async def test_draft_claim_404_when_answer_invisible():
 @pytest.mark.asyncio
 async def test_draft_claim_inserts_when_answer_visible():
     answer_id = uuid.uuid4()
-    session = _FakeSession([_ExecResult(scalar=_answer(id=answer_id))])
+    # Second result: the idempotency lookup for an existing claim at this
+    # (answer_id, sequence) — none, so the endpoint takes the insert path.
+    session = _FakeSession([_ExecResult(scalar=_answer(id=answer_id)), _ExecResult(scalar=None)])
     row = await draft_claim(
         answer_id,
         DraftClaimIn(sequence=1, claim_text="c"),
@@ -288,7 +294,7 @@ async def test_draft_claim_inserts_when_answer_visible():
 
 @pytest.mark.asyncio
 async def test_draft_claim_skips_owner_filter_with_write_all():
-    session = _FakeSession([_ExecResult(scalar=_answer())])
+    session = _FakeSession([_ExecResult(scalar=_answer()), _ExecResult(scalar=None)])
     caller = _FakeCaller(permissions={"grove.answers.write:all"})
     await draft_claim(
         uuid.uuid4(), DraftClaimIn(sequence=1, claim_text="c"), session=session, caller=caller

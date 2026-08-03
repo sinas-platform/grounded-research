@@ -433,6 +433,7 @@ async def find_entity_by_name(
         .join(Entity, EntityMention.entity_id == Entity.id)
         .outerjoin(EntityAlias, EntityAlias.entity_id == Entity.id)
         .where(EntityMention.document_id == payload.document_id)
+        .where(EntityMention.status == "active")
         .where(
             or_(
                 Entity.canonical_form.ilike(pattern),

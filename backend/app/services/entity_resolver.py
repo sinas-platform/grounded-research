@@ -147,6 +147,7 @@ async def resolve_document(
             select(EntityMention)
             .where(EntityMention.document_id == document_id)
             .where(EntityMention.entity_id.is_(None))
+            .where(EntityMention.status == "active")
         )
     ).scalars().all()
     report: dict[str, Any] = {
@@ -303,6 +304,7 @@ async def resolve_unlinked(
                 await session.execute(
                     select(EntityMention.document_id)
                     .where(EntityMention.entity_id.is_(None))
+                    .where(EntityMention.status == "active")
                     .distinct()
                 )
             ).scalars().all())

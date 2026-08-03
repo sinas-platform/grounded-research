@@ -153,6 +153,11 @@ class EntityMention(Base, TimestampMixin):
     link_method: Mapped[str | None] = mapped_column(String(20))
     link_confidence: Mapped[float | None] = mapped_column(Float)
     link_evidence: Mapped[dict | None] = mapped_column(JSONB)
+    # grounding annotation: active | rejected_ungrounded. Soft drop: an
+    # ungrounded name stays for audit but no consumer query sees it.
+    status: Mapped[str] = mapped_column(
+        String(30), nullable=False, server_default="active", default="active"
+    )
 
 
 class EntityProposal(Base, TimestampMixin):

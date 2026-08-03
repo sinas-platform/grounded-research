@@ -280,7 +280,8 @@ async def _existing_mention_entity_ids(
         (
             await session.execute(
                 select(EntityMention.entity_id).where(
-                    EntityMention.document_id == document_id
+                    EntityMention.document_id == document_id,
+                    EntityMention.status == "active",
                 )
             )
         ).scalars()

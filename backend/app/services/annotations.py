@@ -352,7 +352,7 @@ async def compute_annotations(
     if reached:
         rows = (
             await session.execute(
-                select(Entity.id, Entity.name).where(Entity.id.in_(list(reached)))
+                select(Entity.id, Entity.canonical_form).where(Entity.id.in_(list(reached)))
             )
         ).all()
         names_by_id = {eid: name for eid, name in rows}

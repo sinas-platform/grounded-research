@@ -34,6 +34,7 @@ from collections import defaultdict
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
@@ -264,13 +265,50 @@ async def resolve_document(
             report["proposed"] += 1
         else:  # open
             if write:
+                nk = natural_key(m.surface_form or "")
+                # create-or-link. The partition above ran before any
+                # creation, so an in-document twin ("Case C-110/04" and
+                # "Strintzis Lines ... Case C-110/04") lands here twice
+                # with the same derived key; inserting both violates
+                # ix_entity_natural_key and rolls back the whole
+                # document's resolution. The index is updated on every
+                # create, so consult it before inserting.
+                if nk and index.nk.get(nk):
+                    link(m, index.nk[nk][0], "natural_key", 0.95,
+                         {"key": nk, "linked_instead_of_created": True})
+                    continue
                 ent = Entity(
                     entity_type_id=t.id,
                     canonical_form=(m.surface_form or "")[:500],
-                    natural_key=natural_key(m.surface_form or ""),
+                    natural_key=nk,
                 )
-                session.add(ent)
-                await session.flush()
+                try:
+                    # savepoint: a plain failed flush would roll back
+                    # every link already made for this document
+                    async with session.begin_nested():
+                        session.add(ent)
+                        await session.flush()
+                except IntegrityError:
+                    # cross-session race: the keyed owner appeared after
+                    # our index was built. The partial unique index
+                    # guarantees exactly one live owner; link to it.
+                    owner = (
+                        await session.execute(
+                            select(Entity)
+                            .where(Entity.entity_type_id == t.id)
+                            .where(Entity.natural_key == nk)
+                            .where(Entity.merged_into_id.is_(None))
+                        )
+                    ).scalars().first()
+                    if owner is None:
+                        report["left_unlinked"] += 1
+                        continue
+                    index.by_id[owner.id] = owner
+                    if nk:
+                        index.nk[nk].append(owner.id)
+                    link(m, owner.id, "natural_key", 0.95,
+                         {"key": nk, "linked_after_collision": True})
+                    continue
                 # future mentions of the same name resolve to this entity
                 index.by_id[ent.id] = ent
                 index.norm[normalize(ent.canonical_form)].append(ent.id)

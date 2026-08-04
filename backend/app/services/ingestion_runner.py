@@ -275,6 +275,18 @@ async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) ->
     from app.services.entity_resolver import resolve_unlinked
     from app.services.ingestion_oneshot import oneshot_ingest
 
+    # The task is created before the creating transaction commits
+    # (runs.py submits inline, then commits), so the run row may not be
+    # visible yet on this fresh session. Large runs lose that race every
+    # time: the first cancellation check read None and the whole run sat
+    # in "running" forever with no worker. Wait for visibility briefly
+    # before treating the run as gone.
+    for _ in range(10):
+        async with AsyncSessionLocal() as session:
+            if await session.get(IngestionRun, run_id) is not None:
+                break
+        await asyncio.sleep(1)
+
     for did in doc_ids:
         # honor cancellation between documents
         async with AsyncSessionLocal() as session:

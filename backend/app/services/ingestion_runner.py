@@ -46,14 +46,17 @@ log = logging.getLogger(__name__)
 
 # Per-stage assignment. The former classifier/summarizer/property/entity
 # agent stages are replaced by the in-process one-shot path (classify +
-# metadata + verbatim mentions + resolution — see ingestion_oneshot and
-# entity_resolver). Relationship extraction and dossier assignment stay
-# agentic: they need graph context.
+# metadata + verbatim mentions + resolution + relationships — see
+# ingestion_oneshot, entity_resolver and relationship_oneshot). Dossier
+# assignment stays agentic: it needs graph context.
 STAGES: dict[str, dict[str, Any]] = {
     "oneshot": {"label": "Classify + extract + resolve (one-shot)", "inprocess": True},
+    # Legacy agentic path (tool loop, ~11 LLM calls/doc). The one-shot
+    # stage now covers relationships in a single call; keep this stage
+    # only for explicit runs that compare the two.
     "relationship_extractor": {
         "agent": ("grove", "relationship-extractor-agent"),
-        "label": "Relationship extraction",
+        "label": "Relationship extraction (legacy agentic)",
     },
     "dossier_assigner": {
         "agent": ("grove", "dossier-assigner-agent"),
@@ -270,12 +273,13 @@ async def _submit_stage(
 
 async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
     """Execute the one-shot stage in-process: per document, wipe stale
-    artifacts, run classify+extract, ground the extracted names, then
-    resolve mentions. Unit rows and run counters update per document, so
-    progress is live."""
+    artifacts, run classify+extract, ground the extracted names, resolve
+    mentions, then extract relationships. Unit rows and run counters
+    update per document, so progress is live."""
     from app.services.entity_resolver import resolve_unlinked
     from app.services.grounding_gate import ground_documents
     from app.services.ingestion_oneshot import oneshot_ingest
+    from app.services.relationship_oneshot import extract_relationships
 
     # The task is created before the creating transaction commits
     # (runs.py submits inline, then commits), so the run row may not be
@@ -311,6 +315,10 @@ async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) ->
                 # reach the resolver or mint entities
                 await ground_documents([did], write=True)
                 await resolve_unlinked([did], write=True)
+                # relationships ride the one-shot too: one tool-less call
+                # per document against the resolved mentions, replacing
+                # the agentic relationship stage's tool loop
+                await extract_relationships([did], write=True)
         except Exception as exc:  # noqa: BLE001 — per-doc isolation
             error = str(exc)[:500]
         async with AsyncSessionLocal() as session:

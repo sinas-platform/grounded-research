@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.32"
+  version: "0.1.33"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -2396,6 +2396,25 @@ spec:
         refers to it. Prefer grounded when in doubt: wrongly hiding a real
         name is worse than keeping a doubtful one. Reply with ONLY the
         requested JSON object.
+
+    - namespace: grove
+      name: relationship-oneshot-agent
+      description: Stateless one-shot relationship extractor - reads a document plus its recorded entities and the relationship definitions, returns explicitly stated edges as JSON. Invoked per document by Grove's one-shot ingestion path.
+      llmProviderName: ${{ vars.CHEAP_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You extract relationships explicitly stated in a document, one
+        document at a time. The user message carries the relationship
+        definitions (with binding source and target types), the entities
+        recorded for the document, and the document text.
+
+        Only extract what the text explicitly states — no inference, no
+        world knowledge. Use the definition names and entity names exactly
+        as given. A cited case or instrument that is missing from the
+        entity list keeps its edge: put the raw reference (ECLI, case
+        number) in target_reference instead of dropping the cite. Every
+        edge carries a short verbatim quote as evidence. Reply with ONLY
+        the requested JSON object.
 
     - namespace: grove
       name: doc-metadata-agent

@@ -345,6 +345,7 @@ async def list_entity_mentions(
             .join(Entity, Entity.id == EntityMention.entity_id)
             .join(EntityType, EntityType.id == Entity.entity_type_id)
             .where(EntityMention.document_id == doc_id)
+            .where(EntityMention.status == "active")
             .order_by(EntityMention.created_at)
         )
     ).all()

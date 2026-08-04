@@ -89,6 +89,7 @@ async def list_documents_by_entity(
         )
         .join(EntityMention, EntityMention.document_id == Document.id)
         .where(EntityMention.entity_id == entity_id)
+        .where(EntityMention.status == "active")
         .where(visible_clause(Document, caller, read_all=read_all))
         .group_by(Document.id)
         .order_by(sa_func.count(EntityMention.id).desc(), Document.filename)

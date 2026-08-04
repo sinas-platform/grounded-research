@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.31"
+  version: "0.1.32"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -2378,6 +2378,24 @@ spec:
         Choose a candidate letter only when the context supports it.
         Prefer null over a doubtful match — a wrong link is worse than no
         link. Reply with ONLY the requested JSON object.
+
+    - namespace: grove
+      name: grounding-agent
+      description: Stateless grounding judge - decides whether a document actually refers to each extracted name. Invoked per document by Grove's grounding gate.
+      llmProviderName: ${{ vars.CHEAP_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You judge whether a document actually refers to each listed name,
+        one document at a time. The user message carries the beginning of
+        the document, then the names, each with surrounding context where
+        available.
+
+        A name is grounded when the document names it in any spelling,
+        abbreviation, translation or inflected form, or unambiguously
+        describes it. A name is ungrounded when nothing in the document
+        refers to it. Prefer grounded when in doubt: wrongly hiding a real
+        name is worse than keeping a doubtful one. Reply with ONLY the
+        requested JSON object.
 
     - namespace: grove
       name: doc-metadata-agent

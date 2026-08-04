@@ -270,9 +270,11 @@ async def _submit_stage(
 
 async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
     """Execute the one-shot stage in-process: per document, wipe stale
-    artifacts, run classify+extract, then resolve mentions. Unit rows and
-    run counters update per document, so progress is live."""
+    artifacts, run classify+extract, ground the extracted names, then
+    resolve mentions. Unit rows and run counters update per document, so
+    progress is live."""
     from app.services.entity_resolver import resolve_unlinked
+    from app.services.grounding_gate import ground_documents
     from app.services.ingestion_oneshot import oneshot_ingest
 
     # The task is created before the creating transaction commits
@@ -305,6 +307,9 @@ async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) ->
             if rep.get("error"):
                 error = str(rep["error"])[:500]
             else:
+                # gate before resolving: hallucinated names must not
+                # reach the resolver or mint entities
+                await ground_documents([did], write=True)
                 await resolve_unlinked([did], write=True)
         except Exception as exc:  # noqa: BLE001 — per-doc isolation
             error = str(exc)[:500]

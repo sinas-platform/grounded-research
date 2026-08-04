@@ -176,6 +176,7 @@ def apply_grove_filter(
                     select(EntityMention.id).where(
                         EntityMention.document_id == Document.id,
                         EntityMention.entity_id.in_(ef.entity_ids),
+                        EntityMention.status == "active",
                     )
                 )
             )

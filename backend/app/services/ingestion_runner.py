@@ -2,18 +2,24 @@
 
 Flow:
   - `POST /ingestion/runs` calls `submit_run(...)` inside the request handler.
-    If `classifier` is among the requested stages, ONLY the classifier batch
-    is submitted at this point; other stages wait. Otherwise all stage
-    batches submit at once. Run transitions to "running".
+    If `oneshot` is among the requested stages, an in-process task runs it
+    document-by-document; other stages wait. Otherwise all stage batches
+    submit at once. Run transitions to "running".
+  - When the in-process one-shot task finishes its last document, it submits
+    the secondary (agentic) stage batches itself, using the SinasClient the
+    creating request handed it. The client is held in task memory only —
+    no token is ever persisted.
   - `GET /ingestion/runs/{id}` calls `progress(...)` which:
       * Fetches live status for every submitted stage batch.
-      * If classifier batch is terminal AND secondary stages haven't been
-        submitted yet, atomically claim the transition and submit the
-        secondary batches.
+      * If oneshot is terminal AND secondary stages haven't been submitted
+        yet (e.g. the worker's submission failed, or its bearer had expired
+        by the time the one-shot pass finished), atomically claim the
+        transition and submit the secondary batches. This is the fallback
+        path; the worker is the primary driver.
       * If every submitted batch is terminal, reconciles units and marks
         the run completed.
-  - No background worker, no persisted user token. Each transition is
-    driven by a polling GET that carries a fresh user bearer.
+  - `_claim_secondary_submission` (a CAS on `sinas_batch_ids`) guards the
+    worker/poll race so the secondary wave is submitted exactly once.
 
 See Sinas's bulk-enqueue ADR for the underlying mechanics.
 """
@@ -268,11 +274,18 @@ async def _submit_stage(
 
 
 
-async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) -> None:
+async def _run_oneshot_inprocess(
+    run_id: uuid.UUID, doc_ids: list[uuid.UUID], client: SinasClient
+) -> None:
     """Execute the one-shot stage in-process: per document, wipe stale
     artifacts, run classify+extract, ground the extracted names, then
     resolve mentions. Unit rows and run counters update per document, so
-    progress is live."""
+    progress is live.
+
+    `client` carries the creating request's bearer, held in task memory
+    only. It is used to submit the secondary (agentic) stage batches once
+    the last document completes — without this, a run nobody polls would
+    sit at "running" with the secondary units pending forever."""
     from app.services.entity_resolver import resolve_unlinked
     from app.services.grounding_gate import ground_documents
     from app.services.ingestion_oneshot import oneshot_ingest
@@ -332,6 +345,17 @@ async def _run_oneshot_inprocess(run_id: uuid.UUID, doc_ids: list[uuid.UUID]) ->
                     if error:
                         run.failed_units += 1
             await session.commit()
+    # The one-shot pass is done — fire the agentic secondary stages now
+    # rather than waiting for a poll. The bearer may have expired on a long
+    # run; the GET-driven fallback in `progress` retries with a fresh one.
+    try:
+        await _maybe_submit_secondary(run_id, client)
+    except Exception as exc:  # noqa: BLE001
+        log.warning(
+            "secondary submission from oneshot worker failed for run %s: %s "
+            "(the progress poll will retry)",
+            run_id, exc,
+        )
     await _mark_run_terminal_if_done(run_id)
 
 
@@ -367,8 +391,9 @@ async def submit_run(
 
     if "oneshot" in by_stage:
         # Phase 1: the in-process one-shot pass. Agentic stages
-        # (relationships, dossiers) stay pending; the progress endpoint
-        # fires them when every oneshot unit is terminal.
+        # (relationships, dossiers) stay pending; the worker task fires
+        # them when the last oneshot unit is terminal (the progress
+        # endpoint is the fallback).
         now = datetime.now(timezone.utc)
         for u in by_stage["oneshot"]:
             u.status = "running"
@@ -376,7 +401,9 @@ async def submit_run(
             u.attempts += 1
         run.sinas_batch_ids = {**(run.sinas_batch_ids or {}), "oneshot": "inprocess"}
         doc_ids = [u.document_id for u in by_stage["oneshot"]]
-        asyncio.get_event_loop().create_task(_run_oneshot_inprocess(run.id, doc_ids))
+        asyncio.get_event_loop().create_task(
+            _run_oneshot_inprocess(run.id, doc_ids, client)
+        )
     else:
         # No one-shot stage — submit the agentic batches directly.
         for stage, stage_units in by_stage.items():
@@ -514,6 +541,53 @@ async def _claim_secondary_submission(run_id: uuid.UUID) -> bool:
         return result.rowcount > 0
 
 
+async def _release_secondary_claim(run_id: uuid.UUID) -> None:
+    """Undo `_claim_secondary_submission` after a failed submission attempt,
+    so the next caller (worker retry or progress poll) can claim again."""
+    from sqlalchemy import text
+
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text(
+                "UPDATE ingestion_run "
+                "SET sinas_batch_ids = sinas_batch_ids - :k "
+                "WHERE id = :id"
+            ),
+            {"k": _SECONDARY_CLAIMED_KEY, "id": str(run_id)},
+        )
+        await session.commit()
+
+
+async def _maybe_submit_secondary(run_id: uuid.UUID, client: SinasClient) -> bool:
+    """Submit the oneshot-dependent stage batches if the run wants them and
+    they haven't been submitted yet. Returns True if THIS call submitted.
+
+    Callable from both the in-process worker and the progress poll — the
+    claim CAS guarantees at most one caller submits. Only call once the
+    oneshot stage is terminal. If submission raises, the claim is released
+    so a later caller can retry."""
+    async with AsyncSessionLocal() as session:
+        run = await session.get(IngestionRun, run_id)
+        if run is None:
+            return False
+        batch_ids = dict(run.sinas_batch_ids or {})
+        stages = list(run.stages or [])
+    secondary_pending = any(
+        stage in stages and stage not in batch_ids
+        for stage in _ONESHOT_DEPENDENT_STAGES
+    )
+    if not secondary_pending:
+        return False
+    if not await _claim_secondary_submission(run_id):
+        return False
+    try:
+        await _submit_secondary_stages(run_id, client)
+    except Exception:
+        await _release_secondary_claim(run_id)
+        raise
+    return True
+
+
 async def _submit_secondary_stages(run_id: uuid.UUID, client: SinasClient) -> None:
     """Submit batches for every non-classifier stage that has pending units."""
     async with AsyncSessionLocal() as session:
@@ -615,33 +689,28 @@ async def progress(run: IngestionRun, client: SinasClient) -> dict[str, Any]:
         if status.get("status") in _TERMINAL_BATCH_STATUSES:
             await _reconcile_stage_units(client, run.id, stage, batch_id)
 
-    # If oneshot just turned terminal, fire the agentic secondary stages.
+    # If oneshot is terminal, make sure the agentic secondary stages are
+    # submitted. The in-process worker normally does this itself when the
+    # last document completes; this is the polling fallback for when its
+    # submission failed (e.g. expired bearer on a long run).
     if oneshot_terminal:
-        if True:
-            secondary_pending = any(
-                stage not in visible_batches and stage in run.stages
-                for stage in _ONESHOT_DEPENDENT_STAGES
-            )
-            if secondary_pending:
-                won = await _claim_secondary_submission(run.id)
-                if won:
-                    await _submit_secondary_stages(run.id, client)
-                # Refresh and re-snapshot the new stages.
-                async with AsyncSessionLocal() as s:
-                    refreshed = await s.get(IngestionRun, run.id)
-                    if refreshed is not None:
-                        batch_ids = dict(refreshed.sinas_batch_ids or {})
-                        visible_batches = {
-                            k: v for k, v in batch_ids.items() if not k.startswith("_")
-                        }
-                for stage, batch_id in visible_batches.items():
-                    if stage in STAGES and stage not in snapshot["stages"]:
-                        try:
-                            snapshot["stages"][stage] = await asyncio.to_thread(
-                                client.batches.get, batch_id
-                            )
-                        except SinasAPIError as exc:
-                            snapshot["stages"][stage] = {"error": str(exc)}
+        await _maybe_submit_secondary(run.id, client)
+        # Refresh and re-snapshot the new stages.
+        async with AsyncSessionLocal() as s:
+            refreshed = await s.get(IngestionRun, run.id)
+            if refreshed is not None:
+                batch_ids = dict(refreshed.sinas_batch_ids or {})
+                visible_batches = {
+                    k: v for k, v in batch_ids.items() if not k.startswith("_")
+                }
+        for stage, batch_id in visible_batches.items():
+            if stage in STAGES and stage not in snapshot["stages"]:
+                try:
+                    snapshot["stages"][stage] = await asyncio.to_thread(
+                        client.batches.get, batch_id
+                    )
+                except SinasAPIError as exc:
+                    snapshot["stages"][stage] = {"error": str(exc)}
 
     # Mark run terminal if every unit has reached a terminal status.
     await _mark_run_terminal_if_done(run.id)

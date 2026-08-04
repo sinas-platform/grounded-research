@@ -87,9 +87,9 @@ async def create_run(
     session.add(run)
     await session.flush()
     await materialize_run(session, run)
-    # Submit batches inline using the caller's bearer. No worker; subsequent
-    # transitions (e.g. secondary stages after classifier) are driven by
-    # GET /ingestion/runs/{id}.
+    # Submit batches inline using the caller's bearer. The in-process
+    # one-shot worker drives the secondary-stage transition itself;
+    # GET /ingestion/runs/{id} is the fallback driver.
     client = SinasClient(base_url=get_settings().sinas_url, token=caller.sinas_token)
     await submit_run(session, run, client)
     await session.commit()
@@ -125,10 +125,12 @@ async def get_run(
 ):
     """Returns the run row, **after** advancing its state from Sinas.
 
-    Each GET fetches live batch status for every submitted stage; if
-    classifier is in stages and has just turned terminal, secondary stages
-    are submitted here. This is the only place run state advances — there
-    is no background worker.
+    Each GET fetches live batch status for every submitted stage. The
+    in-process one-shot worker submits the secondary stages itself when its
+    last unit completes; this endpoint is the fallback driver — if oneshot
+    is terminal and the secondary batches are still unsubmitted (e.g. the
+    worker's bearer had expired), they are submitted here with the caller's
+    fresh bearer.
     """
     row = await session.get(IngestionRun, run_id)
     if row is None:

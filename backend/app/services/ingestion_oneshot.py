@@ -58,6 +58,15 @@ CLASS_RULES: list[tuple[str, str, float, str]] = [
 ]
 
 
+def wrap_property_value(value):
+    """Storage shape for PropertyValue.value: the platform-wide {"_": x}
+    wrapper that the API unwrapper (schemas/runtime.PropertyValueOut) and
+    the SQL filter layer (introspect field filters on value['_']) read.
+    The one-shot originally wrote {"value": x}; both readers silently
+    missed every property it extracted."""
+    return {"_": value}
+
+
 def classify_by_rules(filename: str) -> tuple[str, float, str] | None:
     for pattern, cls, conf, reason in CLASS_RULES:
         if re.search(pattern, filename):
@@ -465,7 +474,7 @@ async def oneshot_ingest_document(
                         property_id=p["id"],
                         document_id=document_id,
                         document_version_id=version.id,
-                        value={"value": value},
+                        value=wrap_property_value(value),
                         method="auto",
                         confidence=0.8,
                         reason="front-matter one-shot",

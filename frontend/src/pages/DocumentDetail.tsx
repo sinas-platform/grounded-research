@@ -237,7 +237,7 @@ function OverviewTab({
       )}
       {!doc.summary && (
         <div className="mt-6 text-stone-400 text-sm italic">
-          No summary yet — summarizer_agent hasn't run, or hasn't completed.
+          No summary yet — the extract pass hasn't run, or hasn't completed.
         </div>
       )}
 

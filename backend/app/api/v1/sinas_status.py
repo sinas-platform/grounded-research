@@ -16,7 +16,9 @@ from app.services.sinas import Management, get_management
 router = APIRouter(prefix="/sinas-status", tags=["sinas-status"])
 
 EXPECTED_PACKAGE_NAME = "sinas-grove"
-EXPECTED_PACKAGE_VERSION = "0.1.15"
+# Keep in lockstep with package/sinas-grove.yaml — the Activity page
+# shows a drift warning when the installed version differs.
+EXPECTED_PACKAGE_VERSION = "0.1.34"
 
 
 def _bundled_package_path() -> Path | None:

@@ -513,7 +513,7 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
             onClick={() => submit.mutate()}
             disabled={submit.isPending || selected.size === 0}
           >
-            {submit.isPending ? 'Starting…' : `Run ${selected.size} stage(s)`}
+            {submit.isPending ? 'Starting…' : `Run ${selected.size} part(s)`}
           </PrimaryButton>
           <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
         </div>

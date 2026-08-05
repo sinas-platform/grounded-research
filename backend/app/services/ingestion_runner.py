@@ -75,7 +75,12 @@ async def _wipe_extracted_artifacts(
 
 async def _select_documents(session: AsyncSession, f: RunFilter) -> list[uuid.UUID]:
     stmt = select(Document.id)
-    if f.document_ids:
+    # `is not None`, not truthiness: an explicit empty list means ZERO
+    # documents, never "no filter". A caller that builds document_ids from
+    # an upstream step that produced nothing must get an empty (refused)
+    # run — treating [] as falsy once selected the entire corpus for a
+    # full-pipeline rerun (5 Aug, cancelled at 53 of 1,975 documents).
+    if f.document_ids is not None:
         stmt = stmt.where(Document.id.in_(f.document_ids))
     if f.staged_only:
         stmt = stmt.where(Document.staged.is_(True))

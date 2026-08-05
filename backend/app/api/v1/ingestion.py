@@ -20,6 +20,7 @@ from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
 from app.models import (
     Document,
+    DocumentClass,
     DocumentVersion,
     Entity,
     EntityAlias,
@@ -61,6 +62,12 @@ class PostUploadIn(BaseModel):
     # them with discovery / FM-suggest, design the schema, then promote
     # via an IngestionRun with staged_only=true.
     staged: bool = False
+    # Source-declared class, by NAME (CNAI-1167). Sourced corpora know the
+    # class upfront (everything in the Commission's antitrust register is a
+    # Regulatory Decision), so the extract pass skips classification. An
+    # unknown name is a 422 — a typo must fail loudly, not fall back to
+    # LLM classification silently.
+    document_class: str | None = None
 
 
 class PostUploadOut(BaseModel):
@@ -83,8 +90,24 @@ async def post_upload(
     """Called by the Sinas post-upload function to register a new document.
 
     Idempotent on `collection_file_id`: re-uploads create new versions, not
-    duplicate documents.
+    duplicate documents. A source-declared `document_class` is applied on
+    create, and on re-upload only when the document has no class yet — a
+    class someone set by hand is never overwritten by a re-upload.
     """
+    declared_class_id: uuid.UUID | None = None
+    if payload.document_class is not None:
+        declared = (
+            await session.execute(
+                select(DocumentClass).where(DocumentClass.name == payload.document_class)
+            )
+        ).scalar_one_or_none()
+        if declared is None:
+            raise HTTPException(
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"unknown document class {payload.document_class!r}",
+            )
+        declared_class_id = declared.id
+
     existing = (
         await session.execute(
             select(Document).where(Document.collection_file_id == payload.collection_file_id)
@@ -98,12 +121,17 @@ async def post_upload(
             owner_id=caller.user_id,
             roles=caller.roles or [],
             staged=payload.staged,
+            document_class_id=declared_class_id,
+            classification_confidence=1.0 if declared_class_id else None,
         )
         session.add(doc)
         await session.flush()
         version = 1
     else:
         doc = existing
+        if declared_class_id is not None and doc.document_class_id is None:
+            doc.document_class_id = declared_class_id
+            doc.classification_confidence = 1.0
         # Re-uploading a doc keeps its current staged state. To unstage,
         # use the promote IngestionRun path; to re-stage, edit directly.
         latest = (

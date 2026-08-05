@@ -82,7 +82,7 @@ interface DocumentContent {
   version: number;
 }
 
-interface StageDesc {
+interface PartDesc {
   key: string;
   label: string;
 }
@@ -435,9 +435,9 @@ function RelationshipsTab({ docId }: { docId: string }) {
 
 function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void }) {
   const qc = useQueryClient();
-  const stages = useQuery({
-    queryKey: ['ingestion-stages'],
-    queryFn: () => api<StageDesc[]>('/ingestion/stages'),
+  const parts = useQuery({
+    queryKey: ['ingestion-parts'],
+    queryFn: () => api<PartDesc[]>('/ingestion/parts'),
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
@@ -447,7 +447,7 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
     mutationFn: () =>
       api<{ run_id: string; unit_count: number; status: string }>(
         `/ingestion/documents/${docId}/reprocess`,
-        { method: 'POST', body: JSON.stringify({ stages: Array.from(selected) }) },
+        { method: 'POST', body: JSON.stringify({ parts: Array.from(selected) }) },
       ),
     onSuccess: (res) => {
       setError(null);
@@ -471,11 +471,11 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
         Reprocess this document
       </div>
       <div className="text-xs text-stone-600 mb-3">
-        Pick which stages to rerun. Auto-extracted artifacts (entities, properties)
-        are wiped before re-running so they don't duplicate. Manual entries are kept.
+        Pick which pipeline parts to rerun. Only “extract” wipes auto-extracted
+        artifacts (entities, properties) first; manual entries are always kept.
       </div>
       <div className="grid grid-cols-2 gap-1 mb-3">
-        {(stages.data ?? []).map((s) => (
+        {(parts.data ?? []).map((s) => (
           <label key={s.key} className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"

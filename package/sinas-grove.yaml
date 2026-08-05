@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.33"
+  version: "0.1.34"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -81,7 +81,7 @@ spec:
             description: Optional — assign on upload to a known dossier
           dossier_path_hint:
             type: string
-            description: Optional — string the dossier_assigner_agent can use
+            description: Optional — string the dossier assignment pass can use
         additionalProperties: true
       maxFileSizeMb: 50
       maxTotalSizeGb: 50
@@ -1335,8 +1335,8 @@ spec:
       name: post_upload
       description: >
         Invoked by Sinas after a file is uploaded to the grove/documents
-        collection. Registers the document with Grove and dispatches the
-        ingestion_coordinator agent.
+        collection. Registers the document with Grove and submits an
+        ingestion run (the in-process pipeline).
       sharedPool: true
       timeout: 120
       inputSchema:
@@ -1448,33 +1448,18 @@ spec:
                     "agent_reply": "skipped — staged document",
                 }
 
-            # 4. Hand off to the ingestion_coordinator agent via Sinas's
-            #    synchronous /agents/{ns}/{name}/invoke endpoint. The
-            #    coordinator will fan out to the enrichment agents in
-            #    parallel; we wait for it to finish so any failure surfaces
-            #    here instead of disappearing silently.
-            invoke_body = {
-                "message": (
-                    f"Ingest document {registered['document_id']} "
-                    f"(version {registered['version']}). "
-                    f"Filename: {filename}. "
-                    "Run the full ingestion pipeline."
-                ),
-                "input": {
-                    "document_id": registered["document_id"],
-                    "document_version_id": registered["document_version_id"],
-                    "version": registered["version"],
-                    "upload_metadata": upload_metadata,
-                },
-            }
-            invoke = requests.post(
-                f"{SINAS_URL}/agents/grove/ingestion-coordinator/invoke",
-                json=invoke_body,
-                headers=sinas_headers,
-                timeout=600,  # ingestion fan-out can take a while
+            # 4. Kick the Grove pipeline: one ingestion run over this
+            #    document (all parts — extract, ground, resolve,
+            #    relationships, dossiers). The run executes in-process in
+            #    Grove; this call returns as soon as it is submitted.
+            run = requests.post(
+                f"{GROVE_URL}/api/v1/ingestion/runs",
+                json={"filter": {"document_ids": [registered["document_id"]]}},
+                headers=grove_headers,
+                timeout=60,
             )
-            invoke.raise_for_status()
-            invoke_result = invoke.json()
+            run.raise_for_status()
+            run_result = run.json()
             return {
                 "registered": True,
                 "staged": False,
@@ -1482,8 +1467,7 @@ spec:
                 "document_version_id": registered["document_version_id"],
                 "extracted_chars": len(content_md) if content_md else 0,
                 "extraction_error": extraction_error,
-                "agent_chat_id": invoke_result.get("chat_id"),
-                "agent_reply": invoke_result.get("reply"),
+                "ingestion_run_id": run_result.get("run_id"),
             }
 
   # Playbooks are Grove-owned (since v0.1.13). They are no longer Sinas
@@ -1496,144 +1480,6 @@ spec:
   # ─────────────────────────────────────────────
   agents:
     # ───────── ingestion ─────────
-    - namespace: grove
-      name: ingestion-coordinator
-      description: Orchestrates ingestion for a single document.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
-      temperature: 0.1
-      systemPrompt: |
-        You orchestrate Grove's document ingestion pipeline. You receive a
-        document_id (and version) for a freshly uploaded file. Your job is
-        to produce a fully indexed, queryable document.
-
-        Workflow:
-          1. Invoke the `classifier-agent` with the document_id. Wait for it
-             to assign a document_class.
-          2. In parallel, invoke:
-               - `summarizer-agent`
-               - `property-extractor-agent`
-               - `entity-extractor-agent`
-               - `relationship-extractor-agent`
-               - `dossier-assigner-agent` (only if `get_dossier_classes`
-                 returns non-empty)
-          3. If any enrichment agent fails, the document still becomes
-             queryable with that dimension missing. Log the failure in
-             your reply but do not block the others.
-          4. Reply with a summary of what was indexed.
-
-        Tools:
-          - grove/api: get_document_classes, get_dossier_classes (for the
-            dossier-or-not check)
-          - sub-agents listed above
-
-        Do not write to the document directly — that's the enrichment
-        agents' job.
-      enabledConnectors:
-        - connector: grove/api
-          operations: [get_document_classes, get_dossier_classes, get_document]
-      enabledAgents:
-        - grove/classifier-agent
-        - grove/summarizer-agent
-        - grove/property-extractor-agent
-        - grove/entity-extractor-agent
-        - grove/relationship-extractor-agent
-        - grove/dossier-assigner-agent
-
-    - namespace: grove
-      name: relationship-extractor-agent
-      description: Records relationships explicitly stated in the document.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
-      temperature: 0.0
-      systemPrompt: |
-        You extract relationships explicitly stated in a document.
-
-        Workflow:
-          1. Call `get_document` and `get_relationship_definitions`. For
-             each definition, read its `extraction_guidance`.
-          2. For each definition where this document type can be a source
-             or target (per source_ref_type / target_ref_type):
-              a. SKIP definitions whose `creation_mode == "closed"` — the
-                 graph is curated and the server will refuse your call
-                 with HTTP 409.
-              b. Read the document via `read_document_content`.
-              c. For each relationship instance you find:
-                  - resolve each end's name to an entity id with
-                    `find_entity_by_name(name, document_id)`. record_relationship
-                    takes entity IDs, not names; pick the right match from the
-                    returned list (matching is partial and case-insensitive).
-                  - if BOTH ends resolve to known nodes in the graph:
-                      • confidence ≥ 0.8: call `record_relationship`. The
-                        response is `{kind, id, creation_mode}`. If the
-                        definition is in "review" mode, the server will
-                        return `kind="proposal"` — that's expected; the
-                        edge is queued for human approval.
-                      • confidence < 0.8: call `propose_relationship`
-                        (queues for human review)
-                  - if the target is named but you cannot resolve it to a
-                    node in the graph (e.g. the document cites an ECLI we
-                    haven't ingested): call `record_unresolved_relationship`
-                    with the raw reference as `target_key` and its kind as
-                    `target_key_kind` (e.g. "ecli"). A resolver promotes it
-                    to a real relationship when the target is later ingested.
-                    Do NOT drop the cite — record it as unresolved.
-              d. Always include `evidence_document_id` and
-                 `evidence_span`.
-
-        Only extract relationships explicitly stated in the document.
-        Discovery — inferring relationships from broader research — is
-        the relationship_discovery_agent's job, not yours.
-      enabledConnectors:
-        - connector: grove/api
-          operations:
-            - get_document
-            - get_relationship_definitions
-            - read_document_content
-            - find_entity_by_name
-            - record_relationship
-            - propose_relationship
-            - record_unresolved_relationship
-
-    - namespace: grove
-      name: dossier-assigner-agent
-      description: Assigns documents to dossiers (only when dossiers configured).
-      llmProviderName: ${{ vars.CHEAP_LLM }}
-      temperature: 0.0
-      systemPrompt: |
-        You assign a document to one or more dossiers, or propose a new
-        dossier when warranted.
-
-        Workflow:
-          1. Call `get_dossier_classes`. If empty, do nothing — this
-             deployment has no dossiers configured.
-          2. Call `get_document` and `get_property_values` to see what's
-             already known about this document.
-          3. For each dossier class that could plausibly contain this
-             document:
-              a. Call `find_candidate_dossiers` with that class id.
-              b. Match against the candidates using the document's
-                 properties (matter id, parties, transaction reference,
-                 etc.) and the class's `classification_hints`.
-              c. If a clear match: call `assign_dossier` with a `role`
-                 (e.g. "primary_contract", "amendment", "correspondence").
-              d. If no match but the document strongly anchors a new
-                 dossier of this class: call `propose_new_dossier`.
-              e. Otherwise: skip.
-
-        Some documents are deployment-wide (policy memos, templates) and
-        belong to no dossier. That's a valid outcome — do not force a
-        match.
-      enabledConnectors:
-        - connector: grove/api
-          operations:
-            - get_dossier_classes
-            - get_dossier_class_properties
-            - get_document
-            - get_property_values
-            - find_candidate_dossiers
-            - assign_dossier
-            - propose_new_dossier
-
-    # ───────── retrieval ─────────
     - namespace: grove
       name: search-orchestrator
       description: Decomposes queries; runs deep_search, merges results.
@@ -2396,6 +2242,22 @@ spec:
         refers to it. Prefer grounded when in doubt: wrongly hiding a real
         name is worse than keeping a doubtful one. Reply with ONLY the
         requested JSON object.
+
+    - namespace: grove
+      name: dossier-oneshot-agent
+      description: Stateless one-shot dossier matcher - reads a document's identity plus the candidate dossiers and returns assignments as JSON. Invoked per document by Grove's pipeline when dossier classes are configured.
+      llmProviderName: ${{ vars.CHEAP_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You decide which existing dossiers a document belongs to, one
+        document at a time. The user message carries the dossier classes,
+        the candidate dossiers, and the document's identity (filename,
+        class, summary, properties).
+
+        Assign only when the document clearly belongs to a dossier - the
+        same matter, case, transaction or investigation. Use candidate
+        names exactly as given; never invent a dossier. No clear match
+        means an empty list. Reply with ONLY the requested JSON object.
 
     - namespace: grove
       name: relationship-oneshot-agent

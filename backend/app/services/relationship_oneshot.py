@@ -1,13 +1,13 @@
 """One-shot relationship extraction: one tool-less LLM call per document.
 
-The agentic relationship stage (grove/relationship-extractor-agent) reads
-the document through tool calls — get_document, read_document_content,
-find_entity_by_name per edge end, one record call per edge. Measured on
-the cost sampling runs that is ~11 model calls per document; the tool-loop
-fan-out, not the extraction itself, is where the money goes.
+The retired agentic relationship stage read the document through tool
+calls — get_document, read_document_content, find_entity_by_name per edge
+end, one record call per edge. Measured on the cost sampling runs that
+was ~12 model calls and ~$0.11 per document; the tool-loop fan-out, not
+the extraction itself, was where the money went.
 
-This module replaces the loop with the one-shot pattern already used for
-front matter and grounding:
+This module is its replacement, using the one-shot pattern already used
+for front matter and grounding:
 
   1. ONE tool-less completion (CHEAP_LLM, temp 0, forced JSON) gets the
      document text, the relationship definitions with their guidance, and

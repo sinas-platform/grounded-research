@@ -90,14 +90,7 @@ export default function DocumentsPage() {
       api('/ingestion/runs', {
         method: 'POST',
         body: JSON.stringify({
-          stages: [
-            'classifier',
-            'summarizer',
-            'property_extractor',
-            'entity_extractor',
-            'relationship_extractor',
-            'dossier_assigner',
-          ],
+          // parts omitted = the full pipeline
           filter: { staged_only: true },
           dry_run: false,
         }),

@@ -14,7 +14,7 @@ import { PageHeader } from '@/components/PageHeader';
 interface IngestionRun {
   id: string;
   status: string;
-  stages: string[];
+  parts: string[];
   total_units: number;
   done_units: number;
   failed_units: number;
@@ -226,7 +226,7 @@ function RunsMini({ runs }: { runs: IngestionRun[] }) {
           <div className="flex items-center justify-between">
             <span className="text-stone-700">
               <StatusDot status={r.status} />{' '}
-              <span className="font-mono text-xs text-stone-500">{r.stages.join(', ')}</span>
+              <span className="font-mono text-xs text-stone-500">{(r.parts ?? []).join(', ')}</span>
             </span>
             <span className="text-xs text-stone-500">
               {r.done_units}/{r.total_units}

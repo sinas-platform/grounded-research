@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -442,6 +442,14 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
+
+  // Full pipeline is the default, same as the new-run form.
+  useEffect(() => {
+    if (parts.data && selected.size === 0) {
+      setSelected(new Set(parts.data.map((p) => p.key)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parts.data]);
 
   const submit = useMutation({
     mutationFn: () =>

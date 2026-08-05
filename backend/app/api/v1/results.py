@@ -9,9 +9,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.annotations import _load_definitions
 from app.auth import CallerIdentity, get_caller
 from app.db import get_session
 from app.models import Document, DocumentClass, Result, ResultDocument, ResultTrace
+from app.services.annotations import annotations_for_documents
 from app.services.introspect import SUMMARY_PREVIEW_CHARS
 from app.services.result_filter import load_visible_result
 from app.schemas.common import TraceOut
@@ -57,6 +59,16 @@ async def get_result_documents(
     limit: Annotated[int | None, Query(ge=1, le=200)] = None,
     offset: Annotated[int, Query(ge=0)] = 0,
     compact: bool = False,
+    annotate: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated annotation names to attach per document, "
+                "computed for the case entity the document is the full text "
+                "of (e.g. annotate=issuing_body,authority_tier)."
+            )
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
@@ -69,6 +81,8 @@ async def get_result_documents(
     through large results (ordered by rank, then id, so pages are stable);
     `compact=true` returns only the identity fields, so a caller that needs
     just "which documents, in what order" gets many more rows per response.
+    `annotate=` attaches derived graph fields (see the /annotations router)
+    per row; unknown names are a 404.
     """
     stmt = (
         select(
@@ -87,6 +101,15 @@ async def get_result_documents(
     if limit is not None:
         stmt = stmt.limit(limit)
     rows = (await session.execute(stmt)).all()
+
+    annotations_by_doc: dict[uuid.UUID, dict] = {}
+    if annotate is not None and rows:
+        names = [n.strip() for n in annotate.split(",") if n.strip()]
+        definitions = await _load_definitions(session, names or None)
+        annotations_by_doc = await annotations_for_documents(
+            session, [rd.document_id for rd, *_ in rows], definitions
+        )
+
     if compact:
         return [
             ResultDocumentCompactOut(
@@ -94,17 +117,19 @@ async def get_result_documents(
                 filename=filename,
                 document_class_name=class_name,
                 rank=rd.rank,
+                annotations=annotations_by_doc.get(rd.document_id),
             )
             for rd, filename, class_name, _ in rows
         ]
     return [
         ResultDocumentOut(
             **ResultDocumentOut.model_validate(rd).model_dump(
-                exclude={"filename", "document_class_name", "summary"}
+                exclude={"filename", "document_class_name", "summary", "annotations"}
             ),
             filename=filename,
             document_class_name=class_name,
             summary=summary,
+            annotations=annotations_by_doc.get(rd.document_id),
         )
         for rd, filename, class_name, summary in rows
     ]

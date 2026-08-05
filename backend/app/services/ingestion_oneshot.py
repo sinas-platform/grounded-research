@@ -215,7 +215,18 @@ def _front_matter_prompt(
     class_hint: tuple[str, float, str] | None,
     properties: list[dict] | None,
 ) -> str:
-    class_lines = "\n".join(f"- {n}: {d or ''}" for n, d in classes)
+    # A class declared by the source or already assigned is FIXED: no
+    # pick-one list, no classification ask — the call spends its attention
+    # on summary, properties and entities (CNAI-1167).
+    fixed_class = class_hint[0] if class_hint and class_hint[1] >= 1.0 else None
+    if fixed_class:
+        class_block = (
+            f'DOCUMENT CLASS (already assigned — echo it verbatim as '
+            f'document_class with class_confidence 1.0):\n"{fixed_class}"'
+        )
+    else:
+        class_lines = "\n".join(f"- {n}: {d or ''}" for n, d in classes)
+        class_block = f"DOCUMENT CLASSES (pick exactly one):\n{class_lines}"
     type_lines = "\n".join(
         f"- {t['name']}: {t['guidance']}" for t in entity_types
     )
@@ -223,7 +234,7 @@ def _front_matter_prompt(
     hint = (
         f'\nFilename rule suggests class "{class_hint[0]}" ({class_hint[2]}); '
         "confirm or overrule it on the content.\n"
-        if class_hint
+        if class_hint and not fixed_class
         else ""
     )
     prop_block = ""
@@ -238,8 +249,7 @@ def _front_matter_prompt(
         )
     return f"""Extract the front matter of one document. Reply with ONLY a JSON object, no prose.
 
-DOCUMENT CLASSES (pick exactly one):
-{class_lines}
+{class_block}
 {hint}
 ENTITY TYPES (follow each type's guidance exactly):
 {type_lines}
@@ -390,7 +400,15 @@ async def oneshot_ingest_document(
         ]
 
     hint = None
-    if rule and not rule_written and doc.document_class_id is None:
+    if doc.document_class_id is not None:
+        # class already fixed (source-declared, rule-written or previously
+        # classified): the prompt states it instead of asking for a pick
+        fixed_name = next(
+            (n for cid, n, _ in classes if cid == doc.document_class_id), None
+        )
+        if fixed_name:
+            hint = (fixed_name, 1.0, "already assigned")
+    elif rule and not rule_written:
         hint = rule
     prompt = _front_matter_prompt(
         filename=doc.filename or "",

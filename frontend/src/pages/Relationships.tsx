@@ -352,7 +352,7 @@ function Editor({
           <option value="many">many</option>
         </select>
       </Field>
-      <Field label="Extraction guidance" hint="read by relationship_extractor_agent">
+      <Field label="Extraction guidance" hint="read by the relationship extraction pass">
         <textarea
           value={draft.extraction_guidance}
           onChange={(e) => setDraft({ ...draft, extraction_guidance: e.target.value })}

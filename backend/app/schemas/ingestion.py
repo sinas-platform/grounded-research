@@ -8,17 +8,14 @@ from pydantic import BaseModel, Field
 
 from app.schemas.common import ORMModel
 
-Stage = Literal[
-    # current stages
-    "oneshot",
-    "relationship_extractor",
-    "dossier_assigner",
-    # legacy names, accepted for back-compat — normalized to "oneshot"
-    "classifier",
-    "summarizer",
-    "property_extractor",
-    "entity_extractor",
-]
+# The pipeline's parts, in execution order. A run may select a subset —
+# e.g. only "relationships" to re-extract edges after a config change
+# without re-paying metadata extraction. "extract" is the classify+
+# metadata+mentions LLM pass and the only part that wipes previous
+# artifacts before writing. "dossiers" is a free no-op when no dossier
+# classes are configured.
+Part = Literal["extract", "ground", "resolve", "relationships", "dossiers"]
+ALL_PARTS: tuple[str, ...] = ("extract", "ground", "resolve", "relationships", "dossiers")
 
 
 class RunFilter(BaseModel):
@@ -53,7 +50,11 @@ class RunFilter(BaseModel):
 
 
 class RunCreateIn(BaseModel):
-    stages: list[Stage] = Field(min_length=1)
+    """The filter selects documents; `parts` selects work (None = the full
+    pipeline). There is no `stages` field anymore — the former stage
+    architecture is gone."""
+
+    parts: list[Part] | None = None
     filter: RunFilter = Field(default_factory=RunFilter)
     dry_run: bool = False  # if true, returns the count without creating work
 
@@ -68,7 +69,9 @@ class RunCreateOut(BaseModel):
 class RunOut(ORMModel):
     id: uuid.UUID
     status: str
-    stages: list[str]
+    # The selected pipeline parts (stored in the run row's legacy `stages`
+    # column; exposed under the name that matches what it now holds).
+    parts: list[str] = Field(validation_alias="stages")
     filter: dict
     total_units: int
     done_units: int

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
@@ -82,7 +82,7 @@ interface DocumentContent {
   version: number;
 }
 
-interface StageDesc {
+interface PartDesc {
   key: string;
   label: string;
 }
@@ -237,7 +237,7 @@ function OverviewTab({
       )}
       {!doc.summary && (
         <div className="mt-6 text-stone-400 text-sm italic">
-          No summary yet — summarizer_agent hasn't run, or hasn't completed.
+          No summary yet — the extract pass hasn't run, or hasn't completed.
         </div>
       )}
 
@@ -435,19 +435,27 @@ function RelationshipsTab({ docId }: { docId: string }) {
 
 function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void }) {
   const qc = useQueryClient();
-  const stages = useQuery({
-    queryKey: ['ingestion-stages'],
-    queryFn: () => api<StageDesc[]>('/ingestion/stages'),
+  const parts = useQuery({
+    queryKey: ['ingestion-parts'],
+    queryFn: () => api<PartDesc[]>('/ingestion/parts'),
   });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [runId, setRunId] = useState<string | null>(null);
 
+  // Full pipeline is the default, same as the new-run form.
+  useEffect(() => {
+    if (parts.data && selected.size === 0) {
+      setSelected(new Set(parts.data.map((p) => p.key)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parts.data]);
+
   const submit = useMutation({
     mutationFn: () =>
       api<{ run_id: string; unit_count: number; status: string }>(
         `/ingestion/documents/${docId}/reprocess`,
-        { method: 'POST', body: JSON.stringify({ stages: Array.from(selected) }) },
+        { method: 'POST', body: JSON.stringify({ parts: Array.from(selected) }) },
       ),
     onSuccess: (res) => {
       setError(null);
@@ -471,11 +479,11 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
         Reprocess this document
       </div>
       <div className="text-xs text-stone-600 mb-3">
-        Pick which stages to rerun. Auto-extracted artifacts (entities, properties)
-        are wiped before re-running so they don't duplicate. Manual entries are kept.
+        Pick which pipeline parts to rerun. Only “extract” wipes auto-extracted
+        artifacts (entities, properties) first; manual entries are always kept.
       </div>
       <div className="grid grid-cols-2 gap-1 mb-3">
-        {(stages.data ?? []).map((s) => (
+        {(parts.data ?? []).map((s) => (
           <label key={s.key} className="flex items-center gap-2 text-sm">
             <input
               type="checkbox"
@@ -505,7 +513,7 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
             onClick={() => submit.mutate()}
             disabled={submit.isPending || selected.size === 0}
           >
-            {submit.isPending ? 'Starting…' : `Run ${selected.size} stage(s)`}
+            {submit.isPending ? 'Starting…' : `Run ${selected.size} part(s)`}
           </PrimaryButton>
           <SecondaryButton onClick={onClose}>Cancel</SecondaryButton>
         </div>

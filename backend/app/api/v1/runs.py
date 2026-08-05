@@ -1,4 +1,9 @@
-"""Ingestion runs — bulk reprocessing endpoints + per-doc reprocess sugar."""
+"""Ingestion runs — bulk reprocessing endpoints + per-doc reprocess sugar.
+
+A run = documents (RunFilter) × parts (default: the full pipeline). One
+in-process worker drives everything; GET is a plain read — nothing is
+advanced by polling.
+"""
 
 from __future__ import annotations
 
@@ -14,35 +19,71 @@ from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
 from app.models import IngestionRun, IngestionRunUnit
 from app.schemas.ingestion import (
+    ALL_PARTS,
+    Part,
     RunCreateIn,
     RunCreateOut,
     RunFilter,
     RunOut,
     RunUnitOut,
-    Stage,
 )
 from app.services.ingestion_runner import (
-    STAGES,
+    PARTS,
     expand_filter,
     materialize_run,
-    normalize_stages,
-    progress as ingestion_progress,
     submit_run,
 )
-from sinas import SinasClient
-from app.config import get_settings
 
 router = APIRouter(prefix="/ingestion", tags=["ingestion-runs"])
 
 
-class StageDescOut(BaseModel):
+class PartDescOut(BaseModel):
     key: str
     label: str
 
 
-@router.get("/stages", response_model=list[StageDescOut])
-async def list_stages() -> list[StageDescOut]:
-    return [StageDescOut(key=k, label=v["label"]) for k, v in STAGES.items()]
+@router.get("/parts", response_model=list[PartDescOut])
+async def list_parts() -> list[PartDescOut]:
+    """The pipeline's parts, in execution order — for run-trigger UIs."""
+    return [PartDescOut(key=k, label=v) for k, v in PARTS.items()]
+
+
+def _resolve_parts(parts: list[str] | None) -> list[str]:
+    """Dedupe, keep canonical execution order, default to all."""
+    if not parts:
+        return list(ALL_PARTS)
+    return [p for p in ALL_PARTS if p in set(parts)]
+
+
+async def _create_and_submit(
+    session: AsyncSession,
+    caller: CallerIdentity,
+    *,
+    parts: list[str],
+    run_filter: RunFilter,
+) -> tuple[IngestionRun, int]:
+    doc_ids = await expand_filter(session, run_filter)
+    if not doc_ids:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "filter selected zero documents — refusing to create an empty run",
+        )
+    run = IngestionRun(
+        status="pending",
+        stages=parts,  # legacy column name; holds the parts list
+        filter=run_filter.model_dump(mode="json"),
+        total_units=len(doc_ids),
+        done_units=0,
+        failed_units=0,
+        started_by=caller.user_id,
+        created_at=datetime.now(timezone.utc),
+    )
+    session.add(run)
+    await session.flush()
+    await materialize_run(session, run)
+    await submit_run(session, run)
+    await session.commit()
+    return run, len(doc_ids)
 
 
 @router.post(
@@ -56,15 +97,14 @@ async def create_run(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
+    parts = _resolve_parts(payload.parts)
     doc_ids = await expand_filter(session, payload.filter)
-    stages = normalize_stages(list(payload.stages))
-    unit_count = len(doc_ids) * len(stages)
 
     if payload.dry_run:
         return RunCreateOut(
             run_id=None,
             document_count=len(doc_ids),
-            unit_count=unit_count,
+            unit_count=len(doc_ids),
             status="would_start",
         )
 
@@ -74,30 +114,13 @@ async def create_run(
             "filter selected zero documents — refusing to create an empty run",
         )
 
-    run = IngestionRun(
-        status="pending",
-        stages=stages,
-        filter=payload.filter.model_dump(mode="json"),
-        total_units=unit_count,
-        done_units=0,
-        failed_units=0,
-        started_by=caller.user_id,
-        created_at=datetime.now(timezone.utc),
+    run, count = await _create_and_submit(
+        session, caller, parts=parts, run_filter=payload.filter
     )
-    session.add(run)
-    await session.flush()
-    await materialize_run(session, run)
-    # Submit batches inline using the caller's bearer. No worker; subsequent
-    # transitions (e.g. secondary stages after classifier) are driven by
-    # GET /ingestion/runs/{id}.
-    client = SinasClient(base_url=get_settings().sinas_url, token=caller.sinas_token)
-    await submit_run(session, run, client)
-    await session.commit()
-
     return RunCreateOut(
         run_id=run.id,
-        document_count=len(doc_ids),
-        unit_count=unit_count,
+        document_count=count,
+        unit_count=count,
         status="started",
     )
 
@@ -121,29 +144,11 @@ async def list_runs(
 async def get_run(
     run_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
-    caller: CallerIdentity = Depends(get_caller),
 ):
-    """Returns the run row, **after** advancing its state from Sinas.
-
-    Each GET fetches live batch status for every submitted stage; if
-    classifier is in stages and has just turned terminal, secondary stages
-    are submitted here. This is the only place run state advances — there
-    is no background worker.
-    """
+    """Plain read — the worker advances all state."""
     row = await session.get(IngestionRun, run_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "run not found")
-    if row.status in ("completed", "failed", "cancelled"):
-        return row
-    client = SinasClient(base_url=get_settings().sinas_url, token=caller.sinas_token)
-    try:
-        await ingestion_progress(row, client)
-    except Exception as exc:  # noqa: BLE001
-        import logging as _log
-        _log.getLogger(__name__).warning(
-            "ingestion progress fetch failed for run %s: %s", run_id, exc
-        )
-    await session.refresh(row)
     return row
 
 
@@ -168,7 +173,7 @@ async def list_run_units(
 
 # ────────────────────── per-document syntactic sugar ──────────────────────
 class ReprocessOneIn(BaseModel):
-    stages: list[Stage]
+    parts: list[Part] | None = None
 
 
 @router.post(
@@ -184,25 +189,15 @@ async def reprocess_document(
     caller: CallerIdentity = Depends(get_caller),
 ):
     """Reprocess a single document — creates a 1-doc ingestion run."""
-    run = IngestionRun(
-        status="pending",
-        stages=stages,
-        filter=RunFilter(document_ids=[doc_id]).model_dump(mode="json"),
-        total_units=len(payload.stages),
-        done_units=0,
-        failed_units=0,
-        started_by=caller.user_id,
-        created_at=datetime.now(timezone.utc),
+    run, count = await _create_and_submit(
+        session,
+        caller,
+        parts=_resolve_parts(payload.parts),
+        run_filter=RunFilter(document_ids=[doc_id]),
     )
-    session.add(run)
-    await session.flush()
-    await materialize_run(session, run)
-    client = SinasClient(base_url=get_settings().sinas_url, token=caller.sinas_token)
-    await submit_run(session, run, client)
-    await session.commit()
     return RunCreateOut(
         run_id=run.id,
-        document_count=1,
-        unit_count=len(payload.stages),
+        document_count=count,
+        unit_count=count,
         status="started",
     )

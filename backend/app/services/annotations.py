@@ -496,3 +496,97 @@ def order_subjects(
         return tuple(parts)
 
     return sorted(subject_ids, key=sort_key)
+
+
+# ─────────────────────────────────────────────────────────────
+# Response surfacing: annotations for the entities documents stand for
+# ─────────────────────────────────────────────────────────────
+
+
+async def annotations_for_documents(
+    session: AsyncSession,
+    document_ids: list[uuid.UUID],
+    definitions: list[AnnotationDefinition],
+) -> dict[uuid.UUID, dict]:
+    """Annotations for the case entities the given documents are the full
+    text of, keyed by document id — the read-side surface for result and
+    answer endpoints (?annotate=).
+
+    A document stands for the entity it is linked to through an active
+    document→entity edge (is_full_text_of and friends: definitions whose
+    source is a document class and target an entity type). Documents with
+    no such edge, and subjects whose path reaches nothing, report every
+    annotation as None — absence is an answer, not an error.
+
+    Values come from the materialized store where present; anything else
+    (non-materialized definitions, subjects not yet backfilled) is
+    computed on the fly. A subject whose path genuinely reaches nothing
+    has no stored row either, so it is recomputed on every read — cheap,
+    but a reason to keep materialized backfills current.
+    """
+    out: dict[uuid.UUID, dict] = {
+        did: {"subject_entity_id": None, "values": {d.name: None for d in definitions}}
+        for did in document_ids
+    }
+    if not document_ids or not definitions:
+        return out
+
+    pairs = (
+        await session.execute(
+            select(Relationship.source_id, Relationship.target_id)
+            .join(
+                RelationshipDefinition,
+                RelationshipDefinition.id == Relationship.relationship_definition_id,
+            )
+            .outerjoin(
+                RelationshipState,
+                RelationshipState.id == Relationship.current_state_id,
+            )
+            .where(
+                RelationshipDefinition.source_ref_type == "document_class",
+                RelationshipDefinition.target_ref_type == "entity_type",
+                Relationship.source_id.in_(document_ids),
+                (Relationship.current_state_id.is_(None))
+                | (RelationshipState.counts_as_active.is_(True)),
+            )
+        )
+    ).all()
+    subject_by_doc: dict[uuid.UUID, uuid.UUID] = {}
+    for doc_id, ent_id in sorted(pairs, key=lambda p: (str(p[0]), str(p[1]))):
+        subject_by_doc.setdefault(doc_id, ent_id)  # deterministic pick
+    if not subject_by_doc:
+        return out
+    subjects = sorted(set(subject_by_doc.values()), key=str)
+
+    # materialized values first; compute whatever the store doesn't cover
+    values: dict[tuple[uuid.UUID, str], dict | None] = {}
+    materialized = [d for d in definitions if d.materialize]
+    if materialized:
+        by_def_id = {d.id: d.name for d in materialized}
+        rows = (
+            await session.execute(
+                select(AnnotationValue).where(
+                    AnnotationValue.annotation_definition_id.in_(list(by_def_id)),
+                    AnnotationValue.subject_id.in_(subjects),
+                )
+            )
+        ).scalars().all()
+        for v in rows:
+            values[(v.subject_id, by_def_id[v.annotation_definition_id])] = v.value
+
+    missing_defs = [
+        d for d in definitions
+        if any((s, d.name) not in values for s in subjects)
+    ]
+    if missing_defs:
+        computed = await compute_annotations(session, subjects, missing_defs)
+        for s in subjects:
+            for d in missing_defs:
+                values.setdefault((s, d.name), computed[s][d.name])
+
+    for did, subject in subject_by_doc.items():
+        out[did] = {
+            "subject_entity_id": subject,
+            "values": {d.name: values.get((subject, d.name)) for d in definitions},
+        }
+    return out

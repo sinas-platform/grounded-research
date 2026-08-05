@@ -211,6 +211,10 @@ class ResultDocumentOut(TimestampedOut):
     filename: str | None = None
     document_class_name: str | None = None
     summary: str | None = None
+    # Present only when the read asked for it (?annotate=): derived graph
+    # fields for the case entity this document is the full text of —
+    # {"subject_entity_id": ..., "values": {name: value | None}}.
+    annotations: dict | None = None
 
 
 class ResultDocumentCompactOut(BaseModel):
@@ -221,6 +225,7 @@ class ResultDocumentCompactOut(BaseModel):
     filename: str | None = None
     document_class_name: str | None = None
     rank: int | None = None
+    annotations: dict | None = None
 
 
 class AnswerOut(OwnedOut):

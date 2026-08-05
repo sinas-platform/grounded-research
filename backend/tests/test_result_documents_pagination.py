@@ -113,6 +113,7 @@ async def test_compact_projects_identity_fields_only():
         "filename",
         "document_class_name",
         "rank",
+        "annotations",  # opt-in via ?annotate=; None (excluded) otherwise
     }
 
 

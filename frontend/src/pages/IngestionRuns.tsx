@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import {
@@ -10,7 +10,7 @@ import {
   inputClasses,
 } from '@/components/Form';
 
-interface StageDesc {
+interface PartDesc {
   key: string;
   label: string;
 }
@@ -24,7 +24,7 @@ interface DocumentClass {
 interface Run {
   id: string;
   status: string;
-  stages: string[];
+  parts: string[];
   filter: Record<string, unknown>;
   total_units: number;
   done_units: number;
@@ -55,7 +55,7 @@ export default function IngestionRunsPage() {
     <div>
       <PageHeader
         title="Ingestion runs"
-        description="Bulk reprocess documents through one or more pipeline stages. Useful when configuration (classes, entities, playbooks) has changed and existing documents are stale."
+        description="Run the ingestion pipeline over a document selection. Pick a subset of parts to redo only that work — e.g. only relationship extraction after the relationship config changed."
         actions={
           <PrimaryButton onClick={() => setCreating((v) => !v)}>
             {creating ? 'Cancel' : 'New run'}
@@ -90,22 +90,30 @@ function NewRunForm({
   onCreated: () => void;
 }) {
   const qc = useQueryClient();
-  const stages = useQuery({
-    queryKey: ['ingestion-stages'],
-    queryFn: () => api<StageDesc[]>('/ingestion/stages'),
+  const parts = useQuery({
+    queryKey: ['ingestion-parts'],
+    queryFn: () => api<PartDesc[]>('/ingestion/parts'),
   });
   const classes = useQuery({
     queryKey: ['document-classes'],
     queryFn: () => api<DocumentClass[]>('/config/document-classes'),
   });
-  const [selectedStages, setSelectedStages] = useState<Set<string>>(new Set());
+  const [selectedParts, setSelectedParts] = useState<Set<string>>(new Set());
   const [classIds, setClassIds] = useState<Set<string>>(new Set());
   const [createdSince, setCreatedSince] = useState('');
   const [preview, setPreview] = useState<CreateResult | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // The full pipeline is the default: preselect every part once loaded.
+  useEffect(() => {
+    if (parts.data && selectedParts.size === 0) {
+      setSelectedParts(new Set(parts.data.map((p) => p.key)));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [parts.data]);
+
   const buildBody = (dryRun: boolean) => ({
-    stages: Array.from(selectedStages),
+    parts: Array.from(selectedParts),
     filter: {
       document_class_ids: classIds.size > 0 ? Array.from(classIds) : null,
       created_since: createdSince ? new Date(createdSince).toISOString() : null,
@@ -140,11 +148,11 @@ function NewRunForm({
     onError: (err) => setError(err instanceof Error ? err.message : 'failed'),
   });
 
-  const toggleStage = (k: string) => {
-    const n = new Set(selectedStages);
+  const togglePart = (k: string) => {
+    const n = new Set(selectedParts);
     if (n.has(k)) n.delete(k);
     else n.add(k);
-    setSelectedStages(n);
+    setSelectedParts(n);
     setPreview(null);
   };
   const toggleClass = (id: string) => {
@@ -159,20 +167,24 @@ function NewRunForm({
     <div className="mb-6 p-4 border border-stone-200 bg-white rounded space-y-4">
       <div>
         <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2">
-          Stages
+          Pipeline parts
         </div>
         <div className="grid grid-cols-2 gap-1">
-          {(stages.data ?? []).map((s) => (
-            <label key={s.key} className="flex items-center gap-2 text-sm">
+          {(parts.data ?? []).map((p) => (
+            <label key={p.key} className="flex items-center gap-2 text-sm">
               <input
                 type="checkbox"
-                checked={selectedStages.has(s.key)}
-                onChange={() => toggleStage(s.key)}
+                checked={selectedParts.has(p.key)}
+                onChange={() => togglePart(p.key)}
               />
-              <span className="font-mono text-xs text-stone-500">{s.key}</span>
-              <span>— {s.label}</span>
+              <span className="font-mono text-xs text-stone-500">{p.key}</span>
+              <span>— {p.label}</span>
             </label>
           ))}
+        </div>
+        <div className="text-xs text-stone-400 mt-1">
+          All parts = full pipeline. A subset redoes only that work; only
+          “extract” wipes previously extracted data first.
         </div>
       </div>
 
@@ -216,9 +228,8 @@ function NewRunForm({
 
       {preview && (
         <div className="text-sm text-stone-700 bg-stone-100 rounded px-3 py-2">
-          Would process <b>{preview.document_count}</b> document(s) ×{' '}
-          <b>{selectedStages.size}</b> stage(s) ={' '}
-          <b>{preview.unit_count}</b> agent invocations.
+          Would process <b>{preview.document_count}</b> document(s) through{' '}
+          <b>{selectedParts.size}</b> part(s).
         </div>
       )}
       <ErrorBanner message={error} />
@@ -228,7 +239,7 @@ function NewRunForm({
         </SecondaryButton>
         <PrimaryButton
           onClick={() => submit.mutate()}
-          disabled={submit.isPending || selectedStages.size === 0}
+          disabled={submit.isPending || selectedParts.size === 0}
         >
           {submit.isPending ? 'Starting…' : 'Start run'}
         </PrimaryButton>
@@ -261,7 +272,7 @@ function RunRow({ run }: { run: Run }) {
         <div className="text-xs text-stone-500 font-mono">{run.id.slice(0, 8)}</div>
       </div>
       <div className="text-xs text-stone-600 mb-2">
-        Stages: {run.stages.map((s) => <span key={s} className="font-mono mr-2">{s}</span>)}
+        Parts: {(run.parts ?? []).map((p) => <span key={p} className="font-mono mr-2">{p}</span>)}
       </div>
       <div className="w-full bg-stone-200 rounded h-2 overflow-hidden">
         <div
@@ -270,7 +281,7 @@ function RunRow({ run }: { run: Run }) {
         />
       </div>
       <div className="text-xs text-stone-500 mt-1">
-        {run.done_units}/{run.total_units} units
+        {run.done_units}/{run.total_units} document(s)
         {run.failed_units > 0 && (
           <span className="text-amber-700"> · {run.failed_units} failed</span>
         )}

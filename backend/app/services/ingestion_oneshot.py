@@ -14,8 +14,9 @@ round-trips. This module replaces those four stages with:
                          properties + residual entities; the SERVER
                          writes every row. The document is read once.
 
-Relationship extraction is intentionally NOT replaced here: it needs graph
-context and stays on the existing agentic stage.
+Relationship extraction follows the same pattern in relationship_oneshot
+(one tool-less call after grounding + resolution); the agentic stage
+remains only as a comparison path.
 
 Property extraction depends on the class being known (each class has its
 own property schema). When rules classify the document, properties ride in

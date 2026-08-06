@@ -263,6 +263,10 @@ class ClaimEvidenceOut(TimestampedOut):
     relevance: float | None = None
     validated: bool
     validation_reasoning: str | None = None
+    # Present only when the read asked for it (?annotate=): derived graph
+    # fields for the case entity the evidence document is the full text of
+    # — same shape as on result-documents reads.
+    annotations: dict | None = None
 
 
 class ClaimWithEvidenceOut(ClaimOut):

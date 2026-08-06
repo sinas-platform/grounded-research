@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.annotations import _load_definitions
 from app.auth import CallerIdentity, get_caller
 from app.db import get_session
 from app.models import Answer, AnswerClaim, ClaimEvidence
+from app.services.annotations import annotations_for_documents
 from app.schemas.runtime import (
     AnswerOut,
     ClaimEvidenceOut,
@@ -87,6 +90,16 @@ async def get_answer_claims(
 async def get_answer_evidence(
     answer_id: uuid.UUID,
     pending_only: bool = False,
+    annotate: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Comma-separated annotation names to attach per evidence row, "
+                "computed for the case entity the evidence document is the "
+                "full text of (e.g. annotate=issuing_body,authority_tier)."
+            )
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
@@ -119,12 +132,24 @@ async def get_answer_evidence(
     by_claim: dict[uuid.UUID, list[ClaimEvidence]] = {}
     for row in evidence:
         by_claim.setdefault(row.claim_id, []).append(row)
+
+    annotations_by_doc: dict[uuid.UUID, dict] = {}
+    if annotate is not None and evidence:
+        names = [n.strip() for n in annotate.split(",") if n.strip()]
+        definitions = await _load_definitions(session, names or None)
+        annotations_by_doc = await annotations_for_documents(
+            session, list({e.document_id for e in evidence}), definitions
+        )
+
+    def _ev_out(e: ClaimEvidence) -> ClaimEvidenceOut:
+        out = ClaimEvidenceOut.model_validate(e)
+        out.annotations = annotations_by_doc.get(e.document_id)
+        return out
+
     return [
         ClaimWithEvidenceOut(
             **ClaimOut.model_validate(c).model_dump(),
-            evidence=[
-                ClaimEvidenceOut.model_validate(e) for e in by_claim.get(c.id, [])
-            ],
+            evidence=[_ev_out(e) for e in by_claim.get(c.id, [])],
         )
         for c in claims
         if not pending_only or c.id in by_claim

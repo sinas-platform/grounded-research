@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.34"
+  version: "0.1.35"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -1060,6 +1060,39 @@ spec:
               result_id: { type: string, format: uuid }
             required: [result_id]
 
+        - name: order_documents
+          method: POST
+          path: /api/v1/annotations/order-documents
+          parameters:
+            type: object
+            properties:
+              document_ids:
+                type: array
+                items: { type: string, format: uuid }
+              group_by: { type: string }
+              precedence:
+                type: array
+                items: { type: string }
+              then_by:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    by: { type: string }
+                    direction: { type: string, enum: [asc, desc] }
+              names:
+                type: array
+                items: { type: string }
+            required: [document_ids]
+          description: |
+            Order documents by their derived authority annotations in ONE
+            deterministic call. then_by [{"by": "authority_tier.depth",
+            "direction": "asc"}] puts decisions of the highest authorities
+            first (depth 1 = the issuer has nothing above it). Returns the
+            ordered document ids plus each document's annotations
+            (issuing_body, authority_tier). Documents without a case entity
+            sort last.
+
         - name: get_result_documents
           method: GET
           path: /api/v1/results/{{ result_id }}/documents
@@ -1960,6 +1993,7 @@ spec:
         - connector: grove/api
           operations:
             - start_answer
+            - order_documents
             - draft_claim
             - bind_evidence
             - update_claim

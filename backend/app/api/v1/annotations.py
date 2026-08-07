@@ -19,6 +19,7 @@ from app.models import AnnotationDefinition
 from app.services.annotations import (
     AnnotationConfigError,
     OrderKey,
+    annotations_for_documents,
     compute_annotations,
     materialize,
     order_subjects,
@@ -174,3 +175,46 @@ async def order(
         then_by=[OrderKey(by=k.by, direction=k.direction) for k in body.then_by],
     )
     return OrderOut(ordered=ordered, annotations=computed)
+
+
+class OrderDocumentsIn(BaseModel):
+    """Document-level ordering — the agent-facing surface (CNAI-927).
+    Agents hold document ids; each document is annotated through the case
+    entity it is the full text of, then sorted exactly like /order.
+    Documents without a case entity sort last, deterministically."""
+
+    document_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    group_by: str | None = None
+    precedence: list[str] | None = None
+    then_by: list[OrderKeyIn] = Field(default_factory=list)
+    names: list[str] | None = None
+
+
+class OrderDocumentsOut(BaseModel):
+    ordered: list[uuid.UUID]
+    annotations: dict[uuid.UUID, dict]
+
+
+@router.post("/order-documents", response_model=OrderDocumentsOut)
+async def order_documents(
+    body: OrderDocumentsIn,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """Order documents by their derived annotations in one deterministic
+    call — e.g. then_by [{"by": "authority_tier.depth", "direction": "asc"}]
+    puts decisions from the highest authorities first (depth 1 = the issuer
+    has nothing above it)."""
+    definitions = await _load_definitions(session, body.names)
+    per_doc = await annotations_for_documents(
+        session, body.document_ids, definitions
+    )
+    values = {did: (a or {}).get("values") or {} for did, a in per_doc.items()}
+    ordered = order_subjects(
+        body.document_ids,
+        values,
+        group_by=body.group_by,
+        precedence=body.precedence,
+        then_by=[OrderKey(by=k.by, direction=k.direction) for k in body.then_by],
+    )
+    return OrderDocumentsOut(ordered=ordered, annotations=per_doc)

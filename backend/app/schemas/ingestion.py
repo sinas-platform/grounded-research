@@ -52,7 +52,15 @@ class RunFilter(BaseModel):
 class RunCreateIn(BaseModel):
     """The filter selects documents; `parts` selects work (None = the full
     pipeline). There is no `stages` field anymore — the former stage
-    architecture is gone."""
+    architecture is gone.
+
+    Unknown fields are REJECTED. In particular a caller still sending the
+    old `stages` key must get a 422, not a silent full-pipeline run at
+    ~5× the cost of the parts it thought it asked for (bitten in the
+    wild on 7 Aug: grove_sink sent stages=["oneshot"] and paid for
+    everything). Same fail-loudly rule as RunFilter."""
+
+    model_config = {"extra": "forbid"}
 
     parts: list[Part] | None = None
     filter: RunFilter = Field(default_factory=RunFilter)

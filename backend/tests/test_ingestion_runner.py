@@ -107,3 +107,18 @@ async def test_extract_error_skips_downstream_passes(monkeypatch):
     assert "extract" in calls
     for name in ("ground", "resolve", "relationships", "dossiers"):
         assert name not in calls, name
+
+
+def test_legacy_stages_key_is_rejected_not_silently_ignored():
+    """A caller still sending the retired `stages` key must get a
+    validation error, not a silent full-pipeline run (the 5x-cost trap
+    grove_sink hit on 7 Aug)."""
+    import pydantic
+    import pytest as _pytest
+
+    from app.schemas.ingestion import RunCreateIn
+
+    with _pytest.raises(pydantic.ValidationError):
+        RunCreateIn(stages=["oneshot"], filter={})
+    # the modern shape still validates
+    assert RunCreateIn(parts=["relationships"]).parts == ["relationships"]

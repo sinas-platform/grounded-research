@@ -46,6 +46,21 @@ _NUMBERED = re.compile(
     r"\s*$" % _MAX_TITLE
 )
 
+# Older Commission decisions invert the dot convention: "1 INTRODUCTION"
+# (bare number, ALL-CAPS title) is a section heading, while "1. On 21
+# September..." (dotted) is a numbered paragraph. The all-caps title is
+# the distinguisher — footnotes ("1 OJ L 24, ..., p. 1.") carry
+# lowercase. Roman variants ("IV COMPETITIVE ASSESSMENT") included.
+_CAPS_NUMBERED = re.compile(
+    r"^\s{0,3}(?P<num>\d{1,2}|[IVXLC]{1,6})\s+(?P<title>[A-Z][A-Z0-9 ,'&()/-]{2,%d})\s*$"
+    % _MAX_TITLE
+)
+
+# Standalone bold line — the heading convention of converted bulletins
+# ("**THE KEY POINTS**"). Heuristic-pool only: bold is also used for
+# emphasis, so it never counts as explicit structure.
+_BOLD_HEADING = re.compile(r"^\*\*(?P<title>[^*].{2,%d}?)\*\*$" % _MAX_TITLE)
+
 # Language-neutral rejection: enumerated prose ends in continuation
 # punctuation. (No word lists — an earlier connective list was
 # English-biased; the uppercase title-start requirement and the prose
@@ -97,6 +112,22 @@ def derive_toc(content: str) -> list[dict]:
                 {"level": len(m.group(1)), "title": m.group(2).strip(), "line": i}
             )
             continue
+        m = _BOLD_HEADING.match(line.strip())
+        if m:
+            numbered_entries.append(
+                {"level": 2, "title": m.group("title").strip(), "line": i}
+            )
+            continue
+        m = _CAPS_NUMBERED.match(line)
+        if m and m.group("title").strip().isupper() and len(m.group("title").strip()) >= 4:
+            numbered_entries.append(
+                {
+                    "level": 1,
+                    "title": f"{m.group('num')} {m.group('title').strip()}",
+                    "line": i,
+                }
+            )
+            continue
         m = _NUMBERED.match(line)
         if m:
             title = m.group("title").strip()
@@ -120,6 +151,7 @@ def derive_toc(content: str) -> list[dict]:
                     "level": _numbered_level(m.group("num")),
                     "title": f"{m.group('num')} {title}".strip(),
                     "line": i,
+                    "src": "dotted",
                 }
             )
 
@@ -132,8 +164,20 @@ def derive_toc(content: str) -> list[dict]:
         entries = sorted(md_entries + numbered_entries, key=lambda e: e["line"])
 
     if len(entries) > _MAX_ENTRIES:
-        # not a heading structure — a numbered list masquerading as one
-        return []
+        # The dotted-number heuristic flooded (a document that numbers
+        # every paragraph). Retry with only the high-confidence sources —
+        # markdown, all-caps-numbered and bold headings — before giving
+        # up: old Commission decisions have BOTH numbered paragraphs and
+        # caps section headings, and the ceiling must not discard the
+        # real structure along with the noise.
+        entries = sorted(
+            md_entries + [e for e in numbered_entries if e.get("src") != "dotted"],
+            key=lambda e: e["line"],
+        )
+        if len(entries) > _MAX_ENTRIES:
+            return []
+    for e in entries:
+        e.pop("src", None)
     return _close_ranges(entries, len(lines))
 
 

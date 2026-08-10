@@ -130,3 +130,35 @@ def test_multilingual_wall_of_text_wraps():
     wrapped = normalize_line_density(fr.strip())
     assert len(wrapped.split("\n")) >= 30
     assert wrapped.split() == fr.strip().split()
+
+
+def test_caps_numbered_headings_old_commission_format():
+    content = "\n".join([
+        "WHEREAS:",                                          # 1
+        "1 INTRODUCTION",                                    # 2 — heading
+        "1. On 21 September 2007, the Commission received a notification of a "
+        "proposed concentration pursuant to Article 4 of Council Regulation "
+        "(EC) No 139/2004 by which Google Inc. acquires control.",  # 3 — paragraph
+        "1  OJ L 24, 29.1.2004, p. 1.",                      # 4 — footnote
+        "",                                                  # 5
+        "3 THE CONCENTRATION",                               # 6 — heading
+        "text",                                              # 7
+    ])
+    toc = derive_toc(content)
+    titles = [e["title"] for e in toc]
+    assert "1 INTRODUCTION" in titles
+    assert "3 THE CONCENTRATION" in titles
+    assert not any("OJ L 24" in t for t in titles)
+    assert not any("September" in t for t in titles)
+
+
+def test_standalone_bold_line_is_a_heading():
+    content = "\n".join([
+        "Some intro prose.",
+        "",
+        "**THE KEY POINTS**",
+        "point one",
+        "**not a heading because** it continues",
+    ])
+    toc = derive_toc(content)
+    assert [e["title"] for e in toc] == ["THE KEY POINTS"]

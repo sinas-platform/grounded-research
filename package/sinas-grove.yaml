@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.35"
+  version: "0.1.36"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -43,24 +43,50 @@ spec:
       example: https://grove.example.com
       required: true
 
-    - name: PRIMARY_LLM
+    - name: SEARCH_LLM
       type: resource_ref
       resource: llm_providers
       description: >
-        LLM provider used by the capable / mid-tier agents — orchestration,
-        deep search, relationship discovery, synthesis, and faithfulness
-        validation. Should point at a provider configured for a strong reasoning
-        model (e.g. Claude Sonnet).
+        Provider for the search/orchestration tier - search orchestrator,
+        deep search, discovery, relationship discovery, remediation. Needs a
+        strong reasoning model (e.g. Claude Sonnet).
       required: true
 
-    - name: CHEAP_LLM
+    - name: SYNTHESIS_LLM
       type: resource_ref
       resource: llm_providers
       description: >
-        LLM provider used by the cost-tiered ingestion enrichers — classifier,
-        summarizer, property extractor, entity extractor, relationship extractor,
-        dossier assigner, and process validation. Should point at a provider
-        configured for a fast / cheap model (e.g. Claude Haiku).
+        Provider for the synthesis agent - the memo writer. Split from the
+        search tier so the writing model can differ (e.g. Gemini for
+        language quality) without touching retrieval.
+      required: true
+
+    - name: EXTRACTION_LLM
+      type: resource_ref
+      resource: llm_providers
+      description: >
+        Provider for the extract pass (doc-metadata agent: classification,
+        summary, properties, entity mentions / NER). The candidate role for
+        a non-Claude model (e.g. Gemini Flash) - benchmark before switching.
+      required: true
+
+    - name: INGESTION_LLM
+      type: resource_ref
+      resource: llm_providers
+      description: >
+        Provider for the remaining one-shot ingestion passes - grounding,
+        entity resolution, relationship extraction, dossier assignment.
+        These calls never re-read a prompt prefix, so an uncached provider
+        variant (prompt_caching: false) is cheaper here.
+      required: true
+
+    - name: VALIDATION_LLM
+      type: resource_ref
+      resource: llm_providers
+      description: >
+        Provider for the validation tier - evidence check, faithfulness
+        validation, process validation, answer gate. High cache-read rates
+        measured here: keep this on a caching-enabled provider.
       required: true
 
   # ─────────────────────────────────────────────
@@ -1516,7 +1542,7 @@ spec:
     - namespace: grove
       name: search-orchestrator
       description: Decomposes queries; runs deep_search, merges results.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SEARCH_LLM }}
       temperature: 0.0
       systemPrompt: |
         You orchestrate retrieval for a user query.
@@ -1561,7 +1587,7 @@ spec:
     - namespace: grove
       name: deep-search-agent
       description: Runs the introspect-filter-check loop; produces a draft result.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SEARCH_LLM }}
       temperature: 0.0
       systemPrompt: |
         You retrieve documents for a query by iteratively narrowing
@@ -1826,7 +1852,7 @@ spec:
     - namespace: grove
       name: process-validation-agent
       description: Checks a draft result against playbook criteria.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.VALIDATION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You validate a draft result against a retrieval playbook's
@@ -1877,7 +1903,7 @@ spec:
     - namespace: grove
       name: relationship-discovery-agent
       description: Proposes new relationships based on research context.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SEARCH_LLM }}
       temperature: 0.3
       systemPrompt: |
         You propose new relationships between documents/entities based on
@@ -1913,7 +1939,7 @@ spec:
     - namespace: grove
       name: synthesis-agent
       description: Drafts an answer with claim-bound evidence.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SYNTHESIS_LLM }}
       temperature: 0.3
       systemPrompt: |
         You synthesize an answer to a question using evidence from a
@@ -2013,7 +2039,7 @@ spec:
     - namespace: grove
       name: discovery-agent
       description: Per-document config suggester. One parameterized agent across all kinds (document_class, entity_type, relationship_definition, dossier_class, document_class_property).
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SEARCH_LLM }}
       systemPrompt: |
         You suggest **new configuration items** based on what a single document
         contains.
@@ -2128,7 +2154,7 @@ spec:
     - namespace: grove
       name: discovery-consolidator-agent
       description: Reads raw discovery candidates for a run, clusters semantic duplicates, and emits deduplicated config_proposal rows.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SEARCH_LLM }}
       systemPrompt: |
         You consolidate raw discovery candidates into deduplicated proposals.
 
@@ -2190,7 +2216,7 @@ spec:
     - namespace: grove
       name: answer-gate-agent
       description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by Grove's query runner before publishing.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.VALIDATION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE draft answer holistically. The user message contains
@@ -2224,7 +2250,7 @@ spec:
     - namespace: grove
       name: remediation-agent
       description: Stateless remediation drafter — turns answer-gate findings into explicit claim actions with line-numbered evidence. Invoked by Grove's query runner after the gate flags issues.
-      llmProviderName: ${{ vars.PRIMARY_LLM }}
+      llmProviderName: ${{ vars.SEARCH_LLM }}
       temperature: 0.0
       systemPrompt: |
         You remediate ONE draft answer in a single reply. The user message
@@ -2245,7 +2271,7 @@ spec:
     - namespace: grove
       name: entity-resolution-agent
       description: Stateless mention adjudicator — links ambiguous entity mentions to candidates using document context. Invoked per document by Grove's entity resolver.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.INGESTION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You judge which entity each mention refers to, one document at a
@@ -2262,7 +2288,7 @@ spec:
     - namespace: grove
       name: grounding-agent
       description: Stateless grounding judge - decides whether a document actually refers to each extracted name. Invoked per document by Grove's grounding gate.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.INGESTION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You judge whether a document actually refers to each listed name,
@@ -2280,7 +2306,7 @@ spec:
     - namespace: grove
       name: dossier-oneshot-agent
       description: Stateless one-shot dossier matcher - reads a document's identity plus the candidate dossiers and returns assignments as JSON. Invoked per document by Grove's pipeline when dossier classes are configured.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.INGESTION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You decide which existing dossiers a document belongs to, one
@@ -2296,7 +2322,7 @@ spec:
     - namespace: grove
       name: relationship-oneshot-agent
       description: Stateless one-shot relationship extractor - reads a document plus its recorded entities and the relationship definitions, returns explicitly stated edges as JSON. Invoked per document by Grove's one-shot ingestion path.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.INGESTION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You extract relationships explicitly stated in a document, one
@@ -2315,7 +2341,7 @@ spec:
     - namespace: grove
       name: doc-metadata-agent
       description: Stateless one-shot document-metadata extractor (class, summary, properties, entities) invoked per document by Grove's one-shot ingestion path.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.EXTRACTION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You extract structured document metadata from ONE document in a single
@@ -2332,7 +2358,7 @@ spec:
     - namespace: grove
       name: evidence-check-agent
       description: Stateless single-span verdict judge, invoked per evidence row by Grove's validate endpoint.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.VALIDATION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE claim and ALL of its cited evidence spans in a
@@ -2353,7 +2379,7 @@ spec:
       description: Re-reads cited spans, verifies support, blocks bad publishes.
       # Cheap tier: span-vs-text verification is mechanical; strictness comes
       # from the prompt, not model size. Revisit if verdict quality drops.
-      llmProviderName: ${{ vars.CHEAP_LLM }}
+      llmProviderName: ${{ vars.VALIDATION_LLM }}
       temperature: 0.0
       systemPrompt: |
         You validate that every piece of evidence in an answer actually

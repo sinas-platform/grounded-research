@@ -7,6 +7,8 @@ an empty toc, never a fabricated one.
 Run from the backend directory: `python -m pytest tests/test_toc.py`
 """
 
+import pytest
+
 from app.services.toc import derive_toc
 
 
@@ -162,3 +164,37 @@ def test_standalone_bold_line_is_a_heading():
     ])
     toc = derive_toc(content)
     assert [e["title"] for e in toc] == ["THE KEY POINTS"]
+
+
+@pytest.mark.asyncio
+async def test_first_read_opens_with_the_toc():
+    """A read without a window carries the toc before the content; ranged
+    reads skip it — the caller already has the map."""
+    import uuid as _uuid
+    from types import SimpleNamespace
+
+    from app.api.v1.documents import read_document_content
+
+    toc = {"entries": [{"level": 1, "title": "1. PARTIES", "line": 3, "line_to": 9}]}
+    parent = SimpleNamespace(id=_uuid.uuid4(), toc=toc)
+    dv = SimpleNamespace(id=_uuid.uuid4(), content_md="a\nb\nc\nd", version=1)
+
+    class _S:
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, stmt):
+            self.calls += 1
+            first = self.calls == 1
+            return SimpleNamespace(scalar_one_or_none=lambda: parent if first else dv)
+
+    class _Caller:
+        async def has_permission(self, perm):
+            return True
+
+    opening = await read_document_content(parent.id, 1, line_from=None, line_to=None, numbered=False, session=_S(), caller=_Caller())
+    assert list(opening.keys()).index("toc") < list(opening.keys()).index("content")
+    assert opening["toc"] == toc["entries"]
+
+    ranged = await read_document_content(parent.id, 1, line_from=2, line_to=3, numbered=False, session=_S(), caller=_Caller())
+    assert "toc" not in ranged

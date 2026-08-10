@@ -398,9 +398,12 @@ spec:
             keep tool responses small. The response includes `total_lines`,
             `line_from`, `line_to`, and `next_line` — if `next_line` is
             non-null, call again with `line_from=<next_line>` to continue
-            reading. For long documents, do NOT page from the top: pick
-            the relevant section from the document's toc (get_document)
-            and read exactly its line range via line_from/line_to.
+            reading. A call WITHOUT line_from/line_to opens the document:
+            the response starts with `toc` — the table of contents as
+            {title, level, line, line_to} entries — followed by the first
+            lines. For long documents, do NOT page from the top: pick the
+            relevant section from the toc and read exactly its line range
+            via line_from/line_to.
 
         - name: get_property_values
           method: GET

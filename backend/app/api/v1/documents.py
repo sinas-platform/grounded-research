@@ -283,7 +283,7 @@ async def read_document_content(
             f"{actual_start_1 + i}│{ln}" for i, ln in enumerate(slice_lines)
         )
 
-    return {
+    resp: dict = {
         "document_id": doc_id,
         # See the empty-content branch: the UUID a writer must reference.
         "document_version_id": dv.id,
@@ -294,9 +294,23 @@ async def read_document_content(
         "returned_lines": len(slice_lines),
         "next_line": next_line,
         "is_truncated": next_line is not None,
-        "content": body,
-        "extracted": True,
     }
+    # A read with no explicit window is the OPENING of the document — like
+    # a book, it starts with the table of contents, so the very first call
+    # already carries the map for targeted line_from/line_to jumps. Ranged
+    # reads skip it (the caller has it). The toc sits BEFORE the content
+    # field and is small by construction (≤400 entries, level-filtered
+    # beyond 100), so downstream size-capped tool transports that trim the
+    # large content field leave it intact.
+    if line_from is None and line_to is None:
+        doc_toc = getattr(parent, "toc", None)
+        entries = (doc_toc.get("entries") or []) if isinstance(doc_toc, dict) else []
+        if len(entries) > 100:
+            entries = [e for e in entries if e.get("level", 9) <= 2]
+        resp["toc"] = entries
+    resp["content"] = body
+    resp["extracted"] = True
+    return resp
 
 
 @router.get("/{doc_id}/property-values", response_model=list[PropertyValueOut])

@@ -103,5 +103,30 @@ def test_wall_of_text_is_rewrapped_but_normal_content_untouched():
     wrapped = normalize_line_density(wall)
     assert wrapped != wall
     assert len(wrapped.split("\n")) >= 50
-    # content is preserved, only line breaks added
-    assert wrapped.replace("\n", " ") == wall
+    # every word survives in order; only line breaks / boundary spaces move
+    assert wrapped.split() == wall.split()
+
+
+def test_md_structure_wins_over_numbered_heuristics():
+    content = "\n".join([
+        "# Decision",              # 1 — explicit structure
+        "text.",                   # 2
+        "## Assessment",           # 3 — explicit structure
+        "text.",                   # 4
+        "",                        # 5
+        "5. Short List Item",      # 6 — heuristic candidate, must be ignored
+        "text",                    # 7
+    ])
+    toc = derive_toc(content)
+    assert [e["title"] for e in toc] == ["Decision", "Assessment"]
+
+
+def test_multilingual_wall_of_text_wraps():
+    from app.services.toc import normalize_line_density, _guess_language
+
+    fr = ("La Cour constate une infraction dans le secteur de la livraison. "
+          "Elle inflige une amende de 3,5 millions EUR aux parties. ") * 30
+    assert _guess_language(fr) == "fr"
+    wrapped = normalize_line_density(fr.strip())
+    assert len(wrapped.split("\n")) >= 30
+    assert wrapped.split() == fr.strip().split()

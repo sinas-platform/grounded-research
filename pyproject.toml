@@ -20,6 +20,7 @@ httpx = "^0.27"
 python-multipart = "^0.0.9"
 sinas = { extras = ["fastapi"], version = ">=0.2.0" }
 pyyaml = "^6"
+pysbd = "^0.3"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8"

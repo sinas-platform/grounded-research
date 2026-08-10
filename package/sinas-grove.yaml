@@ -1563,9 +1563,9 @@ spec:
              questions ("how does X differ between A and B") and questions
              with multiple independent sub-questions usually do.
           2. Launch deep-search for ALL (sub)queries AT ONCE: emit every
-     `deep-search-agent` invocation as parallel tool calls in ONE
-     message — they execute concurrently, and sequential launching
-     multiplies wall-clock time by the number of subqueries. Each
+             `deep-search-agent` invocation as parallel tool calls in ONE
+             message — they execute concurrently, and sequential launching
+             multiplies wall-clock time by the number of subqueries. Each
              invocation runs the introspect-filter-validate loop and
              produces a draft result.
              If an invocation TIMES OUT, do not immediately re-dispatch:

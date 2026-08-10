@@ -34,6 +34,7 @@ from app.models import (
     UnresolvedEntityMention,
     UnresolvedRelationship,
 )
+from app.services.toc import normalize_line_density
 from app.schemas.runtime import (
     PropertyValueIn,
     PropertyValueOut,
@@ -152,6 +153,12 @@ async def post_upload(
         if payload.content_md
         else None
     )
+    # Wall-of-text sources (CourtListener plain_text: ~50K chars on a
+    # handful of lines) get re-wrapped to sentence-per-line HERE, before
+    # any extraction, so spans and line numbers stay consistent with the
+    # stored content. No-op for normally structured documents.
+    if content_md:
+        content_md = normalize_line_density(content_md)
     dv = DocumentVersion(document_id=doc.id, version=version, content_md=content_md)
     session.add(dv)
     await session.flush()

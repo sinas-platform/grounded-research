@@ -478,6 +478,14 @@ async def oneshot_ingest_document(
     if data.get("summary") and write and not (doc.summary or "").strip():
         doc.summary = str(data["summary"])[:8000]
 
+    # table of contents: deterministic parse of the stored markdown —
+    # verbatim headings with line ranges, or honestly empty (CNAI-1166).
+    # Always overwritten: the derivation is pure, so newer content wins.
+    if write:
+        from app.services.toc import derive_toc
+
+        doc.toc = {"entries": derive_toc(content)}
+
     # properties
     written_props = 0
     if class_props and isinstance(data.get("properties"), dict):

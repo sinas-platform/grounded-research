@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.36"
+  version: "0.1.37"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -373,6 +373,12 @@ spec:
             properties:
               doc_id: { type: string, format: uuid }
             required: [doc_id]
+          description: |
+            Document metadata. `toc` holds the document's table of contents
+            as {entries: [{title, level, line, line_to}]} — verbatim section
+            headings with their line ranges (empty when the document has no
+            heading structure). Use it to jump straight to the relevant
+            section with read_document_content's line_from/line_to.
 
         - name: read_document_content
           method: GET
@@ -392,7 +398,9 @@ spec:
             keep tool responses small. The response includes `total_lines`,
             `line_from`, `line_to`, and `next_line` — if `next_line` is
             non-null, call again with `line_from=<next_line>` to continue
-            reading.
+            reading. For long documents, do NOT page from the top: pick
+            the relevant section from the document's toc (get_document)
+            and read exactly its line range via line_from/line_to.
 
         - name: get_property_values
           method: GET

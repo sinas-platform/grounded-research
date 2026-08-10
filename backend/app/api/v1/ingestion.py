@@ -283,12 +283,16 @@ class EntityResolution(BaseModel):
 async def _alias_match(
     session: AsyncSession, entity_type_id: uuid.UUID, canonical_form: str
 ) -> Entity | None:
+    # Merged entities are tombstones, not matches: returning one would attach
+    # new data to the merged-away row. A merge records the loser's name as an
+    # alias of the winner, so the old name still resolves, via the alias.
     # Exact match on canonical_form first.
     hit = (
         await session.execute(
             select(Entity).where(
                 Entity.entity_type_id == entity_type_id,
                 Entity.canonical_form == canonical_form,
+                Entity.merged_into_id.is_(None),
             )
         )
     ).scalar_one_or_none()
@@ -302,6 +306,7 @@ async def _alias_match(
             .where(
                 Entity.entity_type_id == entity_type_id,
                 EntityAlias.alias == canonical_form,
+                Entity.merged_into_id.is_(None),
             )
         )
     ).scalar_one_or_none()

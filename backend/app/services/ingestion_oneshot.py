@@ -90,7 +90,15 @@ async def _load_gazetteer(session: AsyncSession) -> list[tuple[str, uuid.UUID, s
     """(alias_lower, entity_id, canonical_form) for every alias and every
     canonical form long enough to match safely."""
     out: list[tuple[str, uuid.UUID, str]] = []
-    ents = (await session.execute(select(Entity.id, Entity.canonical_form))).all()
+    # Merged entities are tombstones: matching their names would link new
+    # mentions to the merged-away row and quietly undo the merge.
+    ents = (
+        await session.execute(
+            select(Entity.id, Entity.canonical_form).where(
+                Entity.merged_into_id.is_(None)
+            )
+        )
+    ).all()
     canon_by_id = {eid: cf for eid, cf in ents}
     for eid, cf in ents:
         if len(cf) >= GAZETTEER_MIN_ALIAS_LEN:

@@ -384,6 +384,10 @@ async def oneshot_ingest_document(
         "new": len(new_gaz),
         "already_recorded": len(known) - len(new_gaz),
     }
+    if write:
+        # Release the DB connection before the LLM call: in provider-batch
+        # mode a document can wait hours here, and thousands wait at once.
+        await session.commit()
 
     # 3. one-shot LLM pass (single call when the class is already known)
     # Include property schema in call one when the class is known — or
@@ -628,10 +632,13 @@ async def oneshot_ingest_document(
 
 
 async def oneshot_ingest(
-    document_ids: list[uuid.UUID], *, write: bool = True, concurrency: int = 4
+    document_ids: list[uuid.UUID], *, write: bool = True, concurrency: int = 4,
+    sinas: Any | None = None,
 ) -> list[dict[str, Any]]:
-    """Drive the one-shot path over many documents."""
-    sinas = _Sinas()
+    """Drive the one-shot path over many documents. `sinas` accepts any
+    object with the client's async invoke(agent, message) shape — the
+    provider-batch wave client passes itself here."""
+    sinas = sinas or _Sinas()
     async with AsyncSessionLocal() as session:
         gazetteer = await _load_gazetteer(session)
         classes = [

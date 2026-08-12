@@ -142,6 +142,7 @@ async def _run_pipeline_inprocess(
     run_id: uuid.UUID,
     doc_ids: list[uuid.UUID],
     parts: tuple[str, ...] = ALL_PARTS,
+    batch: bool = False,
 ) -> None:
     """Per document, run the selected parts in order — extract (wipes
     stale artifacts first), ground, resolve, relationships, dossiers.
@@ -166,6 +167,24 @@ async def _run_pipeline_inprocess(
                 break
         await asyncio.sleep(1)
 
+    extract_errors: dict[uuid.UUID, str] = {}
+    if batch and "extract" in parts:
+        from app.services.ingestion_batch import batch_oneshot_ingest
+
+        for did in doc_ids:
+            async with AsyncSessionLocal() as session:
+                await _wipe_extracted_artifacts(session, did)
+                await session.commit()
+        reports = await batch_oneshot_ingest(run_id, doc_ids)
+        by_doc = {}
+        for rep, did in zip(reports, doc_ids):
+            by_doc[did] = rep
+        for did in doc_ids:
+            rep = by_doc.get(did) or {}
+            if rep.get("error"):
+                extract_errors[did] = str(rep["error"])[:500]
+        parts = tuple(p for p in parts if p != "extract")
+
     for did in doc_ids:
         # honor cancellation between documents
         async with AsyncSessionLocal() as session:
@@ -174,9 +193,9 @@ async def _run_pipeline_inprocess(
                 log.info("pipeline run %s stopped (status=%s)", run_id,
                          run.status if run else "gone")
                 return
-        error: str | None = None
+        error: str | None = extract_errors.get(did)
         try:
-            if "extract" in parts:
+            if error is None and "extract" in parts:
                 async with AsyncSessionLocal() as session:
                     await _wipe_extracted_artifacts(session, did)
                     await session.commit()
@@ -245,11 +264,12 @@ async def submit_run(session: AsyncSession, run: IngestionRun) -> None:
         u.status = "running"
         u.started_at = now
         u.attempts += 1
-    run.sinas_batch_ids = {}
+    batch = bool((run.sinas_batch_ids or {}).get("mode") == "provider")
+    run.sinas_batch_ids = {"mode": "provider"} if batch else {}
     parts = tuple(run.stages or ALL_PARTS)
     doc_ids = [u.document_id for u in units]
     asyncio.get_event_loop().create_task(
-        _run_pipeline_inprocess(run.id, doc_ids, parts)
+        _run_pipeline_inprocess(run.id, doc_ids, parts, batch=batch)
     )
 
 

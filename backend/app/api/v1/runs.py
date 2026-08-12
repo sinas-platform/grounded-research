@@ -61,6 +61,7 @@ async def _create_and_submit(
     *,
     parts: list[str],
     run_filter: RunFilter,
+    batch: bool = False,
 ) -> tuple[IngestionRun, int]:
     doc_ids = await expand_filter(session, run_filter)
     if not doc_ids:
@@ -77,6 +78,7 @@ async def _create_and_submit(
         failed_units=0,
         started_by=caller.user_id,
         created_at=datetime.now(timezone.utc),
+        sinas_batch_ids={"mode": "provider"} if batch else None,
     )
     session.add(run)
     await session.flush()
@@ -115,7 +117,8 @@ async def create_run(
         )
 
     run, count = await _create_and_submit(
-        session, caller, parts=parts, run_filter=payload.filter
+        session, caller, parts=parts, run_filter=payload.filter,
+        batch=payload.batch,
     )
     return RunCreateOut(
         run_id=run.id,

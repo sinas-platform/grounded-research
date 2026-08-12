@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.38"
+  version: "0.1.39"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -76,8 +76,8 @@ spec:
       description: >
         Provider for the remaining one-shot ingestion passes - grounding,
         entity resolution, relationship extraction, dossier assignment.
-        These calls never re-read a prompt prefix, so an uncached provider
-        variant (prompt_caching: false) is cheaper here.
+        These calls never re-read a prompt prefix; the agents disable
+        prompt caching via providerOverrides, so a plain provider works.
       required: true
 
     - name: VALIDATION_LLM
@@ -2286,6 +2286,8 @@ spec:
       name: entity-resolution-agent
       description: Stateless mention adjudicator — links ambiguous entity mentions to candidates using document context. Invoked per document by Grove's entity resolver.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      providerOverrides:
+        prompt_caching: false
       temperature: 0.0
       systemPrompt: |
         You judge which entity each mention refers to, one document at a
@@ -2303,6 +2305,8 @@ spec:
       name: grounding-agent
       description: Stateless grounding judge - decides whether a document actually refers to each extracted name. Invoked per document by Grove's grounding gate.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      providerOverrides:
+        prompt_caching: false
       temperature: 0.0
       systemPrompt: |
         You judge whether a document actually refers to each listed name,
@@ -2321,6 +2325,8 @@ spec:
       name: dossier-oneshot-agent
       description: Stateless one-shot dossier matcher - reads a document's identity plus the candidate dossiers and returns assignments as JSON. Invoked per document by Grove's pipeline when dossier classes are configured.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      providerOverrides:
+        prompt_caching: false
       temperature: 0.0
       systemPrompt: |
         You decide which existing dossiers a document belongs to, one
@@ -2337,6 +2343,8 @@ spec:
       name: relationship-oneshot-agent
       description: Stateless one-shot relationship extractor - reads a document plus its recorded entities and the relationship definitions, returns explicitly stated edges as JSON. Invoked per document by Grove's one-shot ingestion path.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      providerOverrides:
+        prompt_caching: false
       temperature: 0.0
       systemPrompt: |
         You extract relationships explicitly stated in a document, one
@@ -2356,6 +2364,8 @@ spec:
       name: doc-metadata-agent
       description: Stateless one-shot document-metadata extractor (class, summary, properties, entities) invoked per document by Grove's one-shot ingestion path.
       llmProviderName: ${{ vars.EXTRACTION_LLM }}
+      providerOverrides:
+        prompt_caching: false
       temperature: 0.0
       systemPrompt: |
         You extract structured document metadata from ONE document in a single

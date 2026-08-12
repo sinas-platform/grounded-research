@@ -65,6 +65,10 @@ class RunCreateIn(BaseModel):
     parts: list[Part] | None = None
     filter: RunFilter = Field(default_factory=RunFilter)
     dry_run: bool = False  # if true, returns the count without creating work
+    # Provider-batch mode: the extract pass is submitted to the LLM
+    # provider's batch API in waves (~50% cost, up to 24h turnaround).
+    # Only worth it for large runs where latency doesn't matter.
+    batch: bool = False
 
 
 class RunCreateOut(BaseModel):

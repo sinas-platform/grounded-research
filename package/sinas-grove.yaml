@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.39"
+  version: "0.1.40"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -59,6 +59,20 @@ spec:
         Provider for the synthesis agent - the memo writer. Split from the
         search tier so the writing model can differ (e.g. Gemini for
         language quality) without touching retrieval.
+      required: true
+
+    - name: SEARCH_MODEL
+      type: string
+      description: >
+        Model id for the search tier, on the SEARCH_LLM provider
+        (e.g. claude-sonnet-5, gemini-3.6-flash). Required - set it to the
+        provider's intended model explicitly.
+      required: true
+
+    - name: SYNTHESIS_MODEL
+      type: string
+      description: >
+        Model id for the synthesis agent, on the SYNTHESIS_LLM provider.
       required: true
 
     - name: EXTRACTION_LLM
@@ -1554,6 +1568,7 @@ spec:
       name: search-orchestrator
       description: Decomposes queries; runs deep_search, merges results.
       llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You orchestrate retrieval for a user query.
@@ -1602,6 +1617,7 @@ spec:
       name: deep-search-agent
       description: Runs the introspect-filter-check loop; produces a draft result.
       llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You retrieve documents for a query by iteratively narrowing
@@ -1918,6 +1934,7 @@ spec:
       name: relationship-discovery-agent
       description: Proposes new relationships based on research context.
       llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
       temperature: 0.3
       systemPrompt: |
         You propose new relationships between documents/entities based on
@@ -1954,6 +1971,7 @@ spec:
       name: synthesis-agent
       description: Drafts an answer with claim-bound evidence.
       llmProviderName: ${{ vars.SYNTHESIS_LLM }}
+      model: ${{ vars.SYNTHESIS_MODEL }}
       temperature: 0.3
       systemPrompt: |
         You synthesize an answer to a question using evidence from a
@@ -2054,6 +2072,7 @@ spec:
       name: discovery-agent
       description: Per-document config suggester. One parameterized agent across all kinds (document_class, entity_type, relationship_definition, dossier_class, document_class_property).
       llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
       systemPrompt: |
         You suggest **new configuration items** based on what a single document
         contains.
@@ -2169,6 +2188,7 @@ spec:
       name: discovery-consolidator-agent
       description: Reads raw discovery candidates for a run, clusters semantic duplicates, and emits deduplicated config_proposal rows.
       llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
       systemPrompt: |
         You consolidate raw discovery candidates into deduplicated proposals.
 
@@ -2265,6 +2285,7 @@ spec:
       name: remediation-agent
       description: Stateless remediation drafter — turns answer-gate findings into explicit claim actions with line-numbered evidence. Invoked by Grove's query runner after the gate flags issues.
       llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You remediate ONE draft answer in a single reply. The user message

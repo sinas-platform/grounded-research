@@ -196,7 +196,13 @@ async def list_document_versions(
 
 # Max lines returned per call. Keeps tool responses small enough for agents
 # to handle multiple chunks across turns without blowing the context window.
-_READ_MAX_LINES = 500
+# Read window economics (Aug 2026): an un-ranged read is a SURVEY — the
+# TOC arrives with it, so it starts small; a ranged read is a deliberate
+# section visit and may be wide. Agents override with max_lines up to the
+# hard ceiling. Every returned token lives in the agent's context for the
+# rest of its run, so the default is deliberately lean.
+_READ_SURVEY_LINES = 300
+_READ_MAX_LINES = 1000
 
 
 @router.get("/{doc_id}/versions/{version}/content")
@@ -206,6 +212,7 @@ async def read_document_content(
     line_from: int | None = Query(default=None, ge=1),
     line_to: int | None = Query(default=None, ge=1),
     numbered: bool = Query(default=False),
+    max_lines: int | None = Query(default=None, ge=1, le=_READ_MAX_LINES),
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
@@ -254,7 +261,9 @@ async def read_document_content(
     # again with line_from = response.next_line.
     start_1 = line_from or 1
     requested_end_1 = line_to if line_to is not None else total
-    end_1 = min(requested_end_1, start_1 + _READ_MAX_LINES - 1, total)
+    is_survey = line_from is None and line_to is None
+    window = max_lines or (_READ_SURVEY_LINES if is_survey else _READ_MAX_LINES)
+    end_1 = min(requested_end_1, start_1 + window - 1, total)
 
     # Convert to 0-based slice and extract.
     start_0 = start_1 - 1

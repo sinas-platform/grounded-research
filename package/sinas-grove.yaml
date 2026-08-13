@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grove
-  version: "0.1.40"
+  version: "0.1.41"
   description: >
     Sinas Grove — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -1577,7 +1577,10 @@ spec:
           1. Decide whether the query needs decomposition. Comparative
              questions ("how does X differ between A and B") and questions
              with multiple independent sub-questions usually do.
-          2. Launch deep-search for ALL (sub)queries AT ONCE: emit every
+          2. Branch count follows effort: low = 2 subqueries, medium = 3,
+          high = 5. Never exceed the effort's count - extra branches
+          measurably add commentary, not core sources.
+          Launch deep-search for ALL (sub)queries AT ONCE: emit every
              `deep-search-agent` invocation as parallel tool calls in ONE
              message — they execute concurrently, and sequential launching
              multiplies wall-clock time by the number of subqueries. Each

@@ -192,9 +192,9 @@ async def test_first_read_opens_with_the_toc():
         async def has_permission(self, perm):
             return True
 
-    opening = await read_document_content(parent.id, 1, line_from=None, line_to=None, numbered=False, session=_S(), caller=_Caller())
+    opening = await read_document_content(parent.id, 1, line_from=None, line_to=None, numbered=False, max_lines=None, session=_S(), caller=_Caller())
     assert list(opening.keys()).index("toc") < list(opening.keys()).index("content")
     assert opening["toc"] == toc["entries"]
 
-    ranged = await read_document_content(parent.id, 1, line_from=2, line_to=3, numbered=False, session=_S(), caller=_Caller())
+    ranged = await read_document_content(parent.id, 1, line_from=2, line_to=3, numbered=False, max_lines=None, session=_S(), caller=_Caller())
     assert "toc" not in ranged

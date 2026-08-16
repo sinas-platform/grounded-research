@@ -112,14 +112,45 @@ async def _load_gazetteer(session: AsyncSession) -> list[tuple[str, uuid.UUID, s
     return out
 
 
+# Token index over the gazetteer, rebuilt only when the gazetteer list object
+# changes (one build per run). Testing every alias against every doc was
+# ~3s/doc at 60K entities and pegged the event loop so hard that DB pool
+# waiters timed out en masse (the 15-16 Aug QueuePool cascades). Filtering
+# candidates by first token first makes the scan ~ms/doc.
+_SCAN_CACHE: tuple[int, dict[str, list[tuple[str, uuid.UUID, str]]], list] = (0, {}, [])
+
+
+def _scan_index(gazetteer: list[tuple[str, uuid.UUID, str]]):
+    global _SCAN_CACHE
+    if _SCAN_CACHE[0] == id(gazetteer):
+        return _SCAN_CACHE[1], _SCAN_CACHE[2]
+    by_token: dict[str, list[tuple[str, uuid.UUID, str]]] = {}
+    no_token: list[tuple[str, uuid.UUID, str]] = []
+    for entry in gazetteer:
+        m = re.search(r"\w+", entry[0])
+        if m is None:
+            no_token.append(entry)
+        else:
+            by_token.setdefault(m.group(0), []).append(entry)
+    _SCAN_CACHE = (id(gazetteer), by_token, no_token)
+    return by_token, no_token
+
+
 def gazetteer_scan(
     content: str, gazetteer: list[tuple[str, uuid.UUID, str]]
 ) -> dict[uuid.UUID, tuple[str, int]]:
     """entity_id → (canonical_form, first_offset) for every entity whose
     alias appears in the content on a word boundary."""
     lowered = content.lower()
+    by_token, no_token = _scan_index(gazetteer)
+    words = set(re.findall(r"\w+", lowered))
+    candidates: list[tuple[str, uuid.UUID, str]] = list(no_token)
+    for w in words:
+        candidates.extend(by_token.get(w, ()))
+    # preserve the longest-first ordering the full list guaranteed
+    candidates.sort(key=lambda t: -len(t[0]))
     found: dict[uuid.UUID, tuple[str, int]] = {}
-    for alias, eid, canon in gazetteer:
+    for alias, eid, canon in candidates:
         if eid in found:
             continue
         i = lowered.find(alias)
@@ -342,10 +373,26 @@ async def oneshot_ingest_document(
         return {"document": doc.filename, "skipped": "no extracted content"}
     content = version.content_md
 
+    # End the read transaction BEFORE the CPU-bound work below. The alias
+    # scan costs real CPU per document and thousands of documents run this
+    # concurrently on one event loop in batch mode — a transaction left open
+    # here holds its pool connection for the aggregate CPU time of every scan
+    # scheduled ahead of it. That is hold-time starvation, not queueing: it
+    # exhausted the pool at 15 connections AND at 100 (15 Aug, 1223/1223
+    # units lost twice). CPU first with no connection, short transactions
+    # after.
+    await session.commit()
+
     report: dict[str, Any] = {"document": doc.filename, "llm_calls": 0}
 
-    # 1. rules
+    # 1. rules (pure)
     rule = classify_by_rules(doc.filename or "")
+
+    # 2. gazetteer scan (pure CPU — no connection held)
+    known = gazetteer_scan(content, gazetteer)
+
+    # Writes from here open a fresh, short transaction, committed at the
+    # pre-wave commit below.
     rule_written = False
     if rule and rule[1] >= RULE_WRITE_CONFIDENCE and doc.document_class_id is None:
         cls_id = next((cid for cid, n, _ in classes if n == rule[0]), None)
@@ -356,8 +403,6 @@ async def oneshot_ingest_document(
             rule_written = True
             report["class"] = {"name": rule[0], "confidence": rule[1], "by": "rule"}
 
-    # 2. gazetteer
-    known = gazetteer_scan(content, gazetteer)
     already = await _existing_mention_entity_ids(session, document_id)
     new_gaz = {eid: v for eid, v in known.items() if eid not in already}
     if write:
@@ -431,6 +476,11 @@ async def oneshot_ingest_document(
         class_hint=hint,
         properties=class_props,
     )
+    # No transaction across ANY parked wave: the class-properties SELECT above
+    # (already-classified path — every rerun) opened one, invisible to
+    # fresh-document probes. Last of the five wave boundaries to be closed
+    # (15 Aug audit).
+    await session.commit()
     reply = await sinas.invoke(DOC_METADATA_AGENT, prompt)
     report["llm_calls"] += 1
     data = _parse_json_reply(reply)
@@ -473,6 +523,10 @@ async def oneshot_ingest_document(
                     class_hint=(cls_name, 1.0, "already classified"),
                     properties=class_props,
                 )
+                # A parked wave must never hold a pool connection: in batch
+                # mode this invoke can wait minutes, and the SELECT above
+                # opened a transaction. Same rule as the gazetteer commit.
+                await session.commit()
                 reply2 = await sinas.invoke(DOC_METADATA_AGENT, prop_prompt)
                 report["llm_calls"] += 1
                 data2 = _parse_json_reply(reply2)
@@ -543,6 +597,11 @@ async def oneshot_ingest_document(
             )
             for i, chunk in enumerate(chunks, start=1)
         ]
+        # Release the connection before the fan-out: with many docs in
+        # flight, transactions held across a provider-batch wave pin the
+        # whole pool and time out every other document (seen 14 Aug,
+        # 30-doc sample: 15 holders x 9-minute wave = 30/30 failed).
+        await session.commit()
         replies = await asyncio.gather(
             *(sinas.invoke(DOC_METADATA_AGENT, p) for p in chunk_prompts)
         )
@@ -665,9 +724,12 @@ async def oneshot_ingest(
                 )
 
     sem = asyncio.Semaphore(concurrency)
-    results: list[dict[str, Any]] = []
+    # Results must line up with document_ids positionally: batch callers zip
+    # them back against the input list, and completion order is arbitrary
+    # under concurrency (scrambled every failure report of run d93b68af).
+    results: list[dict[str, Any]] = [{} for _ in document_ids]
 
-    async def one(doc_id: uuid.UUID) -> None:
+    async def one(idx: int, doc_id: uuid.UUID) -> None:
         async with sem:
             async with AsyncSessionLocal() as session:
                 try:
@@ -682,7 +744,7 @@ async def oneshot_ingest(
                     )
                 except Exception as exc:  # per-doc isolation
                     r = {"document": str(doc_id), "error": str(exc)[:300]}
-                results.append(r)
+                results[idx] = r
 
-    await asyncio.gather(*(one(d) for d in document_ids))
+    await asyncio.gather(*(one(i, d) for i, d in enumerate(document_ids)))
     return results

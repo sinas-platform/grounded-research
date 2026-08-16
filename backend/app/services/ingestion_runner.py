@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -185,59 +186,125 @@ async def _run_pipeline_inprocess(
                 extract_errors[did] = str(rep["error"])[:500]
         parts = tuple(p for p in parts if p != "extract")
 
-    for did in doc_ids:
-        # honor cancellation between documents
+    # In batch mode, relationships leave the per-document loop and run as
+    # their own provider-batched pass after grounding/resolution: the
+    # sequential loop's sync relationship calls were both the wall-clock
+    # bottleneck (~9h projected on the US phase) and unbatched full price.
+    batch_relationships = batch and "relationships" in parts
+    if batch_relationships:
+        parts = tuple(p for p in parts if p != "relationships")
+
+    middle_errors: dict[uuid.UUID, str] = {}
+    # Bounded parallelism: the sequential per-doc loop was the wall-clock
+    # bottleneck (~8.6 docs/min on p3, 16 Aug — 12h+ for a 6K-doc phase).
+    # Ground/resolve are I/O-bound on Sinas agent invokes, so a modest gate
+    # multiplies throughput without the pool/event-loop stampedes that
+    # unbounded gathers caused all day on 15 Aug. Cancellation is honored
+    # between chunks, matching the old between-documents check.
+    middle_gate = asyncio.Semaphore(
+        int(os.environ.get("GROVE_MIDDLE_CONCURRENCY", "12"))
+    )
+
+    async def _middle_one(did: uuid.UUID) -> None:
+        error: str | None = extract_errors.get(did)
+        async with middle_gate:
+            try:
+                if error is None and "extract" in parts:
+                    async with AsyncSessionLocal() as session:
+                        await _wipe_extracted_artifacts(session, did)
+                        await session.commit()
+                    reports = await oneshot_ingest([did], write=True, concurrency=1)
+                    rep = reports[0] if reports else {}
+                    if rep.get("error"):
+                        error = str(rep["error"])[:500]
+                if error is None:
+                    if "ground" in parts:
+                        # gate before resolving: hallucinated names must not
+                        # reach the resolver or mint entities
+                        await ground_documents([did], write=True)
+                    if "resolve" in parts:
+                        await resolve_unlinked([did], write=True)
+                    if "relationships" in parts:
+                        # one tool-less call per document against the
+                        # resolved mentions
+                        await extract_relationships([did], write=True)
+                    if "dossiers" in parts and not batch_relationships:
+                        # free no-op when no dossier classes are configured
+                        await assign_dossiers([did], write=True)
+            except Exception as exc:  # noqa: BLE001 — per-doc isolation
+                error = str(exc)[:500]
+        if batch_relationships:
+            # Units finalize after the relationship wave below; only the
+            # error is banked here.
+            if error:
+                middle_errors[did] = error
+            return
+        await _finalize_unit(run_id, did, error)
+
+    CHUNK = 100
+    for ci in range(0, len(doc_ids), CHUNK):
+        # honor cancellation between chunks
         async with AsyncSessionLocal() as session:
             run = await session.get(IngestionRun, run_id)
             if run is None or run.status in ("cancelled", "failed"):
                 log.info("pipeline run %s stopped (status=%s)", run_id,
                          run.status if run else "gone")
                 return
-        error: str | None = extract_errors.get(did)
-        try:
-            if error is None and "extract" in parts:
-                async with AsyncSessionLocal() as session:
-                    await _wipe_extracted_artifacts(session, did)
-                    await session.commit()
-                reports = await oneshot_ingest([did], write=True, concurrency=1)
-                rep = reports[0] if reports else {}
+        await asyncio.gather(*(
+            _middle_one(did) for did in doc_ids[ci:ci + CHUNK]
+        ))
+    if batch_relationships:
+        from app.services.ingestion_batch import batch_relationship_pass
+
+        pending = [
+            did for did in doc_ids
+            if did not in extract_errors and did not in middle_errors
+        ]
+        rel_reports = await batch_relationship_pass(run_id, pending) if pending else {}
+        for did in doc_ids:
+            error = extract_errors.get(did) or middle_errors.get(did)
+            if error is None:
+                rep = rel_reports.get(did) or {}
                 if rep.get("error"):
                     error = str(rep["error"])[:500]
-            if error is None:
-                if "ground" in parts:
-                    # gate before resolving: hallucinated names must not
-                    # reach the resolver or mint entities
-                    await ground_documents([did], write=True)
-                if "resolve" in parts:
-                    await resolve_unlinked([did], write=True)
-                if "relationships" in parts:
-                    # one tool-less call per document against the
-                    # resolved mentions
-                    await extract_relationships([did], write=True)
-                if "dossiers" in parts:
-                    # free no-op when no dossier classes are configured
-                    await assign_dossiers([did], write=True)
-        except Exception as exc:  # noqa: BLE001 — per-doc isolation
-            error = str(exc)[:500]
-        async with AsyncSessionLocal() as session:
-            unit = (
-                await session.execute(
-                    select(IngestionRunUnit)
-                    .where(IngestionRunUnit.run_id == run_id)
-                    .where(IngestionRunUnit.document_id == did)
-                )
-            ).scalar_one_or_none()
-            run = await session.get(IngestionRun, run_id)
-            if unit is not None and unit.status == "running":
-                unit.status = "failed" if error else "succeeded"
-                unit.error = error
-                unit.completed_at = datetime.now(timezone.utc)
-                if run is not None:
-                    run.done_units += 1
-                    if error:
-                        run.failed_units += 1
-            await session.commit()
+                elif "dossiers" in parts:
+                    try:
+                        await assign_dossiers([did], write=True)
+                    except Exception as exc:  # noqa: BLE001
+                        error = str(exc)[:500]
+            await _finalize_unit(run_id, did, error)
     await _mark_run_terminal_if_done(run_id)
+
+
+async def _finalize_unit(
+    run_id: uuid.UUID, did: uuid.UUID, error: str | None
+) -> None:
+    """Mark one unit terminal and bump the run counters."""
+    async with AsyncSessionLocal() as session:
+        unit = (
+            await session.execute(
+                select(IngestionRunUnit)
+                .where(IngestionRunUnit.run_id == run_id)
+                .where(IngestionRunUnit.document_id == did)
+            )
+        ).scalar_one_or_none()
+        run = await session.get(IngestionRun, run_id)
+        if unit is not None and unit.status == "running":
+            unit.status = "failed" if error else "succeeded"
+            unit.error = error
+            unit.completed_at = datetime.now(timezone.utc)
+            if run is not None:
+                # Atomic SQL increments: parallel finalizers raced the ORM's
+                # read-modify-write and lost counts (20-doc test, 16 Aug).
+                await session.execute(
+                    IngestionRun.__table__.update()
+                    .where(IngestionRun.id == run_id)
+                    .values(
+                        done_units=IngestionRun.done_units + 1,
+                        failed_units=IngestionRun.failed_units + (1 if error else 0),
+                    )
+                )
+        await session.commit()
 
 
 async def submit_run(session: AsyncSession, run: IngestionRun) -> None:

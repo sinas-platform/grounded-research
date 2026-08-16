@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     annotations,
+    bulk,
     answers,
     config,
     discovery,
@@ -39,6 +40,7 @@ api_router.include_router(config.router)
 api_router.include_router(documents.router)
 api_router.include_router(dossiers.router)
 api_router.include_router(ingestion.router)
+api_router.include_router(bulk.router)
 api_router.include_router(retrieval.router)
 api_router.include_router(result_filter.router)
 api_router.include_router(results.router)

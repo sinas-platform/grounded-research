@@ -31,7 +31,7 @@ from sqlalchemy import select
 from app.auth import CallerIdentity
 from app.config import get_settings
 from app.db import AsyncSessionLocal
-from app.models import AnswerClaim, ClaimEvidence, Document, DocumentClass, Result, ResultDocument
+from app.models import AnswerClaim, ClaimEvidence, Document, DocumentClass, DocumentVersion, Result, ResultDocument
 from app.models.query import QueryRun
 
 POLL_S = 12
@@ -53,11 +53,31 @@ HARD_VALIDATE_ROUNDS = 8
 ANSWER_GATE_CYCLES = 1
 REMEDIATION_WINDOW_S = 8 * 60
 MIN_CLAIMS = 6
+# Hard per-run spend ceiling in USD, summed over the run's synthesis chat
+# (which also carries remediation traffic — empirically where runaway spend
+# lives; run 3d7f39d3 burned $23.81 there hunting unanchorable evidence).
+# Checked on every supervision poll; tripping it fails the run loudly.
+RUN_COST_CAP_USD = float(__import__("os").environ.get("GROVE_RUN_COST_CAP_USD", "10"))
 # effort → maximum sub-query fan-out. The bound is enforced here (truncation)
 # AND stated in the decompose instruction; no magic numbers in agent prose.
 EFFORT_FANOUT = {"low": 1, "medium": 2, "high": 3}
 
 _log = __import__("logging").getLogger("grove.query_runner")
+
+
+class PartialOutcome(Exception):
+    """A run that cannot deliver a fully validated answer for a SEMANTIC
+    reason (budget ceiling, unanchorable coverage, stalled drafting) — as
+    opposed to an infrastructure failure, which stays `failed` and is
+    retryable. Terminates the run in status `partial` with a client-facing
+    note over the stored retrieval; never silently substitutes for an
+    answerable question (the trip points all sit AFTER validation has had
+    its chances)."""
+
+    def __init__(self, cause: str, explanation: str):
+        self.cause = cause
+        self.explanation = explanation
+        super().__init__(f"{cause}: {explanation}")
 
 
 def _now() -> datetime:
@@ -113,7 +133,9 @@ class _Sinas:
             return r.json().get("reply", "") or ""
 
     async def chat_messages(self, chat_id: str) -> list[dict]:
-        async with httpx.AsyncClient(timeout=30.0) as c:
+        # 120s: supervision reads must tolerate a Sinas API busy with bulk
+        # ingestion (17 Aug: 30s tripped ReadTimeouts at load average 10).
+        async with httpx.AsyncClient(timeout=120.0) as c:
             r = await c.get(f"{self.base}/chats/{chat_id}", headers=self.headers)
             if r.status_code != 200:
                 return []
@@ -434,10 +456,19 @@ async def _stage_discovery(run_id: uuid.UUID, sinas: _Sinas) -> None:
 
 
 async def _doc_manifest(parent_id: uuid.UUID) -> str:
+    """One line per result document, in rank order, plus whatever the domain
+    config derives about each one: annotation values (e.g. issuing body and
+    authority tier in a legal deployment — Grove only renders what the config
+    declares) and, for documents in the result's stored briefing, properties
+    and TOC. Entity-id values are resolved to canonical names."""
+    from app.models import AnnotationDefinition
+    from app.services.annotations import annotations_for_documents
+
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
                 select(
+                    Document.id,
                     Document.filename,
                     DocumentClass.name,
                     ResultDocument.reason,
@@ -446,13 +477,303 @@ async def _doc_manifest(parent_id: uuid.UUID) -> str:
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
                 .where(ResultDocument.result_id == parent_id)
-                .order_by(Document.filename)
+                .order_by(ResultDocument.rank)
             )
         ).all()
-    return "\n".join(
-        f"- {fn} | {cls or '-'} | {(reason or '')[:120]} | {(summary or '')[:200]}"
-        for fn, cls, reason, summary in rows
+
+        definitions = list(
+            (await session.execute(select(AnnotationDefinition))).scalars()
+        )
+        per_doc: dict = {}
+        if definitions and rows:
+            per_doc = await annotations_for_documents(
+                session, [r[0] for r in rows], definitions
+            )
+
+        result = await session.get(Result, parent_id)
+        briefing_by_doc = {
+            b.get("document_id"): b
+            for b in ((result.filter or {}).get("briefing") or [])
+        }
+
+    def _fmt(value) -> str:
+        # Reducer outputs wrap entities as {"id": ..., "name": ...} (single
+        # values additionally under a "value" key); the name is what the
+        # drafting agent needs.
+        if isinstance(value, dict):
+            if set(value) == {"value"}:
+                return _fmt(value["value"])
+            if "name" in value:
+                return str(value["name"])
+            return " ".join(f"{k}={_fmt(v)}" for k, v in value.items())
+        return str(value)
+
+    lines = []
+    for did, fn, cls, reason, summary in rows:
+        values = (per_doc.get(did) or {}).get("values") or {}
+        ann = "; ".join(
+            f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
+        )
+        lines.append(
+            f"- {fn} | {cls or '-'} | {ann or '-'} | "
+            f"{(reason or '')[:120]} | {(summary or '')[:200]}"
+        )
+        brief = briefing_by_doc.get(str(did))
+        if brief:
+            props = brief.get("properties")
+            if props:
+                lines.append(f"    properties: {json.dumps(props, ensure_ascii=False)[:400]}")
+            toc = brief.get("toc")
+            if toc:
+                lines.append(f"    toc: {str(toc)[:600]}")
+    return "\n".join(lines)
+
+
+_sinas_usage_engine = None
+
+
+async def _chat_cost_usd(chat_id: str) -> float:
+    """Spend on one Sinas chat, USD, from llm_usage. Sinas shares the
+    Postgres server with Grove (different database), so this is one
+    cross-database read; pricing matches the Anthropic rate card for the
+    Sonnet/Haiku tiers in use. Fails open (0.0) — the cap must never be
+    the thing that kills an otherwise healthy run on a transient error."""
+    global _sinas_usage_engine
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from app.config import get_settings
+
+    if _sinas_usage_engine is None:
+        url = get_settings().grove_database_url
+        _sinas_usage_engine = create_async_engine(
+            url[: url.rfind("/")] + "/sinas", pool_size=2)
+    try:
+        async with _sinas_usage_engine.connect() as conn:
+            row = await conn.execute(
+                __import__("sqlalchemy").text("""
+                    SELECT coalesce(sum(
+                      CASE WHEN model LIKE '%haiku%' THEN
+                        (prompt_tokens - cache_read_tokens - cache_write_tokens) * 1.0
+                        + cache_write_tokens * 1.25 + cache_read_tokens * 0.10
+                        + completion_tokens * 5.0
+                      ELSE
+                        (prompt_tokens - cache_read_tokens - cache_write_tokens) * 3.0
+                        + cache_write_tokens * 3.75 + cache_read_tokens * 0.30
+                        + completion_tokens * 15.0
+                      END) / 1e6, 0)
+                    FROM llm_usage WHERE chat_id = CAST(:cid AS uuid)
+                      AND error IS NULL"""),
+                {"cid": chat_id})
+            return float(row.scalar() or 0.0)
+    except Exception:  # noqa: BLE001 — fail open by design
+        return 0.0
+
+
+DRAFT_MODE = __import__("os").environ.get("GROVE_DRAFT_MODE", "chat")
+
+
+async def _fetch_numbered(filenames: list[str], cap_chars: int = 140000) -> dict[str, str]:
+    """Numbered content per filename (line-numbered so extraction quotes
+    carry verifiable line refs), capped per document."""
+    out: dict[str, str] = {}
+    async with AsyncSessionLocal() as session:
+        for fn in filenames:
+            content = (
+                await session.execute(
+                    select(DocumentVersion.content_md)
+                    .join(Document, Document.current_version_id == DocumentVersion.id)
+                    .where(Document.filename == fn)
+                )
+            ).scalar()
+            if not content:
+                continue
+            lines = content.splitlines()
+            numbered = "\n".join(f"{i+1}: {l}" for i, l in enumerate(lines))
+            out[fn] = numbered[:cap_chars]
+    return out
+
+
+def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) -> bool:
+    """Deterministic anti-hallucination: the quoted text must actually occur
+    in the claimed line range (whitespace-normalized containment)."""
+    import re as _re
+
+    want = _re.sub(r"\s+", " ", quoted or "").strip().lower()
+    if len(want) < 20:
+        return False
+    span_lines = []
+    for line in numbered.splitlines():
+        num, _, rest = line.partition(": ")
+        try:
+            n = int(num)
+        except ValueError:
+            continue
+        if line_from <= n <= line_to + 2:
+            span_lines.append(rest)
+    have = _re.sub(r"\s+", " ", " ".join(span_lines)).strip().lower()
+    return want[:200] in have
+
+
+async def _extract_passages(
+    sinas: _Sinas, plan_claims: list[dict]
+) -> list[dict]:
+    """Inverted split, reading half: Flash pulls verbatim passages (with line
+    refs) per planned claim from its anchor documents. Every quote is then
+    verified against the actual lines — fabricated quotes are dropped, so the
+    drafter can only ever see text that exists."""
+    sem = asyncio.Semaphore(4)
+
+    async def one(c: dict) -> dict:
+        anchors = [str(a) for a in (c.get("anchors") or [])[:4]]
+        docs = await _fetch_numbered(anchors)
+        if not docs:
+            return {"n": c.get("n"), "passages": []}
+        doc_blob = "\n\n".join(
+            f"=== {fn} ===\n{txt}" for fn, txt in docs.items())
+        async with sem:
+            try:
+                reply = await sinas.invoke(
+                    "grove/passage-extractor-agent",
+                    "From the numbered documents below, extract the passages "
+                    "that bear on: " + str(c.get("establishes") or "") + "\n"
+                    + (("Focus: " + str(c.get("hint")) + "\n") if c.get("hint") else "")
+                    + 'Reply ONLY JSON: {"passages": [{"filename": "...", '
+                    '"line_from": <int>, "line_to": <int>, "text": "<verbatim '
+                    'quote>"}]} — max 4 passages, each 2-25 lines, text EXACTLY '
+                    "as printed (without the line-number prefixes).\n\n" + doc_blob,
+                )
+                cleaned = reply.strip().strip("`").removeprefix("json").strip()
+                data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+            except Exception:  # noqa: BLE001
+                return {"n": c.get("n"), "passages": []}
+        good = []
+        for p in (data.get("passages") or [])[:4]:
+            fn = str(p.get("filename") or "")
+            try:
+                lf, lt = int(p.get("line_from")), int(p.get("line_to"))
+            except (TypeError, ValueError):
+                continue
+            if fn in docs and _verify_passage(docs[fn], lf, lt, str(p.get("text") or "")):
+                good.append({"filename": fn, "line_from": lf, "line_to": lt,
+                             "text": str(p.get("text"))[:2000]})
+        return {"n": c.get("n"), "establishes": c.get("establishes"),
+                "passages": good}
+
+    return list(await asyncio.gather(*(one(c) for c in plan_claims)))
+
+
+async def _draft_from_extracts(
+    run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
+    question: str, extracts: list[dict]
+) -> int:
+    """Inverted split, writing half: one tool-less Sonnet call drafts all
+    claims from the verified extracts; the runner persists claims and
+    evidence rows itself. No chat loop, no nudges, no wedge surface."""
+    blocks = []
+    for e in extracts:
+        if not e.get("passages"):
+            continue
+        ps = "\n".join(
+            f"  [{p['filename']} lines {p['line_from']}-{p['line_to']}]\n"
+            f"  {p['text']}" for p in e["passages"])
+        blocks.append(f"CLAIM {e.get('n')} — must establish: "
+                      f"{e.get('establishes')}\n{ps}")
+    if not blocks:
+        return 0
+    reply = await sinas.invoke(
+        "grove/retrieval-planner-agent",
+        "Draft the claims of a legal answer from the VERIFIED PASSAGES below "
+        "— use nothing else; every claim must be supported entirely by the "
+        "passages you cite for it. Skip any planned claim whose passages are "
+        "insufficient. The final claim states the overall conclusion. Reply "
+        'ONLY JSON: {"claims": [{"text": "<claim>", "type": '
+        '"legal_principle|factual|procedural|conclusion", "evidence": '
+        '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
+        "QUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
     )
+    cleaned = reply.strip().strip("`").removeprefix("json").strip()
+    data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+    claims = data.get("claims") or []
+    written = 0
+    async with AsyncSessionLocal() as session:
+        for i, c in enumerate(claims[:14], start=1):
+            text_ = str(c.get("text") or "").strip()
+            if not text_:
+                continue
+            row = AnswerClaim(answer_id=answer_id, sequence=i,
+                              claim_text=text_,
+                              claim_type=str(c.get("type") or "legal_principle")[:50])
+            session.add(row)
+            await session.flush()
+            for ev_ in (c.get("evidence") or [])[:4]:
+                doc = (await session.execute(
+                    select(Document).where(Document.filename == str(ev_.get("filename") or ""))
+                )).scalars().first()
+                if doc is None:
+                    continue
+                session.add(ClaimEvidence(
+                    claim_id=row.id, document_id=doc.id,
+                    document_version_id=doc.current_version_id,
+                    span={"line_from": ev_.get("line_from"),
+                          "line_to": ev_.get("line_to"),
+                          "char_from": None, "char_to": None, "note": None},
+                    validated=False))
+            written += 1
+        await session.commit()
+    await _tele(run_id, "draft", extract_mode=True, claims=written)
+    return written
+
+
+async def _argument_plan(
+    sinas: _Sinas, run_id: uuid.UUID, question: str, manifest: str
+) -> str:
+    """Split drafting: a strong tool-less model designs the ARGUMENT (which
+    claims, anchored where) from the briefing manifest alone; the drafter
+    then executes claim by claim. Judgment is expensive and small; reading
+    and writing are cheap and large — price each accordingly (17 Aug:
+    memory-padding lived entirely in the deciding, never the writing).
+    Fail-open: any planning failure returns "" and drafting proceeds
+    exactly as before."""
+    try:
+        reply = await sinas.invoke(
+            "grove/retrieval-planner-agent",
+            "Design the argument for answering the question below, using ONLY "
+            "the documents listed. Reply ONLY JSON:\n"
+            '{"claims": [{"n": 1, "establishes": "<one sentence: what this '
+            'claim must establish>", "anchors": ["<filename>", ...], '
+            '"hint": "<which part of the anchor documents to read, from their '
+            'TOCs>"}]}\n'
+            "Rules: 6-12 claims; every claim anchored to at least one listed "
+            "document; never anchor to anything not listed; the final claim "
+            "must state the overall conclusion. If the documents cannot "
+            "support a part of the question, plan NO claim for it — the gap "
+            "will be reported honestly downstream.\n\n"
+            "QUESTION:\n" + question + "\n\nDOCUMENTS:\n" + manifest[:60000],
+        )
+        cleaned = reply.strip().strip("`").removeprefix("json").strip()
+        data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+        claims = data.get("claims") or []
+        if not claims:
+            return ""
+        lines = []
+        for c in claims[:12]:
+            anchors = ", ".join(str(a) for a in (c.get("anchors") or [])[:4])
+            hint = str(c.get("hint") or "").strip()
+            lines.append(
+                f"{c.get('n')}. {str(c.get('establishes') or '').strip()}"
+                f"\n   anchors: {anchors}" + (f"\n   read: {hint}" if hint else "")
+            )
+        await _tele(run_id, "draft", argument_plan=[
+            {"n": c.get("n"), "establishes": c.get("establishes"),
+             "anchors": c.get("anchors")} for c in claims[:12]])
+        return (
+            "ARGUMENT PLAN (realize these claims in order; read each claim's "
+            "anchor documents, write the claim, bind its evidence; do not add "
+            "claims beyond the plan):\n" + "\n".join(lines) + "\n\n"
+        ), claims[:12]
+    except Exception:  # noqa: BLE001 — planning must never block drafting
+        _log.warning("argument plan failed for run %s; single-stage draft", run_id)
+        return "", []
 
 
 async def _claim_count(answer_id: uuid.UUID) -> int:
@@ -495,8 +816,32 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     _ = caller  # ownership derives from the parent result above
 
     if not chat_id:
-        chat_id = await sinas.chat_create("grove/synthesis-agent", "[query-run] synthesis")
         manifest = await _doc_manifest(parent_id)
+        plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
+        if DRAFT_MODE == "extract" and plan_claims:
+            try:
+                extracts = await _extract_passages(sinas, plan_claims)
+                n = await _draft_from_extracts(
+                    run_id, answer_id, sinas, question, extracts)
+                if n >= MIN_CLAIMS:
+                    await _tele(run_id, "draft", completed=_iso(), claims=n)
+                    return answer_id
+                if DRAFT_MODE == "extract":
+                    # strict: a thin extract draft becomes an honest partial,
+                    # never a silent fallback onto expensive chat drafting
+                    raise PartialOutcome(
+                        "no_progress",
+                        f"extract drafting produced only {n} claims "
+                        f"(minimum {MIN_CLAIMS})")
+                _log.warning(
+                    "extract-mode drafted only %s claims for run %s; "
+                    "falling back to chat drafting", n, run_id)
+            except PartialOutcome:
+                raise
+            except Exception:  # noqa: BLE001 — infra failures still fail open
+                _log.exception(
+                    "extract-mode failed for run %s; chat drafting", run_id)
+        chat_id = await sinas.chat_create("grove/synthesis-agent", "[query-run] synthesis")
         sinas.send_detached(
             chat_id,
             f"Question: {question}\n\n"
@@ -506,7 +851,14 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
             "your workflow and playbook target, then reply exactly DRAFTING COMPLETE. "
             "Validation and publishing run outside your chat — do not call "
             "validate_answer_evidence or publish_answer.\n\n"
-            "The result's documents (filename | class | provenance | summary):\n"
+            "HARD RULES: (1) Never reference anything by name that does not appear "
+            "in the provided documents — no knowledge from outside the sources, "
+            "however confident you are. (2) Every claim must rest entirely on "
+            "evidence you bind from the provided documents. (3) The final claim "
+            "must state the answer's overall conclusion, itself supported by "
+            "bound evidence.\n\n"
+            + plan_text
+            + "The result's documents (filename | class | provenance | summary):\n"
             + manifest,
         )
         await _mark(run_id, synthesis_chat_id=chat_id)
@@ -523,6 +875,11 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     last_n, stable_at = -1, loop_t()
     while loop_t() < min(deadline, hard_deadline):
         await asyncio.sleep(POLL_S)
+        spent = await _chat_cost_usd(chat_id)
+        if spent > RUN_COST_CAP_USD:
+            raise PartialOutcome(
+                "budget_ceiling",
+                f"synthesis spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) during drafting")
         n = await _claim_count(answer_id)
         if n != last_n:
             last_n, stable_at = n, loop_t()
@@ -544,11 +901,15 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
             )
         else:
             outage = await _dead_chat_diagnosis(sinas, chat_id)
-            raise RuntimeError(
-                outage or f"synthesis drafting dead at {n} claims after {MAX_NUDGES} nudges"
-            )
+            if outage:
+                raise RuntimeError(outage)
+            raise PartialOutcome(
+                "no_progress",
+                f"drafting stalled at {n} claims after {MAX_NUDGES} nudges")
     outage = await _dead_chat_diagnosis(sinas, chat_id)
-    raise RuntimeError(outage or "synthesis drafting timed out")
+    if outage:
+        raise RuntimeError(outage)
+    raise PartialOutcome("no_progress", "synthesis drafting timed out")
 
 
 
@@ -628,6 +989,8 @@ async def _gate_answer(
         ' "missing": "<if not publishable: the one thing the claims fail to deliver on>",'
         ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
         ' "tension": "<claims that contradict each other with no claim reconciling them, or null>",'
+        ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
+        ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
         ' "unused_sources": ["<filename>: <why it is plainly more direct or authoritative for a point made than the source cited for it>", ...]}',
     )
     try:
@@ -646,6 +1009,19 @@ async def _gate_answer(
             issues.append(
                 "Unreconciled tension: " + str(data["tension"]) + " Add a claim that "
                 "reconciles these positions (grounded in evidence), or revise them."
+            )
+        dang = [s for s in (data.get("dangling") or []) if isinstance(s, (int, str))]
+        if dang:
+            issues.append(
+                "Claims " + ", ".join(str(s) for s in dang) + " depend on reasoning "
+                "from a claim that is no longer in the answer. Rewrite each to stand "
+                "alone (restate the reasoning it relies on, with evidence), or drop it."
+            )
+        if data.get("no_conclusion"):
+            issues.append(
+                "The answer never draws its overall conclusion. Add a final claim "
+                "that directly answers the question, supported by the evidence "
+                "already cited."
             )
         for src in (data.get("unused_sources") or [])[:3]:
             issues.append(
@@ -706,6 +1082,11 @@ async def _stage_validate_publish(
     round_no = 0
     while True:
         round_no += 1
+        spent = await _chat_cost_usd(chat_id)
+        if spent > RUN_COST_CAP_USD:
+            raise PartialOutcome(
+                "budget_ceiling",
+                f"synthesis spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) in validation round {round_no}")
         # Base budget, extended round by round while the failed count is
         # strictly shrinking (a converging run finishes; a stalled one stops).
         if round_no > MAX_VALIDATE_ROUNDS:
@@ -742,9 +1123,9 @@ async def _stage_validate_publish(
                     await _publish_answer(run_id, answer_id, **tele)
                     return
                 if not ok and gate_cycles <= 0:
-                    raise RuntimeError(
-                        f"answer gate: claims validate but no longer answer the question — {missing}"
-                    )
+                    raise PartialOutcome(
+                        "coverage",
+                        f"the validated claims no longer answer the question — {missing}")
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
                 sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
                 t0 = asyncio.get_event_loop().time()
@@ -810,10 +1191,10 @@ async def _stage_validate_publish(
         )
         return
     if not ok and gate_cycles <= 0:
-        raise RuntimeError(
+        raise PartialOutcome(
+            "coverage",
             "validation exhausted and the surviving claims do not answer the "
-            f"question — {missing}"
-        )
+            f"question — {missing}")
     await _tele(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
@@ -834,6 +1215,127 @@ async def _stage_validate_publish(
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 
 
+async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> None:
+    """Terminal `partial`: store cause + explanation + a short client-facing
+    note (one cheap phrasing call, in the question's language) over the top
+    of the stored retrieval. The note is explicitly NOT an answer; validated
+    claims are not included — sources with reasons only."""
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        question, parent_id = run.question, run.parent_result_id
+        validated_claims: list[str] = []
+        if run.answer_id:
+            # Claims whose every evidence row passed verification are as
+            # trustworthy as in a published answer; a coverage-partial keeps
+            # them ("on X we can say nothing; on Y the verified findings are").
+            validated_claims = [
+                t for (t,) in (
+                    await session.execute(
+                        select(AnswerClaim.claim_text)
+                        .where(AnswerClaim.answer_id == run.answer_id)
+                        .where(~AnswerClaim.id.in_(
+                            select(ClaimEvidence.claim_id)
+                            .where(ClaimEvidence.validated.is_(False))))
+                        .order_by(AnswerClaim.sequence)
+                    )
+                ).all()
+            ]
+        cited: set[str] = set()
+        if run.answer_id:
+            cited = set((await session.execute(
+                select(Document.filename)
+                .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
+                .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+                .where(AnswerClaim.answer_id == run.answer_id)
+                .where(ClaimEvidence.validated.is_(True))
+            )).scalars().all())
+        sources: list[tuple[str, str]] = []
+        if parent_id:
+            ranked = [
+                (fn, (reason or "")[:160])
+                for fn, reason in (
+                    await session.execute(
+                        select(Document.filename, ResultDocument.reason)
+                        .join(Document, Document.id == ResultDocument.document_id)
+                        .where(ResultDocument.result_id == parent_id)
+                        .order_by(ResultDocument.rank)
+                        .limit(40)
+                    )
+                ).all()
+            ]
+            # documents the verified claims cite lead the list; best-ranked
+            # uncited fill the remainder — a partial's sources should start
+            # with what the findings actually rest on.
+            sources = [s for s in ranked if s[0] in cited]
+            sources += [s for s in ranked if s[0] not in cited]
+            sources = sources[:10]
+    src_lines = "\n".join(f"- {fn}: {r}" for fn, r in sources) or "(none stored)"
+    claim_lines = "\n".join(f"- {c[:300]}" for c in validated_claims[:12])
+    claims_part = (
+        "\n\nVERIFIED FINDINGS (each of these passed evidence verification; "
+        "present them as what CAN be said, clearly separated from the gap):\n"
+        + claim_lines if claim_lines else ""
+    )
+    message = ""
+    try:
+        message = await sinas.invoke(
+            "grove/answer-gate-agent",
+            "Reply with ONLY the note text itself — no preamble, no commentary "
+            "about the task, no restatement of these instructions. "
+            "Write a note (max 200 words) to a legal researcher, in the SAME "
+            "LANGUAGE as the question below. Structure: (1) state plainly which "
+            "part of the question could NOT be established and why (reason "
+            "below, rephrased plainly — no internal jargon, no dollar amounts; if "
+            "the reason mentions spend or budget, phrase it as: the analysis "
+            "could not be completed within its allotted scope); "
+            "(2) if verified findings are provided below, summarise what CAN be "
+            "said, faithfully — do not go beyond them; (3) point to the source "
+            "list for further reading. Never invent sources or findings."
+            "\n\nQUESTION:\n" + question
+            + "\n\nREASON: " + p.explanation
+            + claims_part
+            + "\n\nSOURCES:\n" + src_lines,
+        )
+    except Exception:  # noqa: BLE001 — phrasing is best-effort
+        pass
+    if not message.strip():
+        message = (
+            "No fully validated answer could be produced for this question. "
+            "The sources listed below were identified as the most relevant "
+            "and may contain the material you need."
+        )
+    await _tele(run_id, "partial", cause=p.cause, explanation=p.explanation,
+                message=message.strip()[:2000],
+                validated_claims=len(validated_claims),
+                sources=[fn for fn, _ in sources])
+    await _mark(run_id, status="partial",
+                error=None, completed_at=_now())
+    _log.info("query run %s partial (%s)", run_id, p.cause)
+
+
+async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
+    """Retrieval for full/retrieval modes via the retrieval-first engine
+    (schema-aware plan + deterministic channels), replacing the retired
+    agentic decompose/search path (Kjeld, 17 Aug: "we can drop agentic
+    mode... retrieval first replaces the old path"). Runs in-process; the
+    stored result id lands on the run exactly as the merge stage used to."""
+    from app import retrieval_first as rf
+
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        question, effort = run.question, run.effort or "medium"
+        if run.parent_result_id:  # resume: retrieval already stored
+            return
+    await _mark(run_id, status="retrieving")
+    plan = await rf.plan_question(question, effort=effort)
+    ranked = await rf.retrieve_and_rank(plan)
+    briefing = await rf.build_briefing(ranked, effort)
+    rid = await rf.store_result(question, ranked, briefing, plan)
+    await _mark(run_id, parent_result_id=uuid.UUID(str(rid)))
+    await _tele(run_id, "retrieval", completed=_iso(),
+                documents=len(ranked), queries=len(plan.get("queries") or []))
+
+
 # ── entrypoint ──────────────────────────────────────────────────────────────
 
 
@@ -846,10 +1348,7 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
         mode = (await session.get(QueryRun, run_id)).mode
     try:
         if mode in ("full", "retrieval"):
-            await _stage_decompose(run_id, sinas)
-            children = await _stage_search(run_id, sinas)
-            await _stage_merge(run_id, children)
-            await _stage_discovery(run_id, sinas)
+            await _stage_retrieve_first(run_id)
         if mode == "retrieval":
             await _mark(run_id, status="published", completed_at=_now())
             _log.info("query run %s retrieval published", run_id)
@@ -859,6 +1358,16 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
         await _stage_validate_publish(run_id, sinas)
         await _mark(run_id, status="published", completed_at=_now())
         _log.info("query run %s published", run_id)
+    except PartialOutcome as p:
+        _log.warning("query run %s partial: %s", run_id, p)
+        await _mark_partial(run_id, sinas, p)
+        try:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(QueryRun, run_id)
+                chat_ids = _chat_ids_for_cleanup(run.telemetry, run.searches)
+            await _teardown_chats(sinas, chat_ids)
+        except Exception:
+            _log.warning("post-partial chat teardown failed for run %s", run_id)
     except Exception as exc:
         _log.exception("query run %s failed", run_id)
         # str(exc) can be empty (e.g. httpx.ReadTimeout); keep the class name

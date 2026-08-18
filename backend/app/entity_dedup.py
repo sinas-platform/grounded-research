@@ -122,6 +122,13 @@ async def main() -> None:
     ap.add_argument("--apply-exact", action="store_true")
     ap.add_argument("--apply-llm", action="store_true")
     ap.add_argument("--job-dir", default="~/grove-bulk-jobs/entity-dedup")
+    ap.add_argument("--tighten", action="store_true",
+                    help="restrict fuzzy pairs to jaccard>=0.8 or full "
+                         "name-containment (>=2 tokens), max 3 partners "
+                         "per entity")
+    ap.add_argument("--types",
+                    help="comma-separated entity type names; only judge "
+                         "fuzzy pairs of these types")
     args = ap.parse_args()
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(name)s %(message)s")
@@ -131,6 +138,28 @@ async def main() -> None:
     exact, fuzzy = await find_pairs()
     print(f"exact-duplicate pairs: {len(exact)}")
     print(f"fuzzy candidate pairs: {len(fuzzy)}")
+
+    if args.types:
+        wanted = {t.strip() for t in args.types.split(",")}
+        fuzzy = [row for row in fuzzy if row[3] in wanted]
+        print(f"after --types {sorted(wanted)}: {len(fuzzy)}")
+    if args.tighten:
+        per_entity: dict = defaultdict(int)
+        kept = []
+        for a, b, jac, tname in fuzzy:
+            ta, tb = _tokens(a.canonical_form), _tokens(b.canonical_form)
+            if not ta or not tb:
+                continue
+            contained = (ta <= tb or tb <= ta) and min(len(ta), len(tb)) >= 2
+            if jac < 0.8 and not contained:
+                continue
+            if per_entity[a.id] >= 3 or per_entity[b.id] >= 3:
+                continue
+            per_entity[a.id] += 1
+            per_entity[b.id] += 1
+            kept.append((a, b, jac, tname))
+        fuzzy = kept
+        print(f"after --tighten: {len(fuzzy)}")
     if args.report or not (args.apply_exact or args.apply_llm):
         for a, b, jac, tname in fuzzy[:40]:
             print(f"  [{tname}] {jac}: {a.canonical_form[:60]!r} ~ "

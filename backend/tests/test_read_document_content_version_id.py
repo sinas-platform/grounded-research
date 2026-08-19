@@ -56,6 +56,9 @@ async def test_content_response_carries_the_version_uuid():
         line_from=None,
         line_to=None,
         numbered=False,
+        # calling the endpoint function directly, so FastAPI never resolves
+        # its Query() defaults — pass them explicitly
+        max_lines=None,
         session=session,
         caller=_FakeCaller(),
     )
@@ -74,6 +77,9 @@ async def test_empty_content_response_carries_the_version_uuid():
         line_from=None,
         line_to=None,
         numbered=False,
+        # calling the endpoint function directly, so FastAPI never resolves
+        # its Query() defaults — pass them explicitly
+        max_lines=None,
         session=session,
         caller=_FakeCaller(),
     )

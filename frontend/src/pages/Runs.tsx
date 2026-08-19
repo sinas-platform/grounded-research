@@ -289,10 +289,16 @@ function buildStages(
     // the synthesis stage writes telemetry under "draft"
     const sState = stageOf(tel, 'draft');
     const vDone = !!tel.validate?.published;
+    const extractMode = !!tel.draft?.extract_mode || !!tel.extract;
     rows.push([{
-      id: 'synth', title: 'Synthesis', sub: 'draft the answer, cite every claim',
+      id: 'synth', title: 'Synthesis',
+      sub: extractMode
+        ? 'plan the argument, quote the sources, draft from the quotes'
+        : 'draft the answer, cite every claim',
       state: failed && sState === 'active' ? 'error' : partial && sState !== 'done' ? 'done' : sState,
-      count: tel.draft?.claims != null ? `${tel.draft.claims} claims drafted` : undefined,
+      count: tel.draft?.claims != null
+        ? `${tel.draft.claims} claims${tel.extract?.passages_verified != null ? ` · ${tel.extract.passages_verified} verified passages` : ' drafted'}`
+        : undefined,
       wide: true,
     }]);
     rows.push([{
@@ -755,6 +761,7 @@ function Inspector({
   const totalActions =
     (activity?.searches.reduce((n, s) => n + s.actions.length, 0) ?? 0) +
     (activity?.synthesis?.actions.length ?? 0);
+  const citedPassages = (claims ?? []).reduce((n, c) => n + c.evidence.length, 0);
   const elapsed =
     tel._replay_elapsed_s != null
       ? `${Math.floor(tel._replay_elapsed_s / 60)}:${String(tel._replay_elapsed_s % 60).padStart(2, '0')}`
@@ -933,7 +940,55 @@ function Inspector({
   } else if (inspected === 'synth') {
     title = 'Synthesis';
     const acts = activity?.synthesis?.actions ?? [];
-    body = (
+    const ex = tel.extract;
+    const argPlan: any[] = tel.draft?.argument_plan ?? [];
+    const extractMode = !!tel.draft?.extract_mode || !!ex;
+    body = extractMode ? (
+      <>
+        <Label>Approach</Label>
+        <div className="text-stone-700 text-xs">
+          Drafting runs without an agent, in three steps: plan what the answer has to
+          establish, pull verbatim passages for each point out of the documents that
+          should carry it, then write the answer from those passages alone. Every quote
+          is checked against the source text first, so a passage that was not actually
+          printed in the document never reaches the drafter — which is why there are no
+          agent actions to list here.
+        </div>
+        {ex && (
+          <>
+            <Label>Passages</Label>
+            <KV k="Documents read" v={ex.documents_read ?? '—'} />
+            <KV k="Passages proposed" v={ex.passages_proposed ?? '—'} />
+            <KV
+              k="Verified verbatim"
+              v={
+                <span className={ex.passages_verified === ex.passages_proposed ? 'text-forest-700 font-semibold' : 'text-amber-700 font-semibold'}>
+                  {ex.passages_verified ?? '—'}
+                  {ex.passages_proposed ? ` of ${ex.passages_proposed}` : ''}
+                </span>
+              }
+            />
+          </>
+        )}
+        {!!argPlan.length && (
+          <>
+            <Label>What the answer set out to establish ({argPlan.length})</Label>
+            {argPlan.map((c, i) => (
+              <div key={i} className="mb-2">
+                <div className="text-[13px] leading-relaxed text-stone-800 border-l-2 border-forest-100 pl-2.5">
+                  {c.establishes}
+                </div>
+                {!!c.anchors?.length && (
+                  <div className="pl-2.5 mt-0.5 font-mono text-[10px] text-stone-400">
+                    {(c.anchors as string[]).join(' · ')}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+      </>
+    ) : (
       <>
         <Label>Approach</Label>
         <div className="text-stone-700 text-xs">
@@ -1044,7 +1099,17 @@ function Inspector({
       <div className="flex gap-4 px-4 py-2.5 border-b border-stone-200 text-xs text-stone-500 flex-wrap">
         <span>status <b className="text-stone-900 font-semibold">{run.status}</b></span>
         <span>docs <b className="text-stone-900 font-semibold">{docs?.length ?? '—'}</b></span>
-        <span>actions <b className="text-stone-900 font-semibold">{totalActions || '—'}</b></span>
+        {/* Chatless drafting takes no agent actions; its unit of work is the
+            passage. Runs from before that was recorded fall back to the
+            passages actually cited in the answer — a different count, so it
+            gets a different label rather than being folded into one. */}
+        {tel.extract ? (
+          <span>passages <b className="text-stone-900 font-semibold">{tel.extract.passages_verified ?? '—'}</b></span>
+        ) : tel.draft?.extract_mode ? (
+          <span>cited <b className="text-stone-900 font-semibold">{citedPassages || '—'}</b></span>
+        ) : (
+          <span>actions <b className="text-stone-900 font-semibold">{totalActions || '—'}</b></span>
+        )}
         <span>elapsed <b className="text-stone-900 font-semibold">{elapsed || '—'}</b></span>
         <span className="text-[10px] px-1.5 rounded bg-stone-100 text-stone-500 self-center">{run.mode} · {run.effort}</span>
         <StatusPill status={run.status} />

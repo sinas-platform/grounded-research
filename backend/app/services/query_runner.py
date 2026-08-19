@@ -615,19 +615,19 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) ->
 
 
 async def _extract_passages(
-    sinas: _Sinas, plan_claims: list[dict]
+    sinas: _Sinas, plan_claims: list[dict], run_id: uuid.UUID | None = None
 ) -> list[dict]:
-    """Inverted split, reading half: Flash pulls verbatim passages (with line
-    refs) per planned claim from its anchor documents. Every quote is then
-    verified against the actual lines — fabricated quotes are dropped, so the
-    drafter can only ever see text that exists."""
+    """Inverted split, reading half: the cheap model pulls verbatim passages
+    (with line refs) per planned claim from its anchor documents. Every quote
+    is then verified against the actual lines — fabricated quotes are dropped,
+    so the drafter can only ever see text that exists."""
     sem = asyncio.Semaphore(4)
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:4]]
         docs = await _fetch_numbered(anchors)
         if not docs:
-            return {"n": c.get("n"), "passages": []}
+            return {"n": c.get("n"), "passages": [], "proposed": 0, "read": 0}
         doc_blob = "\n\n".join(
             f"=== {fn} ===\n{txt}" for fn, txt in docs.items())
         async with sem:
@@ -645,9 +645,11 @@ async def _extract_passages(
                 cleaned = reply.strip().strip("`").removeprefix("json").strip()
                 data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
             except Exception:  # noqa: BLE001
-                return {"n": c.get("n"), "passages": []}
+                return {"n": c.get("n"), "passages": [], "proposed": 0,
+                        "read": len(docs)}
+        proposed = (data.get("passages") or [])[:4]
         good = []
-        for p in (data.get("passages") or [])[:4]:
+        for p in proposed:
             fn = str(p.get("filename") or "")
             try:
                 lf, lt = int(p.get("line_from")), int(p.get("line_to"))
@@ -657,9 +659,22 @@ async def _extract_passages(
                 good.append({"filename": fn, "line_from": lf, "line_to": lt,
                              "text": str(p.get("text"))[:2000]})
         return {"n": c.get("n"), "establishes": c.get("establishes"),
-                "passages": good}
+                "passages": good, "proposed": len(proposed),
+                "read": len(docs)}
 
-    return list(await asyncio.gather(*(one(c) for c in plan_claims)))
+    out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
+    if run_id is not None:
+        # The verified/proposed gap is the point of this stage: quotes that
+        # did not match the source text never reach the drafter. A gap that
+        # stops being small means the extractor is drifting.
+        await _tele(
+            run_id, "extract",
+            claims=len(out),
+            documents_read=sum(r.get("read", 0) for r in out),
+            passages_proposed=sum(r.get("proposed", 0) for r in out),
+            passages_verified=sum(len(r.get("passages") or []) for r in out),
+        )
+    return out
 
 
 async def _draft_from_extracts(
@@ -823,7 +838,7 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
                 # started/completed bracket the stage for duration reporting;
                 # the chat path writes its own pair alongside the chat id.
                 await _tele(run_id, "draft", started=_iso())
-                extracts = await _extract_passages(sinas, plan_claims)
+                extracts = await _extract_passages(sinas, plan_claims, run_id)
                 n = await _draft_from_extracts(
                     run_id, answer_id, sinas, question, extracts)
                 if n >= MIN_CLAIMS:

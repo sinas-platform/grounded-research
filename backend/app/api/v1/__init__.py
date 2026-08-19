@@ -12,6 +12,7 @@ from app.api.v1 import (
     health,
     info,
     ingestion,
+    maintenance,
     me,
     packages,
     playbooks,
@@ -37,6 +38,7 @@ api_router.include_router(health.router)
 api_router.include_router(info.router)
 api_router.include_router(me.router)
 api_router.include_router(config.router)
+api_router.include_router(maintenance.router)
 api_router.include_router(documents.router)
 api_router.include_router(dossiers.router)
 api_router.include_router(ingestion.router)

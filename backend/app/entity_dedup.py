@@ -116,6 +116,115 @@ async def apply_merge(session, survivor, loser) -> None:
     loser.merged_into_id = survivor.id
 
 
+
+
+async def _judge_and_merge(fuzzy) -> int:
+    """Judge tightened fuzzy pairs via a provider batch and merge confirmed
+    ones. Extracted from the CLI path so the API can reuse it."""
+    from pathlib import Path
+
+    from app.bulk_pipeline import BatchClient
+    from app.db import AsyncSessionLocal
+    from app.services.entity_resolver import RESOLVER_AGENT
+
+    if not fuzzy:
+        return 0
+    job_dir = Path.home() / "grove-bulk-jobs" / "dedup-api"
+    job_dir.mkdir(parents=True, exist_ok=True)
+    client = BatchClient(job_dir)
+    _PAIRS_PER_PROMPT = 40
+    prompts = []
+    for start in range(0, len(fuzzy), _PAIRS_PER_PROMPT):
+        block = fuzzy[start:start + _PAIRS_PER_PROMPT]
+        lines = []
+        for i, (a, b, jac, tname) in enumerate(block, start=1):
+            lines.append(f'PAIR {i} (type {tname}):\n'
+                         f'  A: "{a.canonical_form[:200]}"\n'
+                         f'  B: "{b.canonical_form[:200]}"')
+        prompts.append(_JUDGE_PROMPT.format(pairs="\n\n".join(lines)))
+    replies = await client.run_round("dedup-judge", RESOLVER_AGENT, prompts)
+    llm_merged = 0
+    async with AsyncSessionLocal() as session:
+        for pi, reply in enumerate(replies):
+            if not reply:
+                continue
+            try:
+                cleaned = reply.strip().strip("`").removeprefix("json").strip()
+                data = json.loads(cleaned[cleaned.find("{"):
+                                          cleaned.rfind("}") + 1])
+                verdicts = {int(p.get("pair") or 0): p
+                            for p in data.get("pairs") or []}
+            except Exception:  # noqa: BLE001
+                continue
+            block = fuzzy[pi * _PAIRS_PER_PROMPT:
+                          (pi + 1) * _PAIRS_PER_PROMPT]
+            for i, (a, b, jac, tname) in enumerate(block, start=1):
+                v = verdicts.get(i) or {}
+                if v.get("same") and float(v.get("confidence") or 0) >= 0.8:
+                    s = await session.get(type(a), a.id)
+                    l = await session.get(type(b), b.id)
+                    if (s is None or l is None
+                            or l.merged_into_id is not None
+                            or s.merged_into_id is not None):
+                        continue
+                    await apply_merge(session, s, l)
+                    llm_merged += 1
+        await session.commit()
+    return llm_merged
+
+
+def _tighten_pairs(fuzzy, types=None):
+    from collections import defaultdict
+    if types:
+        wanted = set(types)
+        fuzzy = [row for row in fuzzy if row[3] in wanted]
+    per_entity = defaultdict(int)
+    kept = []
+    for a, b, jac, tname in fuzzy:
+        ta, tb = _tokens(a.canonical_form), _tokens(b.canonical_form)
+        if not ta or not tb:
+            continue
+        contained = (ta <= tb or tb <= ta) and min(len(ta), len(tb)) >= 2
+        if jac < 0.8 and not contained:
+            continue
+        if per_entity[a.id] >= 3 or per_entity[b.id] >= 3:
+            continue
+        per_entity[a.id] += 1
+        per_entity[b.id] += 1
+        kept.append((a, b, jac, tname))
+    return kept
+
+
+async def run_apply(mode: str, tighten: bool = True, types=None) -> dict:
+    """API entry point: run one merge pass and repoint relationship edges.
+    Returns a summary dict. mode: 'exact' | 'llm'."""
+    from app.db import AsyncSessionLocal
+
+    exact, fuzzy = await find_pairs()
+    merged = 0
+    if mode == "exact":
+        async with AsyncSessionLocal() as session:
+            for survivor, loser in exact:
+                s = await session.get(type(survivor), survivor.id)
+                l = await session.get(type(loser), loser.id)
+                if l is None or l.merged_into_id is not None:
+                    continue
+                await apply_merge(session, s, l)
+                merged += 1
+            await session.commit()
+    else:
+        if tighten:
+            fuzzy = _tighten_pairs(fuzzy, types)
+        elif types:
+            fuzzy = _tighten_pairs(fuzzy, types)  # types filter implies pass
+        merged = await _judge_and_merge(fuzzy)
+    from app.api.v1.maintenance import repoint_merged_relationships
+
+    repointed = await repoint_merged_relationships()
+    return {"pairs_considered": len(exact) if mode == "exact" else len(fuzzy),
+            "merged": merged, "edges_repointed": repointed}
+
+
 async def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--report", action="store_true")

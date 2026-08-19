@@ -2,7 +2,7 @@
 
 The retired agentic dossier stage walked tools (get_dossier_classes,
 find_candidate_dossiers, assign per match). Deployments without dossier
-classes — Concurrences today — paid an agent invocation to find that out.
+classes paid an agent invocation just to find that out.
 Here the server checks the config first: no dossier classes means no LLM
 call and a free skip. With classes configured, one CHEAP_LLM call gets the
 document's identity (class, summary, properties) and the candidate

@@ -157,7 +157,7 @@ This gives the agent everything it needs in one round-trip: new state, new versi
 
 **Keep filter in chat context; add server-side auto-trace only.** Solves the audit story but not the token-cost or crash-resume stories. Half a fix.
 
-**New `ResearchSession` table.** Considered (and previously suggested in `CONCURRENCES_BRIEF.md`). Rejected — `Result` already has the right shape (status, parent_result_id, owner, trace). Adding `filter` + `filter_version` columns is two columns; a new table would mean duplicating status/owner/audit/publish across two models. The Result *is* the session.
+**New `ResearchSession` table.** Considered (it was suggested in an early deployment brief). Rejected — `Result` already has the right shape (status, parent_result_id, owner, trace). Adding `filter` + `filter_version` columns is two columns; a new table would mean duplicating status/owner/audit/publish across two models. The Result *is* the session.
 
 **Store the filter in Sinas State (state stores).** Rejected — the in-package comment in `schemas/runtime.py:213` claims this is current behavior, but no code reads/writes it. Sinas State adds a cross-service dependency for data that conceptually belongs to a Grove entity (the Result). Keeping it on the Result keeps the data co-located with the trace and the documents.
 

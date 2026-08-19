@@ -64,6 +64,20 @@ interface ClaimWithEvidence {
   evidence: Evidence[];
 }
 
+interface RetrievalPlan {
+  queries?: string[];
+  anchor_names?: Record<string, string>;
+  class_boost?: string[];
+  effort?: string;
+}
+
+interface ResultFull {
+  id: string;
+  query: string;
+  status: string;
+  filter: { plan?: RetrievalPlan; briefing?: unknown[]; retrieval_first?: boolean };
+}
+
 interface DocumentFull {
   id: string;
   filename: string;
@@ -83,6 +97,8 @@ interface StageNode {
   sub: string;
   state: StageState;
   count?: string;
+  /** Shown inside the node as a short preview list (e.g. the searches run). */
+  items?: string[];
   wide: boolean;
 }
 
@@ -186,7 +202,9 @@ function fmtDuration(start?: string, end?: string): string {
 }
 
 /** Derive the diagram from a run + its activity. */
-function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): { rows: StageNode[][]; edges: [string, string][] } {
+function buildStages(
+  run: QueryRun, activity?: RunActivity, docCount?: number, plan?: RetrievalPlan,
+): { rows: StageNode[][]; edges: [string, string][] } {
   const tel = run.telemetry ?? {};
   const failed = run.status === 'failed';
   const published = run.status === 'published';
@@ -215,11 +233,13 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
 
   if (retrievalFirst) {
     const rDone = !!tel.retrieval?.completed || !!run.parent_result_id;
+    const queries = plan?.queries ?? [];
     rows.push([{
       id: 'retrieve', title: 'Retrieve', sub: 'plan the searches, then gather the documents',
       state: rDone ? 'done' : failed ? 'error' : run.status === 'pending' ? 'pending' : 'active',
+      items: queries,
       count: tel.retrieval?.documents != null
-        ? `${tel.retrieval.documents} documents · ${tel.retrieval.queries ?? 0} queries`
+        ? `${tel.retrieval.documents} documents · ${tel.retrieval.queries ?? queries.length} searches`
         : undefined,
       wide: true,
     }]);
@@ -335,6 +355,13 @@ export default function RunsPage() {
   });
 
   const resultId = run.data?.parent_result_id ?? null;
+  // The retrieval plan (searches run, entity anchors, class boosts) lives on
+  // the result's filter payload, so it is readable for every past run too.
+  const result = useQuery({
+    queryKey: ['result', resultId],
+    queryFn: () => api<ResultFull>(`/results/${resultId}`),
+    enabled: !!resultId,
+  });
   const docs = useQuery({
     queryKey: ['result-docs', resultId],
     queryFn: () => api<ResultDoc[]>(`/results/${resultId}/documents`),
@@ -410,9 +437,10 @@ export default function RunsPage() {
     return { run: run.data ?? undefined, activity: activity.data, docs: docs.data, claims: claims.data };
   }, [run.data, activity.data, docs.data, claims.data, replayT]);
 
+  const plan = result.data?.filter?.plan;
   const graph = useMemo(
-    () => (view.run ? buildStages(view.run, view.activity, view.docs?.length) : null),
-    [view],
+    () => (view.run ? buildStages(view.run, view.activity, view.docs?.length, plan) : null),
+    [view, plan],
   );
 
   const pick = (id: string) => {
@@ -526,6 +554,7 @@ export default function RunsPage() {
               activity={view.activity}
               docs={view.docs}
               claims={view.claims}
+              plan={plan}
               inspected={inspected}
               onResume={() => resume.mutate()}
               resuming={resume.isPending}
@@ -690,6 +719,16 @@ function FlowDiagram({
                 {n.title}
               </div>
               <div className="text-[10.5px] text-stone-500 mt-0.5 truncate">{n.sub}</div>
+              {!!n.items?.length && (
+                <div className="mt-1 space-y-0.5">
+                  {n.items.slice(0, 4).map((it, i) => (
+                    <div key={i} className="text-[10px] text-stone-500 truncate border-l-2 border-forest-100 pl-1.5">{it}</div>
+                  ))}
+                  {n.items.length > 4 && (
+                    <div className="text-[10px] text-stone-400 pl-1.5">+{n.items.length - 4} more</div>
+                  )}
+                </div>
+              )}
               {n.count && <div className="text-[10.5px] text-forest-600 font-medium mt-1">{n.count}</div>}
             </button>
           ))}
@@ -700,12 +739,13 @@ function FlowDiagram({
 }
 
 function Inspector({
-  run, activity, docs, claims, inspected, onResume, resuming, onPreviewDoc,
+  run, activity, docs, claims, plan, inspected, onResume, resuming, onPreviewDoc,
 }: {
   run: QueryRun;
   activity?: RunActivity;
   docs?: ResultDoc[];
   claims?: ClaimWithEvidence[];
+  plan?: RetrievalPlan;
   inspected: string | null;
   onResume: () => void;
   resuming: boolean;
@@ -761,6 +801,7 @@ function Inspector({
     );
   } else if (inspected === 'retrieve') {
     title = 'Retrieval';
+    const anchors = Object.values(plan?.anchor_names ?? {});
     body = (
       <>
         <Label>What ran</Label>
@@ -768,18 +809,43 @@ function Inspector({
           The question is turned into a set of targeted searches over the corpus, which
           are then run and ranked into one document set — no search agents involved.
         </div>
+        <Label>Searches run ({plan?.queries?.length ?? tel.retrieval?.queries ?? 0})</Label>
+        {(plan?.queries ?? []).map((q, i) => (
+          <div key={i} className="border-l-2 border-forest-100 pl-2.5 py-0.5 mb-1 text-stone-700">{q}</div>
+        ))}
+        {!plan?.queries?.length && (
+          <div className="text-stone-400 italic text-xs">Not recorded for this run.</div>
+        )}
+        {!!anchors.length && (
+          <>
+            <Label>Entities the plan anchored on ({anchors.length})</Label>
+            <div className="flex flex-wrap gap-1">
+              {anchors.map((a) => (
+                <span key={a} className="text-[10.5px] px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{a}</span>
+              ))}
+            </div>
+          </>
+        )}
+        {!!plan?.class_boost?.length && (
+          <>
+            <Label>Document classes favoured</Label>
+            <div className="flex flex-wrap gap-1">
+              {plan.class_boost.map((c) => (
+                <span key={c} className="text-[10.5px] px-1.5 py-0.5 rounded bg-forest-50 text-forest-700">{c}</span>
+              ))}
+            </div>
+          </>
+        )}
         <Label>Outcome</Label>
-        <KV k="Searches run" v={tel.retrieval?.queries ?? '—'} />
-        <KV k="Documents kept" v={tel.retrieval?.documents ?? '—'} />
+        <KV k="Documents kept" v={tel.retrieval?.documents ?? docs?.length ?? '—'} />
         {run.parent_result_id && (
           <KV k="Result" v={<span className="font-mono text-xs text-stone-500">{run.parent_result_id.slice(0, 8)}</span>} />
         )}
-        {tel.retrieval?.completed && (
-          <div className="text-xs text-stone-400 italic mt-2">
-            Retrieval is stored as its own result — it can be reopened, re-scored, or
-            re-used as the input to a separate synthesis run.
-          </div>
-        )}
+        <div className="text-xs text-stone-400 italic mt-2">
+          The searches come from a plan that reads the corpus schema first — which
+          entities the question names, which document classes are likely to hold the
+          answer — so the queries are grounded in what the corpus actually contains.
+        </div>
       </>
     );
   } else if (inspected === 'plan') {
@@ -938,7 +1004,7 @@ function Inspector({
           ...(run.mode === 'synthesis'
             ? []
             : !tel.decompose
-              ? [['Retrieve', tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
+              ? [['Retrieve', plan?.queries?.length ? `${plan.queries.length} searches` : tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
               : [
                 ['Plan', tel.decompose?.subqueries ? `${tel.decompose.subqueries.length} sub-search${tel.decompose.subqueries.length > 1 ? 'es' : ''}` : ''],
                 ...((tel.decompose?.subqueries ?? run.subqueries ?? []) as string[]).map((sq: string, i: number) => {

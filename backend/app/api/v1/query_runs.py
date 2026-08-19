@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -59,6 +60,10 @@ class QueryRunOut(OwnedOut):
     answer_id: uuid.UUID | None = None
     error: str | None = None
     telemetry: dict[str, Any] = {}
+    # wall-clock bounds of the run itself — the only reliable elapsed time for
+    # outcomes that write no closing stage telemetry (e.g. partial)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 @router.post(

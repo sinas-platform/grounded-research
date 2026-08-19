@@ -17,6 +17,8 @@ interface QueryRun {
   error: string | null;
   telemetry: Record<string, any>;
   created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 interface AgentAction {
@@ -62,6 +64,20 @@ interface ClaimWithEvidence {
   evidence: Evidence[];
 }
 
+interface RetrievalPlan {
+  queries?: string[];
+  anchor_names?: Record<string, string>;
+  class_boost?: string[];
+  effort?: string;
+}
+
+interface ResultFull {
+  id: string;
+  query: string;
+  status: string;
+  filter: { plan?: RetrievalPlan; briefing?: unknown[]; retrieval_first?: boolean };
+}
+
 interface DocumentFull {
   id: string;
   filename: string;
@@ -81,16 +97,19 @@ interface StageNode {
   sub: string;
   state: StageState;
   count?: string;
+  /** Shown inside the node as a short preview list (e.g. the searches run). */
+  items?: string[];
   wide: boolean;
 }
 
-const TERMINAL = new Set(['published', 'failed']);
+const TERMINAL = new Set(['published', 'failed', 'partial', 'cancelled']);
 const isLive = (r?: QueryRun | null) => !!r && !TERMINAL.has(r.status);
 
 function stageOf(tel: Record<string, any>, key: string): StageState {
   const t = tel?.[key];
-  if (!t?.started) return 'pending';
-  return t.completed ? 'done' : 'active';
+  // `completed` alone is enough: some stages record only their outcome.
+  if (t?.completed) return 'done';
+  return t?.started ? 'active' : 'pending';
 }
 
 /* ------------------------------- replay masking -------------------------------
@@ -183,10 +202,13 @@ function fmtDuration(start?: string, end?: string): string {
 }
 
 /** Derive the diagram from a run + its activity. */
-function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): { rows: StageNode[][]; edges: [string, string][] } {
+function buildStages(
+  run: QueryRun, activity?: RunActivity, docCount?: number, plan?: RetrievalPlan,
+): { rows: StageNode[][]; edges: [string, string][] } {
   const tel = run.telemetry ?? {};
   const failed = run.status === 'failed';
   const published = run.status === 'published';
+  const partial = run.status === 'partial';
   const withSynthesis = run.mode !== 'retrieval';
 
   const subqueries: string[] =
@@ -205,7 +227,38 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
 
   rows.push([{ id: 'query', title: 'Question', sub: new Date(run.created_at).toLocaleString(), state: 'done', wide: true }]);
 
-  if (run.mode !== 'synthesis') {
+  // Retrieval-first runs write a single "retrieval" telemetry entry; runs from
+  // the retired agent-driven path carry "decompose" and keep the old diagram.
+  const retrievalFirst = run.mode !== 'synthesis' && !tel.decompose;
+
+  // A synthesis run answers from a result some earlier run retrieved. That
+  // retrieval is still readable through the result, so show it here rather
+  // than making someone hunt for the upstream run in the list.
+  if (run.mode === 'synthesis' && plan?.queries?.length) {
+    rows.push([{
+      id: 'retrieve', title: 'Retrieved earlier', sub: 'the searches behind this document set',
+      state: 'done',
+      items: plan.queries,
+      count: `${plan.queries.length} searches`,
+      wide: true,
+    }]);
+    edges.push(['query', 'retrieve']);
+  }
+
+  if (retrievalFirst) {
+    const rDone = !!tel.retrieval?.completed || !!run.parent_result_id;
+    const queries = plan?.queries ?? [];
+    rows.push([{
+      id: 'retrieve', title: 'Retrieve', sub: 'plan the searches, then gather the documents',
+      state: rDone ? 'done' : failed ? 'error' : run.status === 'pending' ? 'pending' : 'active',
+      items: queries,
+      count: tel.retrieval?.documents != null
+        ? `${tel.retrieval.documents} documents · ${tel.retrieval.queries ?? queries.length} searches`
+        : undefined,
+      wide: true,
+    }]);
+    edges.push(['query', 'retrieve']);
+  } else if (run.mode !== 'synthesis') {
     rows.push([{
       id: 'plan', title: 'Plan', sub: 'split into focused searches', state: planState,
       count: subqueries.length ? `${subqueries.length} sub-search${subqueries.length > 1 ? 'es' : ''}` : undefined,
@@ -244,21 +297,39 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
     count: docCount != null && run.parent_result_id ? `${docCount} documents${run.mode === 'retrieval' && published ? ' · published' : ''}` : undefined,
     wide: true,
   }]);
-  edges.push([run.mode === 'synthesis' ? 'query' : 'merge', 'result']);
+  const beforeResult = run.mode === 'synthesis'
+    ? (plan?.queries?.length ? 'retrieve' : 'query')
+    : retrievalFirst ? 'retrieve' : 'merge';
+  edges.push([beforeResult, 'result']);
 
   if (withSynthesis) {
     // the synthesis stage writes telemetry under "draft"
     const sState = stageOf(tel, 'draft');
     const vDone = !!tel.validate?.published;
+    const extractMode = !!tel.draft?.extract_mode || !!tel.extract;
     rows.push([{
-      id: 'synth', title: 'Synthesis', sub: 'draft the answer, cite every claim',
-      state: failed && sState === 'active' ? 'error' : sState,
-      count: tel.draft?.claims != null ? `${tel.draft.claims} claims drafted` : undefined,
+      id: 'synth', title: 'Synthesis',
+      sub: extractMode
+        ? 'plan the argument, quote the sources, draft from the quotes'
+        : 'draft the answer, cite every claim',
+      state: failed && sState === 'active' ? 'error' : partial && sState !== 'done' ? 'done' : sState,
+      count: tel.draft?.claims != null
+        ? `${tel.draft.claims} claims${tel.extract?.passages_verified != null ? ` · ${tel.extract.passages_verified} verified passages` : ' drafted'}`
+        : undefined,
       wide: true,
     }]);
     rows.push([{
-      id: 'answer', title: 'Answer', sub: 'every claim checked against sources',
-      state: published && run.answer_id ? 'done' : vDone ? 'done' : tel.validate ? 'active' : run.answer_id ? 'active' : 'pending',
+      id: 'answer',
+      title: partial ? 'Partial outcome' : 'Answer',
+      sub: partial ? 'no full answer — sources and any verified claims kept' : 'every claim checked against sources',
+      state: partial ? 'done'
+        : published && run.answer_id ? 'done'
+          : vDone ? 'done'
+            : tel.validate ? 'active'
+              : run.answer_id ? 'active' : 'pending',
+      count: partial && tel.partial?.validated_claims != null
+        ? `${tel.partial.validated_claims} verified claims`
+        : undefined,
       wide: true,
     }]);
     edges.push(['result', 'synth'], ['synth', 'answer']);
@@ -307,6 +378,13 @@ export default function RunsPage() {
   });
 
   const resultId = run.data?.parent_result_id ?? null;
+  // The retrieval plan (searches run, entity anchors, class boosts) lives on
+  // the result's filter payload, so it is readable for every past run too.
+  const result = useQuery({
+    queryKey: ['result', resultId],
+    queryFn: () => api<ResultFull>(`/results/${resultId}`),
+    enabled: !!resultId,
+  });
   const docs = useQuery({
     queryKey: ['result-docs', resultId],
     queryFn: () => api<ResultDoc[]>(`/results/${resultId}/documents`),
@@ -382,9 +460,10 @@ export default function RunsPage() {
     return { run: run.data ?? undefined, activity: activity.data, docs: docs.data, claims: claims.data };
   }, [run.data, activity.data, docs.data, claims.data, replayT]);
 
+  const plan = result.data?.filter?.plan;
   const graph = useMemo(
-    () => (view.run ? buildStages(view.run, view.activity, view.docs?.length) : null),
-    [view],
+    () => (view.run ? buildStages(view.run, view.activity, view.docs?.length, plan) : null),
+    [view, plan],
   );
 
   const pick = (id: string) => {
@@ -498,6 +577,7 @@ export default function RunsPage() {
               activity={view.activity}
               docs={view.docs}
               claims={view.claims}
+              plan={plan}
               inspected={inspected}
               onResume={() => resume.mutate()}
               resuming={resume.isPending}
@@ -553,8 +633,39 @@ function StatusPill({ status }: { status: string }) {
       ? 'bg-forest-100 text-forest-700'
       : status === 'failed'
         ? 'bg-red-50 text-red-700 border border-red-200'
-        : 'bg-amber-50 text-amber-700 border border-amber-200';
+        : status === 'partial'
+          ? 'bg-orange-50 text-orange-700 border border-orange-200'
+          : status === 'cancelled'
+            ? 'bg-stone-100 text-stone-500 border border-stone-200'
+            : 'bg-amber-50 text-amber-700 border border-amber-200';
   return <span className={`text-[10px] px-1.5 rounded ${cls}`}>{status}</span>;
+}
+
+/** The client-facing note a partial run ends with, plus why it stopped. */
+function PartialNote({ tel }: { tel: Record<string, any> }) {
+  const p = tel?.partial;
+  if (!p) return null;
+  const cause: Record<string, string> = {
+    budget_ceiling: 'the run reached its spend ceiling',
+    coverage: 'the sources found did not cover the question',
+    no_progress: 'drafting produced too little to stand behind',
+  };
+  return (
+    <div className="mb-3 rounded border border-orange-200 bg-orange-50 p-2.5">
+      <div className="text-[10.5px] font-semibold text-orange-700 uppercase tracking-wider mb-1">
+        Partial outcome — {cause[p.cause] ?? p.cause}
+      </div>
+      {p.message && <div className="text-[13px] leading-relaxed text-stone-800 whitespace-pre-wrap">{p.message}</div>}
+      {!!p.sources?.length && (
+        <div className="mt-2 text-xs text-stone-600">
+          <div className="font-semibold mb-0.5">Sources identified</div>
+          {(p.sources as string[]).map((s) => (
+            <div key={s} className="truncate font-mono text-[11px] text-stone-500">{s}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function stateDot(state: StageState) {
@@ -631,6 +742,16 @@ function FlowDiagram({
                 {n.title}
               </div>
               <div className="text-[10.5px] text-stone-500 mt-0.5 truncate">{n.sub}</div>
+              {!!n.items?.length && (
+                <div className="mt-1 space-y-0.5">
+                  {n.items.slice(0, 4).map((it, i) => (
+                    <div key={i} className="text-[10px] text-stone-500 truncate border-l-2 border-forest-100 pl-1.5">{it}</div>
+                  ))}
+                  {n.items.length > 4 && (
+                    <div className="text-[10px] text-stone-400 pl-1.5">+{n.items.length - 4} more</div>
+                  )}
+                </div>
+              )}
               {n.count && <div className="text-[10.5px] text-forest-600 font-medium mt-1">{n.count}</div>}
             </button>
           ))}
@@ -641,12 +762,13 @@ function FlowDiagram({
 }
 
 function Inspector({
-  run, activity, docs, claims, inspected, onResume, resuming, onPreviewDoc,
+  run, activity, docs, claims, plan, inspected, onResume, resuming, onPreviewDoc,
 }: {
   run: QueryRun;
   activity?: RunActivity;
   docs?: ResultDoc[];
   claims?: ClaimWithEvidence[];
+  plan?: RetrievalPlan;
   inspected: string | null;
   onResume: () => void;
   resuming: boolean;
@@ -656,14 +778,13 @@ function Inspector({
   const totalActions =
     (activity?.searches.reduce((n, s) => n + s.actions.length, 0) ?? 0) +
     (activity?.synthesis?.actions.length ?? 0);
+  const citedPassages = (claims ?? []).reduce((n, c) => n + c.evidence.length, 0);
   const elapsed =
     tel._replay_elapsed_s != null
       ? `${Math.floor(tel._replay_elapsed_s / 60)}:${String(tel._replay_elapsed_s % 60).padStart(2, '0')}`
       : fmtDuration(
-          tel.decompose?.started ?? run.created_at,
-          run.status === 'published' || run.status === 'failed'
-            ? tel.validate?.published ?? tel.draft?.completed ?? tel.search?.completed
-            : undefined,
+          run.started_at ?? tel.decompose?.started ?? run.created_at,
+          run.completed_at ?? undefined,
         );
 
   const Label = ({ children }: { children: React.ReactNode }) => (
@@ -700,6 +821,57 @@ function Inspector({
             )}
           </>
         )}
+      </>
+    );
+  } else if (inspected === 'retrieve') {
+    title = 'Retrieval';
+    const anchors = Object.values(plan?.anchor_names ?? {});
+    const upstream = run.mode === 'synthesis';
+    body = (
+      <>
+        <Label>What ran</Label>
+        <div className="text-stone-700">
+          The question is turned into a set of targeted searches over the corpus, which
+          are then run and ranked into one document set — no search agents involved.
+          {upstream && ' This run answers from a document set an earlier run retrieved; the plan below is that run’s.'}
+        </div>
+        <Label>Searches run ({plan?.queries?.length ?? tel.retrieval?.queries ?? 0})</Label>
+        {(plan?.queries ?? []).map((q, i) => (
+          <div key={i} className="border-l-2 border-forest-100 pl-2.5 py-0.5 mb-1 text-stone-700">{q}</div>
+        ))}
+        {!plan?.queries?.length && (
+          <div className="text-stone-400 italic text-xs">Not recorded for this run.</div>
+        )}
+        {!!anchors.length && (
+          <>
+            <Label>Entities the plan anchored on ({anchors.length})</Label>
+            <div className="flex flex-wrap gap-1">
+              {anchors.map((a) => (
+                <span key={a} className="text-[10.5px] px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{a}</span>
+              ))}
+            </div>
+          </>
+        )}
+        {!!plan?.class_boost?.length && (
+          <>
+            <Label>Document classes favoured</Label>
+            <div className="flex flex-wrap gap-1">
+              {plan.class_boost.map((c) => (
+                <span key={c} className="text-[10.5px] px-1.5 py-0.5 rounded bg-forest-50 text-forest-700">{c}</span>
+              ))}
+            </div>
+          </>
+        )}
+        <Label>Outcome</Label>
+        <KV k="Documents kept" v={tel.retrieval?.documents ?? docs?.length ?? '—'} />
+        {run.parent_result_id && (
+          <KV k="Result" v={<span className="font-mono text-xs text-stone-500">{run.parent_result_id.slice(0, 8)}</span>} />
+        )}
+        <div className="text-xs text-stone-400 italic mt-2">
+          The searches come from a plan that reads the corpus schema first — which
+          entities the question names, which document classes are likely to hold the
+          answer — so the queries are grounded in what the corpus actually contains.
+        </div>
       </>
     );
   } else if (inspected === 'plan') {
@@ -787,7 +959,54 @@ function Inspector({
   } else if (inspected === 'synth') {
     title = 'Synthesis';
     const acts = activity?.synthesis?.actions ?? [];
-    body = (
+    const ex = tel.extract;
+    const argPlan: any[] = tel.draft?.argument_plan ?? [];
+    const extractMode = !!tel.draft?.extract_mode || !!ex;
+    body = extractMode ? (
+      <>
+        <Label>Approach</Label>
+        <div className="text-stone-700 text-xs">
+          Three steps, no agent: plan what the answer has to establish, pull verbatim
+          passages for each point out of the documents that should carry it, then write
+          the answer from those passages alone. Every quote is checked against the
+          source text first, so a passage that was not printed in the document never
+          reaches the drafter.
+        </div>
+        {ex && (
+          <>
+            <Label>Passages</Label>
+            <KV k="Documents read" v={ex.documents_read ?? '—'} />
+            <KV k="Passages proposed" v={ex.passages_proposed ?? '—'} />
+            <KV
+              k="Verified verbatim"
+              v={
+                <span className={ex.passages_verified === ex.passages_proposed ? 'text-forest-700 font-semibold' : 'text-amber-700 font-semibold'}>
+                  {ex.passages_verified ?? '—'}
+                  {ex.passages_proposed ? ` of ${ex.passages_proposed}` : ''}
+                </span>
+              }
+            />
+          </>
+        )}
+        {!!argPlan.length && (
+          <>
+            <Label>What the answer set out to establish ({argPlan.length})</Label>
+            {argPlan.map((c, i) => (
+              <div key={i} className="mb-2">
+                <div className="text-[13px] leading-relaxed text-stone-800 border-l-2 border-forest-100 pl-2.5">
+                  {c.establishes}
+                </div>
+                {!!c.anchors?.length && (
+                  <div className="pl-2.5 mt-0.5 font-mono text-[10px] text-stone-400">
+                    {(c.anchors as string[]).join(' · ')}
+                  </div>
+                )}
+              </div>
+            ))}
+          </>
+        )}
+      </>
+    ) : (
       <>
         <Label>Approach</Label>
         <div className="text-stone-700 text-xs">
@@ -806,12 +1025,16 @@ function Inspector({
       </>
     );
   } else if (inspected === 'answer') {
-    title = 'Answer';
+    const isPartial = run.status === 'partial';
+    title = isPartial ? 'Partial outcome' : 'Answer';
     const verified = (claims ?? []).filter((c) => c.evidence.length > 0 && c.evidence.every((e) => e.validated));
     body = (
       <>
+        {isPartial && <PartialNote tel={tel} />}
         <Label>
-          The complete answer · {claims?.length ?? 0} claims · {verified.length} fully verified
+          {isPartial
+            ? `Claims kept · ${claims?.length ?? 0} drafted · ${verified.length} fully verified`
+            : `The complete answer · ${claims?.length ?? 0} claims · ${verified.length} fully verified`}
         </Label>
         <div className="space-y-3">
           {(claims ?? []).map((c) => {
@@ -847,19 +1070,22 @@ function Inspector({
     // overview
     body = (
       <>
+        {run.status === 'partial' && <PartialNote tel={tel} />}
         <Label>Stages</Label>
         {[
           ['Question', ''],
-          ...(run.mode !== 'synthesis'
-            ? [
+          ...(run.mode === 'synthesis'
+            ? (plan?.queries?.length ? [['Retrieved earlier', `${plan.queries.length} searches`]] : [])
+            : !tel.decompose
+              ? [['Retrieve', plan?.queries?.length ? `${plan.queries.length} searches` : tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
+              : [
                 ['Plan', tel.decompose?.subqueries ? `${tel.decompose.subqueries.length} sub-search${tel.decompose.subqueries.length > 1 ? 'es' : ''}` : ''],
                 ...((tel.decompose?.subqueries ?? run.subqueries ?? []) as string[]).map((sq: string, i: number) => {
                   const act = activity?.searches.find((s) => s.subquery === sq);
                   return [`Search ${i + 1}`, act ? `${act.actions.length} actions` : ''];
                 }),
                 ['Consolidate', tel.merge ? `${tel.merge.total_documents} documents` : ''],
-              ]
-            : []),
+              ]),
           ['Result', docs ? `${docs.length} documents` : ''],
           ...(run.mode !== 'retrieval'
             ? [
@@ -891,7 +1117,17 @@ function Inspector({
       <div className="flex gap-4 px-4 py-2.5 border-b border-stone-200 text-xs text-stone-500 flex-wrap">
         <span>status <b className="text-stone-900 font-semibold">{run.status}</b></span>
         <span>docs <b className="text-stone-900 font-semibold">{docs?.length ?? '—'}</b></span>
-        <span>actions <b className="text-stone-900 font-semibold">{totalActions || '—'}</b></span>
+        {/* Chatless drafting takes no agent actions; its unit of work is the
+            passage. Runs from before that was recorded fall back to the
+            passages actually cited in the answer — a different count, so it
+            gets a different label rather than being folded into one. */}
+        {tel.extract ? (
+          <span>passages <b className="text-stone-900 font-semibold">{tel.extract.passages_verified ?? '—'}</b></span>
+        ) : tel.draft?.extract_mode ? (
+          <span>cited <b className="text-stone-900 font-semibold">{citedPassages || '—'}</b></span>
+        ) : (
+          <span>actions <b className="text-stone-900 font-semibold">{totalActions || '—'}</b></span>
+        )}
         <span>elapsed <b className="text-stone-900 font-semibold">{elapsed || '—'}</b></span>
         <span className="text-[10px] px-1.5 rounded bg-stone-100 text-stone-500 self-center">{run.mode} · {run.effort}</span>
         <StatusPill status={run.status} />

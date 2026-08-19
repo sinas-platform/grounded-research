@@ -54,6 +54,12 @@ RELATIONSHIP_AGENT = "grove/relationship-oneshot-agent"
 PROPOSAL_THRESHOLD = 0.8  # below this an open-mode edge becomes a proposal
 _MAX_MENTION_NAMES = 150
 _SOURCE_DOCUMENT = "DOCUMENT"
+# DB phases of the wide-concurrent batch path run through this gate:
+# thousands of parked wave members are fine, but only a bounded number
+# of tasks may hold connections / multiplex multi-query transactions at
+# once (15 Aug: 876/1120 lost to pool starvation at 1120-wide prep).
+_PREP_GATE = asyncio.Semaphore(32)
+
 # Long documents are covered per chunk, like NER (citations sit deep in
 # court decisions, not in the head). Windows are double the NER chunk:
 # relationship statements are sparse, so fewer, larger calls win.
@@ -440,6 +446,21 @@ async def extract_document(
     definitions: list[dict[str, Any]] | None = None,
     write: bool = True,
 ) -> dict[str, Any]:
+    async with _PREP_GATE:
+        return await _extract_document_gated(
+            session, sinas, document_id,
+            definitions=definitions, write=write,
+        )
+
+
+async def _extract_document_gated(
+    session: AsyncSession,
+    sinas: _Sinas,
+    document_id: uuid.UUID,
+    *,
+    definitions: list[dict[str, Any]] | None = None,
+    write: bool = True,
+) -> dict[str, Any]:
     doc = await session.get(Document, document_id)
     report: dict[str, Any] = {
         "document": doc.filename if doc else str(document_id),
@@ -539,9 +560,18 @@ async def extract_document(
         )
         for chunk in chunks
     ]
-    replies = await asyncio.gather(
-        *(sinas.invoke(RELATIONSHIP_AGENT, p) for p in prompts)
-    )
+    # No transaction across a parked wave: in provider-batch mode these
+    # calls wait minutes, and the reads above opened a transaction. Ends a
+    # read-only transaction in sync mode — harmless there. The prep gate is
+    # released for the wait so parked tasks never block other docs' prep.
+    await session.commit()
+    _PREP_GATE.release()
+    try:
+        replies = await asyncio.gather(
+            *(sinas.invoke(RELATIONSHIP_AGENT, p) for p in prompts)
+        )
+    finally:
+        await _PREP_GATE.acquire()
     report["llm_calls"] = len(prompts)
     report["chunks"] = len(chunks)
     edges: list[dict] = []

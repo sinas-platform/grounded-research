@@ -1,16 +1,46 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { Activity, CheckSquare, FileText, MessageSquare, Network, Play, Sparkles } from 'lucide-react';
+import { Activity, CheckSquare, FileText, LucideIcon, MessageSquare, Network, Play, Sparkles } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
 
+// Daily work first; the two setup surfaces sit below a divider. Schema and
+// Discovery define the corpus once (and when a new source arrives) — they are
+// not places anyone should be every day.
 const links = [
   { to: '/documents', label: 'Documents', icon: FileText },
   { to: '/answers', label: 'Answers', icon: MessageSquare },
   { to: '/runs', label: 'Runs', icon: Play },
-  { to: '/schema', label: 'Schema', icon: Network },
-  { to: '/discovery', label: 'Discovery', icon: Sparkles },
   { to: '/review/entities', label: 'Entity review', icon: CheckSquare },
   { to: '/activity', label: 'Activity', icon: Activity },
 ];
+
+const setupLinks = [
+  { to: '/schema', label: 'Schema', icon: Network },
+  { to: '/discovery', label: 'Discovery', icon: Sparkles },
+];
+
+function NavItem({
+  to, label, Icon,
+}: {
+  to: string;
+  label: string;
+  Icon: LucideIcon;
+}) {
+  return (
+    <NavLink
+      to={to}
+      className={({ isActive }) =>
+        `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
+          isActive
+            ? 'bg-forest-50 text-forest-700 font-medium'
+            : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
+        }`
+      }
+    >
+      <Icon size={16} strokeWidth={2} />
+      {label}
+    </NavLink>
+  );
+}
 
 export function Layout() {
   const { me, signOut } = useAuth();
@@ -19,7 +49,7 @@ export function Layout() {
       <aside className="w-60 border-r border-stone-200 bg-white flex flex-col">
         <div className="px-5 pt-6 pb-8">
           <div className="text-base font-semibold tracking-tight text-forest-700">
-            Sinas Grove
+            Sinas Grounded Research
           </div>
           <div className="text-[11px] text-stone-400 uppercase tracking-wider mt-0.5">
             alpha
@@ -27,20 +57,13 @@ export function Layout() {
         </div>
         <nav className="flex-1 flex flex-col px-3 gap-0.5">
           {links.map(({ to, label, icon: Icon }) => (
-            <NavLink
-              key={to}
-              to={to}
-              className={({ isActive }) =>
-                `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
-                  isActive
-                    ? 'bg-forest-50 text-forest-700 font-medium'
-                    : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
-                }`
-              }
-            >
-              <Icon size={16} strokeWidth={2} />
-              {label}
-            </NavLink>
+            <NavItem key={to} to={to} label={label} Icon={Icon} />
+          ))}
+          <div className="mt-6 mb-1 px-3 text-[10.5px] font-semibold text-stone-400 uppercase tracking-wider">
+            Corpus setup
+          </div>
+          {setupLinks.map(({ to, label, icon: Icon }) => (
+            <NavItem key={to} to={to} label={label} Icon={Icon} />
           ))}
         </nav>
         {me && (

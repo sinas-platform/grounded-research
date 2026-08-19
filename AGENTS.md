@@ -34,5 +34,5 @@ If you must change Sinas (we did this session for the worker `/tmp` issue), the 
 ## Don't
 
 - Don't commit per-machine agent state (e.g., `.claude/settings.local.json`, `.cursor/state`). Project-shared agent config is fine to commit.
-- Don't add Concurrences-specific or other deployment-specific logic to Grove. Grove is the open-source platform; deployments configure it via the package + admin UI.
+- Don't add deployment-specific logic to Grove, and don't name a deployment anywhere in the repo — not in code, comments, docs, or commit messages. Grove is the open-source platform; deployments configure it via the package + admin UI.
 - Don't bypass the discovery proposal queue when writing schema. The approval workflow exists because the LLM gets it wrong sometimes; manual config writes are fine, but pipeline-driven config writes go through proposals.

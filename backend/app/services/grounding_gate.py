@@ -214,6 +214,103 @@ async def ground_document(
     return report
 
 
+# ── two-phase (batched) grounding ───────────────────────────────────────────
+async def ground_collect(
+    session: AsyncSession, document_id: uuid.UUID
+) -> dict[str, Any]:
+    """Phase 1: build the judge prompt as data. Returns {"prompt": str|None,
+    "mention_ids": [str]} — prompt is None when nothing needs judging."""
+    doc = await session.get(Document, document_id)
+    mentions = (
+        await session.execute(
+            select(EntityMention)
+            .where(EntityMention.document_id == document_id)
+            .where(EntityMention.status == STATUS_ACTIVE)
+        )
+    ).scalars().all()
+    if not mentions:
+        return {"prompt": None, "mention_ids": []}
+    canonical: dict[uuid.UUID, str] = {}
+    linked_ids = [m.entity_id for m in mentions if m.entity_id is not None]
+    if linked_ids:
+        canonical = dict((
+            await session.execute(
+                select(Entity.id, Entity.canonical_form)
+                .where(Entity.id.in_(linked_ids))
+            )
+        ).all())
+    content = ""
+    if doc and doc.current_version_id:
+        content = (
+            await session.execute(
+                select(DocumentVersion.content_md).where(
+                    DocumentVersion.id == doc.current_version_id
+                )
+            )
+        ).scalar_one_or_none() or ""
+
+    def surface_of(m: EntityMention) -> str:
+        return str(
+            m.surface_form or (m.span or {}).get("text")
+            or canonical.get(m.entity_id) or ""
+        ).strip()
+
+    needs_judge = [m for m in mentions
+                   if surface_of(m) and not is_verbatim(surface_of(m), content)]
+    if not needs_judge:
+        return {"prompt": None, "mention_ids": []}
+    blocks = []
+    for i, m in enumerate(needs_judge, start=1):
+        line = f'NAME {i}: "{surface_of(m)}"'
+        ctx = _slice(content, m.span)
+        if ctx:
+            line += f"\nCONTEXT: …{ctx}…"
+        blocks.append(line)
+    return {
+        "prompt": _JUDGE_PROMPT.format(
+            head=content[:6000].replace("\n", " "),
+            names="\n\n".join(blocks)),
+        "mention_ids": [str(m.id) for m in needs_judge],
+        "surfaces": [surface_of(m) for m in needs_judge],
+    }
+
+
+async def ground_apply(
+    session: AsyncSession, mention_ids: list[str], surfaces: list[str],
+    reply: str | None, *, write: bool = True,
+) -> dict[str, Any]:
+    """Phase 2: apply the judge verdicts to the captured mentions."""
+    report = {"kept": 0, "rejected": 0, "unparsed_kept": 0}
+    if not reply:
+        report["unparsed_kept"] = len(mention_ids)
+        return report
+    verdicts = _parse_verdicts(reply, surfaces)
+    if verdicts is None:
+        report["unparsed_kept"] = len(mention_ids)
+        return report
+    for i, mid in enumerate(mention_ids, start=1):
+        m = await session.get(EntityMention, uuid.UUID(mid))
+        if m is None or m.status != STATUS_ACTIVE:
+            continue
+        v = verdicts.get(i) or {}
+        grounded = bool(v.get("grounded", True))
+        conf = float(v.get("confidence") or 0.0)
+        evidence = {"grounded": grounded, "confidence": conf,
+                    "reason": str(v.get("reason") or "")[:300],
+                    "judge": "grounding-gate"}
+        if write:
+            m.link_evidence = {**(m.link_evidence or {}), "grounding": evidence}
+        if not grounded and conf >= _REJECT_CONFIDENCE:
+            if write:
+                m.status = STATUS_REJECTED
+            report["rejected"] += 1
+        else:
+            report["kept"] += 1
+    if write:
+        await session.commit()
+    return report
+
+
 async def ground_documents(
     document_ids: list[uuid.UUID] | None = None, *, write: bool = True
 ) -> list[dict[str, Any]]:

@@ -209,10 +209,16 @@ async def resolve_document(
         else:
             needs_creation.append(m)
 
-    # T3 — one batched adjudication call for the whole document
-    if needs_judge:
+    # T3 — batched adjudication, chunked. List-type documents (anti-dumping
+    # regulations enumerating thousands of exporters) produced single
+    # prompts of 3,510 mentions / 3.5MB — over Gemini's 1,048,576-token
+    # input cap (three 400s on 15-16 Aug). 200 mentions ≈ 300KB stays far
+    # under the cap while keeping call count low for normal documents.
+    _JUDGE_CHUNK = 200
+    for start in range(0, len(needs_judge), _JUDGE_CHUNK):
+        chunk_judge = needs_judge[start:start + _JUDGE_CHUNK]
         blocks = []
-        for i, (m, cands) in enumerate(needs_judge, start=1):
+        for i, (m, cands) in enumerate(chunk_judge, start=1):
             tname = types[m.entity_type_id].name if m.entity_type_id in types else "?"
             lines = [f'MENTION {i}: "{m.surface_form}" (type: {tname})',
                      f'CONTEXT: …{_slice(content, m.span)}…', "CANDIDATES:"]
@@ -233,7 +239,7 @@ async def resolve_document(
                 verdicts[int(v.get("mention") or 0)] = v
         except Exception:
             pass  # unparseable → all fall through to creation
-        for i, (m, cands) in enumerate(needs_judge, start=1):
+        for i, (m, cands) in enumerate(chunk_judge, start=1):
             v = verdicts.get(i) or {}
             choice = v.get("choice")
             conf = float(v.get("confidence") or 0.0)
@@ -246,6 +252,16 @@ async def resolve_document(
             needs_creation.append(m)
 
     # T4 — creation per the type's creation_mode
+    await _t4_create(session, index, types, document_id, needs_creation,
+                     link, report, write)
+    if write:
+        await session.commit()
+    return report
+
+
+async def _t4_create(session, index, types, document_id, needs_creation,
+                     link, report, write):
+    """T4 — shared by the interactive path and the batched apply phase."""
     for m in needs_creation:
         t = types.get(m.entity_type_id)
         if t is None:
@@ -321,6 +337,156 @@ async def resolve_document(
                 link(m, ent.id, "created", 0.8, {"created": True})
             else:
                 report["created"] += 1  # dry-run still counts
+
+
+# ── two-phase (batched) resolution ──────────────────────────────────────────
+# collect: run T1/T2 deterministically (committed), emit T3 adjudication
+# prompts as DATA — [{prompt, bindings: [[mention_id, [candidate_ids]]]}] —
+# so a provider batch can answer them at half price and without interactive
+# latency. apply: link verdicts onto the captured bindings and run T4.
+# The candidate lists freeze at collect time by design (16 Aug decision).
+
+async def resolve_collect(
+    session: AsyncSession, index: "_EntityIndex",
+    types: dict[uuid.UUID, EntityType], document_id: uuid.UUID,
+) -> dict[str, Any]:
+    doc = await session.get(Document, document_id)
+    mentions = (
+        await session.execute(
+            select(EntityMention)
+            .where(EntityMention.document_id == document_id)
+            .where(EntityMention.entity_id.is_(None))
+            .where(EntityMention.status == "active")
+        )
+    ).scalars().all()
+    out: dict[str, Any] = {"chunks": [], "creation": []}
+    if not mentions:
+        return out
+    content = ""
+    if doc and doc.current_version_id:
+        content = (
+            await session.execute(
+                select(DocumentVersion.content_md).where(
+                    DocumentVersion.id == doc.current_version_id
+                )
+            )
+        ).scalar_one_or_none() or ""
+
+    report = {"natural_key": 0, "exact": 0, "adjudicated": 0}
+
+    def link(m, eid, method, conf, ev):
+        m.entity_id = eid
+        m.link_method = method
+        m.link_confidence = conf
+        m.link_evidence = ev
+
+    needs_judge: list[tuple[EntityMention, list[Entity]]] = []
+    for m in mentions:
+        surface = m.surface_form or ""
+        nk = natural_key(surface)
+        if nk and len(index.nk.get(nk, [])) == 1:
+            link(m, index.nk[nk][0], "natural_key", 0.98, {"key": nk})
+            continue
+        hits = index.norm.get(normalize(surface), [])
+        if not hits:
+            ps = party_set(surface)
+            hits = index.party.get(ps, []) if ps else []
+        if len(hits) == 1:
+            ent = index.by_id[hits[0]]
+            if m.entity_type_id is None or ent.entity_type_id == m.entity_type_id:
+                link(m, ent.id, "exact", 0.9, {"matched": ent.canonical_form})
+                continue
+        cands = ([index.by_id[h] for h in hits] or
+                 index.candidates(surface, m.entity_type_id))
+        if m.entity_type_id is not None:
+            cands = [c for c in cands if c.entity_type_id == m.entity_type_id]
+        if cands:
+            needs_judge.append((m, cands))
+        else:
+            out["creation"].append(str(m.id))
+    await session.commit()  # T1/T2 links are final regardless of T3 outcome
+
+    _JUDGE_CHUNK = 200
+    for start in range(0, len(needs_judge), _JUDGE_CHUNK):
+        chunk_judge = needs_judge[start:start + _JUDGE_CHUNK]
+        blocks = []
+        bindings: list[list] = []
+        for i, (m, cands) in enumerate(chunk_judge, start=1):
+            tname = types[m.entity_type_id].name if m.entity_type_id in types else "?"
+            lines = [f'MENTION {i}: "{m.surface_form}" (type: {tname})',
+                     f'CONTEXT: …{_slice(content, m.span)}…', "CANDIDATES:"]
+            for letter, c in zip("ABCDEFGH", cands):
+                ctype = types[c.entity_type_id].name if c.entity_type_id in types else "?"
+                lines.append(f"  {letter}. {c.canonical_form} (type: {ctype})")
+            blocks.append("\n".join(lines))
+            bindings.append([str(m.id), [str(c.id) for c in cands[:8]]])
+        out["chunks"].append({
+            "prompt": _ADJUDICATE_PROMPT.format(mentions="\n\n".join(blocks)),
+            "bindings": bindings,
+        })
+    return out
+
+
+async def resolve_apply(
+    session: AsyncSession, index: "_EntityIndex",
+    types: dict[uuid.UUID, EntityType], document_id: uuid.UUID,
+    chunks: list[dict], replies: list[str | None],
+    creation_ids: list[str], *, write: bool = True,
+) -> dict[str, Any]:
+    report: dict[str, Any] = {
+        "document": str(document_id),
+        "natural_key": 0, "exact": 0, "adjudicated": 0,
+        "created": 0, "proposed": 0, "left_unlinked": 0,
+    }
+
+    def link(m, eid, method, conf, ev):
+        m.entity_id = eid
+        m.link_method = method
+        m.link_confidence = conf
+        m.link_evidence = ev
+        report[method if method in report else "adjudicated"] += 1
+
+    async def fetch(mid: str) -> EntityMention | None:
+        m = await session.get(EntityMention, uuid.UUID(mid))
+        # only touch mentions still unlinked and active
+        if m is None or m.entity_id is not None or m.status != "active":
+            return None
+        return m
+
+    needs_creation: list[EntityMention] = []
+    for chunk, reply in zip(chunks, replies):
+        verdicts: dict[int, dict] = {}
+        if reply:
+            try:
+                cleaned = reply.strip().strip("`").removeprefix("json").strip()
+                data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+                for v in data.get("links") or []:
+                    verdicts[int(v.get("mention") or 0)] = v
+            except Exception:  # noqa: BLE001 — unparseable → creation path
+                pass
+        for i, (mid, cand_ids) in enumerate(chunk["bindings"], start=1):
+            m = await fetch(mid)
+            if m is None:
+                continue
+            v = verdicts.get(i) or {}
+            choice = v.get("choice")
+            conf = float(v.get("confidence") or 0.0)
+            if choice and conf >= 0.6 and str(choice).strip().upper()[:1] in "ABCDEFGH":
+                idx = "ABCDEFGH".index(str(choice).strip().upper()[0])
+                if idx < len(cand_ids):
+                    eid = uuid.UUID(cand_ids[idx])
+                    if eid in index.by_id:
+                        link(m, eid, "adjudicated", conf,
+                             {"reason": str(v.get("reason") or "")[:300]})
+                        continue
+            needs_creation.append(m)
+    for mid in creation_ids:
+        m = await fetch(mid)
+        if m is not None:
+            needs_creation.append(m)
+
+    await _t4_create(session, index, types, document_id, needs_creation,
+                     link, report, write)
     if write:
         await session.commit()
     return report

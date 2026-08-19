@@ -23,7 +23,9 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
-        server_onupdate=func.now(),
+        # server_onupdate emits no SQL on Postgres (it only marks the column
+        # as server-maintained); without a trigger the value never changed.
+        onupdate=func.now(),
         nullable=False,
     )
 

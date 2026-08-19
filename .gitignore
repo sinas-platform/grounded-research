@@ -20,5 +20,8 @@ backend/app/static/
 .DS_Store
 .idea/
 .vscode/
+# Local agent/editor scratch: launch configs, worktrees, session state. These
+# carry machine- and deployment-specific paths and must never be committed.
+.claude/
 
 # Alembic does NOT belong here — versions are tracked

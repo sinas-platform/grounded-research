@@ -284,7 +284,7 @@ def _ann(jurisdiction=None, depth=None):
     return out
 
 
-def test_order_carolina_rule_eu_question():
+def test_order_jurisdiction_rule_puts_supranational_first():
     """The canonical case: a Spain-scoped question ranks EU bodies first,
     then Spain by tier depth, then other member states alphabetically."""
     subjects = {

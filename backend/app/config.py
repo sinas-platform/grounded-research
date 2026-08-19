@@ -41,6 +41,36 @@ class Settings(BaseSettings):
         default=5, validation_alias="GROVE_RERUN_CONCURRENCY"
     )
 
+    # ── question runs (see docs/operations-bulk-and-runs.md) ──
+    # How answers are drafted. "extract" is chatless: an argument plan, then
+    # verbatim passage extraction verified against the source text, then one
+    # drafting call. "chat" is the older agent-chat drafting loop.
+    grove_draft_mode: Literal["extract", "chat"] = Field(
+        default="chat", validation_alias="GROVE_DRAFT_MODE"
+    )
+    # Hard per-run spend ceiling in USD, summed over the run's LLM usage and
+    # checked at every supervision poll. A run that crosses it ends "partial"
+    # with whatever it has verified, never mid-write.
+    grove_run_cost_cap_usd: float = Field(
+        default=10.0, validation_alias="GROVE_RUN_COST_CAP_USD"
+    )
+    # Directory holding benchmark fixtures for the retrieval engine.
+    # Empty = ~/grove-benchmark.
+    grove_bench_dir: str = Field(default="", validation_alias="GROVE_BENCH_DIR")
+
+    # ── what this deployment holds (prompt framing only) ──
+    # Grove is domain-neutral; these are the only place a deployment tells
+    # the models what kind of corpus and reader they are serving. No
+    # behaviour branches on them — they change wording, not logic.
+    #
+    # Adjective for the corpus domain, e.g. "legal", "clinical", "regulatory".
+    # Empty keeps the planner's framing generic.
+    grove_domain: str = Field(default="", validation_alias="GROVE_DOMAIN")
+    # Who a client-facing note is written for, e.g. "a legal researcher".
+    grove_audience: str = Field(
+        default="a researcher", validation_alias="GROVE_AUDIENCE"
+    )
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.grove_cors_origins.split(",") if o.strip()]

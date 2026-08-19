@@ -20,16 +20,22 @@ from app.db import Base
 from app.models._common import OwnedMixin, TimestampMixin, uuid_pk
 
 # status lifecycle:
-#   pending → decomposing → searching → merging → synthesizing → validating
-#           → published | failed
+#   pending → retrieving → synthesizing → validating
+#           → published | partial | failed
+# "partial" is a terminal outcome with a client-facing note instead of a full
+# answer (budget ceiling, thin coverage); "failed" is infra and resumable.
+# decomposing/searching/merging belong to the retired agent-driven retrieval
+# path and only appear on historical runs.
 QUERY_RUN_STATUSES = (
     "pending",
+    "retrieving",
     "decomposing",
     "searching",
     "merging",
     "synthesizing",
     "validating",
     "published",
+    "partial",
     "failed",
 )
 

@@ -57,7 +57,7 @@ MIN_CLAIMS = 6
 # (which also carries remediation traffic — empirically where runaway spend
 # lives; run 3d7f39d3 burned $23.81 there hunting unanchorable evidence).
 # Checked on every supervision poll; tripping it fails the run loudly.
-RUN_COST_CAP_USD = float(__import__("os").environ.get("GROVE_RUN_COST_CAP_USD", "10"))
+RUN_COST_CAP_USD = get_settings().grove_run_cost_cap_usd
 # effort → maximum sub-query fan-out. The bound is enforced here (truncation)
 # AND stated in the decompose instruction; no magic numbers in agent prose.
 EFFORT_FANOUT = {"low": 1, "medium": 2, "high": 3}
@@ -569,7 +569,7 @@ async def _chat_cost_usd(chat_id: str) -> float:
         return 0.0
 
 
-DRAFT_MODE = __import__("os").environ.get("GROVE_DRAFT_MODE", "chat")
+DRAFT_MODE = get_settings().grove_draft_mode
 
 
 async def _fetch_numbered(filenames: list[str], cap_chars: int = 140000) -> dict[str, str]:
@@ -820,6 +820,9 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
         plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
         if DRAFT_MODE == "extract" and plan_claims:
             try:
+                # started/completed bracket the stage for duration reporting;
+                # the chat path writes its own pair alongside the chat id.
+                await _tele(run_id, "draft", started=_iso())
                 extracts = await _extract_passages(sinas, plan_claims)
                 n = await _draft_from_extracts(
                     run_id, answer_id, sinas, question, extracts)
@@ -1316,8 +1319,7 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
 async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     """Retrieval for full/retrieval modes via the retrieval-first engine
     (schema-aware plan + deterministic channels), replacing the retired
-    agentic decompose/search path (Kjeld, 17 Aug: "we can drop agentic
-    mode... retrieval first replaces the old path"). Runs in-process; the
+    agentic decompose/search path. Runs in-process; the
     stored result id lands on the run exactly as the merge stage used to."""
     from app import retrieval_first as rf
 

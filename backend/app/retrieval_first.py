@@ -27,7 +27,9 @@ from pathlib import Path
 
 from sqlalchemy import text
 
-PLAN_AGENT = "grove/retrieval-planner-agent"  # tool-less planning lane, Sonnet via client MLflow (Kjeld 17 Aug)
+from app.config import get_settings
+
+PLAN_AGENT = "grove/retrieval-planner-agent"  # tool-less planning lane
 
 EFFORT_DEPTH = {"low": 1, "medium": 2, "high": 3}
 EFFORT_BRIEFING = {"low": 8, "medium": 15, "high": 25}
@@ -385,7 +387,7 @@ async def store_result(question: str, ranked: list[dict],
 # Optional regression benchmark directory (gold_standard yaml + document
 # map). Domain-specific content lives OUTSIDE the repo; point this at your
 # deployment's benchmark folder to enable --regress.
-BENCH = Path(__import__("os").environ.get("GROVE_BENCH_DIR", str(Path.home() / "grove-benchmark")))
+BENCH = Path(get_settings().grove_bench_dir or Path.home() / "grove-benchmark")
 
 
 def _load_gold():

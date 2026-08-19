@@ -5,8 +5,8 @@ synthesis, validate, publish — lives HERE, in code, with per-stage state
 checkpointed on the QueryRun row. Agents are consulted only for judgment:
 
   decompose   one forced-JSON call (search-orchestrator agent, single turn)
-  search      grove/deep-search-agent chats — the agentic retrieval core
-  draft       grove/synthesis-agent chat, scoped to DRAFTING ONLY
+  search      sgr/deep-search-agent chats — the agentic retrieval core
+  draft       sgr/synthesis-agent chat, scoped to DRAFTING ONLY
   verdicts    the stateless evidence-check fan-out (services/faithfulness)
 
 Supervision rules: stage completion is observed in the DATABASE, never on a
@@ -57,12 +57,12 @@ MIN_CLAIMS = 6
 # (which also carries remediation traffic — empirically where runaway spend
 # lives; run 3d7f39d3 burned $23.81 there hunting unanchorable evidence).
 # Checked on every supervision poll; tripping it fails the run loudly.
-RUN_COST_CAP_USD = get_settings().grove_run_cost_cap_usd
+RUN_COST_CAP_USD = get_settings().sgr_run_cost_cap_usd
 # effort → maximum sub-query fan-out. The bound is enforced here (truncation)
 # AND stated in the decompose instruction; no magic numbers in agent prose.
 EFFORT_FANOUT = {"low": 1, "medium": 2, "high": 3}
 
-_log = __import__("logging").getLogger("grove.query_runner")
+_log = __import__("logging").getLogger("sgr.query_runner")
 
 
 class PartialOutcome(Exception):
@@ -266,7 +266,7 @@ async def _stage_decompose(run_id: uuid.UUID, sinas: _Sinas) -> list[str]:
     # decides to work before replying, and the server keeps executing after
     # the client gives up. The chat id lands in telemetry so a failed run's
     # teardown can find it.
-    chat_id = await sinas.chat_create("grove/search-orchestrator", "[query-run] decompose")
+    chat_id = await sinas.chat_create("sgr/search-orchestrator", "[query-run] decompose")
     await _tele(run_id, "decompose", chat_id=chat_id)
     sinas.send_detached(
         chat_id,
@@ -358,7 +358,7 @@ async def _stage_search(run_id: uuid.UUID, sinas: _Sinas) -> list[str]:
     )
     for sq in subs:
         if sq not in searches:
-            chat = await sinas.chat_create("grove/deep-search-agent", f"[query-run] {sq[:50]}")
+            chat = await sinas.chat_create("sgr/deep-search-agent", f"[query-run] {sq[:50]}")
             searches[sq] = {"chat_id": chat, "started": _iso(), "nudges": 0, "redispatched": False}
             sinas.send_detached(chat, dispatch_msg.format(sq=sq, q=question))
     await _mark(run_id, searches=searches)
@@ -389,7 +389,7 @@ async def _stage_search(run_id: uuid.UUID, sinas: _Sinas) -> list[str]:
                 )
             elif not meta["redispatched"]:
                 meta.update(redispatched=True, nudges=0, started=_iso())
-                chat = await sinas.chat_create("grove/deep-search-agent", f"[query-run retry] {sq[:40]}")
+                chat = await sinas.chat_create("sgr/deep-search-agent", f"[query-run retry] {sq[:40]}")
                 meta["chat_id"] = chat
                 sinas.send_detached(chat, dispatch_msg.format(sq=sq, q=question))
                 changed = True
@@ -450,7 +450,7 @@ async def _stage_discovery(run_id: uuid.UUID, sinas: _Sinas) -> None:
         if not run.run_discovery or (run.telemetry or {}).get("discovery"):
             return
         parent = run.parent_result_id
-    chat = await sinas.chat_create("grove/relationship-discovery-agent", "[query-run] discovery")
+    chat = await sinas.chat_create("sgr/relationship-discovery-agent", "[query-run] discovery")
     sinas.send_detached(chat, f"Surface relationship proposals for the documents of result {parent}. Write proposals only.")
     await _tele(run_id, "discovery", fired=_iso(), chat_id=chat)
 
@@ -458,7 +458,7 @@ async def _stage_discovery(run_id: uuid.UUID, sinas: _Sinas) -> None:
 async def _doc_manifest(parent_id: uuid.UUID) -> str:
     """One line per result document, in rank order, plus whatever the domain
     config derives about each one: annotation values (e.g. issuing body and
-    authority tier in a legal deployment — Grove only renders what the config
+    authority tier in a legal deployment — SGR only renders what the config
     declares) and, for documents in the result's stored briefing, properties
     and TOC. Entity-id values are resolved to canonical names."""
     from app.models import AnnotationDefinition
@@ -534,7 +534,7 @@ _sinas_usage_engine = None
 
 async def _chat_cost_usd(chat_id: str) -> float:
     """Spend on one Sinas chat, USD, from llm_usage. Sinas shares the
-    Postgres server with Grove (different database), so this is one
+    Postgres server with SGR (different database), so this is one
     cross-database read; pricing matches the Anthropic rate card for the
     Sonnet/Haiku tiers in use. Fails open (0.0) — the cap must never be
     the thing that kills an otherwise healthy run on a transient error."""
@@ -544,7 +544,7 @@ async def _chat_cost_usd(chat_id: str) -> float:
     from app.config import get_settings
 
     if _sinas_usage_engine is None:
-        url = get_settings().grove_database_url
+        url = get_settings().sgr_database_url
         _sinas_usage_engine = create_async_engine(
             url[: url.rfind("/")] + "/sinas", pool_size=2)
     try:
@@ -569,7 +569,7 @@ async def _chat_cost_usd(chat_id: str) -> float:
         return 0.0
 
 
-DRAFT_MODE = get_settings().grove_draft_mode
+DRAFT_MODE = get_settings().sgr_draft_mode
 
 
 async def _fetch_numbered(filenames: list[str], cap_chars: int = 140000) -> dict[str, str]:
@@ -633,7 +633,7 @@ async def _extract_passages(
         async with sem:
             try:
                 reply = await sinas.invoke(
-                    "grove/passage-extractor-agent",
+                    "sgr/passage-extractor-agent",
                     "From the numbered documents below, extract the passages "
                     "that bear on: " + str(c.get("establishes") or "") + "\n"
                     + (("Focus: " + str(c.get("hint")) + "\n") if c.get("hint") else "")
@@ -696,7 +696,7 @@ async def _draft_from_extracts(
     if not blocks:
         return 0
     reply = await sinas.invoke(
-        "grove/retrieval-planner-agent",
+        "sgr/retrieval-planner-agent",
         "Draft the claims of a legal answer from the VERIFIED PASSAGES below "
         "— use nothing else; every claim must be supported entirely by the "
         "passages you cite for it. Skip any planned claim whose passages are "
@@ -751,7 +751,7 @@ async def _argument_plan(
     exactly as before."""
     try:
         reply = await sinas.invoke(
-            "grove/retrieval-planner-agent",
+            "sgr/retrieval-planner-agent",
             "Design the argument for answering the question below, using ONLY "
             "the documents listed. Reply ONLY JSON:\n"
             '{"claims": [{"n": 1, "establishes": "<one sentence: what this '
@@ -859,7 +859,7 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
             except Exception:  # noqa: BLE001 — infra failures still fail open
                 _log.exception(
                     "extract-mode failed for run %s; chat drafting", run_id)
-        chat_id = await sinas.chat_create("grove/synthesis-agent", "[query-run] synthesis")
+        chat_id = await sinas.chat_create("sgr/synthesis-agent", "[query-run] synthesis")
         sinas.send_detached(
             chat_id,
             f"Question: {question}\n\n"
@@ -1000,7 +1000,7 @@ async def _gate_answer(
         f"- [{'CITED' if fn in cited else 'uncited'}] {fn}: {summ}" for fn, summ in sources
     ) or "(working set unavailable)"
     reply = await sinas.invoke(
-        "grove/answer-gate-agent",
+        "sgr/answer-gate-agent",
         "QUESTION:\n" + run_question + "\n\nCLAIMS OF THE DRAFT ANSWER:\n" + claims
         + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
         + '\n\nReply ONLY JSON: {"publishable": true|false,'
@@ -1309,11 +1309,11 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
     message = ""
     try:
         message = await sinas.invoke(
-            "grove/answer-gate-agent",
+            "sgr/answer-gate-agent",
             "Reply with ONLY the note text itself — no preamble, no commentary "
             "about the task, no restatement of these instructions. "
             "Write a note (max 200 words) to "
-            + get_settings().grove_audience
+            + get_settings().sgr_audience
             + ", in the SAME "
             "LANGUAGE as the question below. Structure: (1) state plainly which "
             "part of the question could NOT be established and why (reason "

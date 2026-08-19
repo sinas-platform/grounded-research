@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.schemas.runtime import GroveFilter
+from app.schemas.runtime import SgrFilter
 
 
 # ───────────────────────────── common envelopes ─────────────────────────────
@@ -29,7 +29,7 @@ class FilterMutationOut(BaseModel):
     """Uniform response shape across every filter mutation op."""
 
     filter_version: int  # the new version after this mutation
-    filter: GroveFilter  # the new full filter state
+    filter: SgrFilter  # the new full filter state
     candidate_count: int  # docs matching after the mutation
     trace_sequence: int  # sequence number of the auto-written ResultTrace row
 
@@ -116,7 +116,7 @@ class DocumentIdsIn(_VersionedIn):
 
 
 class ReplaceFilterIn(_VersionedIn):
-    filter: GroveFilter
+    filter: SgrFilter
 
 
 # ───────────────────────────── introspect variants ─────────────────────────────
@@ -130,7 +130,7 @@ class IntrospectByResultIn(BaseModel):
     fields: list[str] | None = None
     # Same default as IntrospectIn.top_k — see the rationale there.
     top_k: int = Field(default=10, ge=1, le=100)
-    overlay: GroveFilter | None = None
+    overlay: SgrFilter | None = None
 
 
 # ───────────────────────────── draft-result document mutations ─────────────────────────────

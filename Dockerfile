@@ -70,5 +70,5 @@ COPY scripts/start.sh /usr/local/bin/start
 RUN chmod +x /usr/local/bin/start
 
 EXPOSE 8080
-ENV GROVE_PORT=8080
+ENV SGR_PORT=8080
 CMD ["/usr/local/bin/start"]

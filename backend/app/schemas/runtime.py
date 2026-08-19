@@ -334,7 +334,7 @@ class EntityFilter(BaseModel):
     entity_ids: list[uuid.UUID] = Field(default_factory=list)
 
 
-class GroveFilter(BaseModel):
+class SgrFilter(BaseModel):
     document_class_id: uuid.UUID | None = None
     field_filters: list[FieldFilter] = Field(default_factory=list)
     regex_filters: list[RegexFilter] = Field(default_factory=list)
@@ -354,7 +354,7 @@ class GroveFilter(BaseModel):
 
 
 class IntrospectIn(BaseModel):
-    filter: GroveFilter | None = None
+    filter: SgrFilter | None = None
     fields: list[str] | None = None
     # 10 values per facet is enough to pick the next narrowing filter; the
     # response is re-read by the agent on every turn, so the default leans
@@ -374,7 +374,7 @@ class IntrospectOut(BaseModel):
 
 
 class MatchingDocumentsIn(BaseModel):
-    filter: GroveFilter | None = None
+    filter: SgrFilter | None = None
     limit: int = Field(default=50, ge=1, le=200)
 
 

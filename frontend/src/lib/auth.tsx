@@ -6,7 +6,7 @@ export interface Me {
   user_id: string;
   roles: string[];
   is_admin: boolean;
-  /** Grove's own auth mode (whether grove uses real Sinas auth or a single admin key). */
+  /** SGR's own auth mode (whether sgr uses real Sinas auth or a single admin key). */
   auth_mode: 'sinas' | 'simplified';
 }
 

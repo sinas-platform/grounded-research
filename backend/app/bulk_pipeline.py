@@ -23,7 +23,7 @@ before polling so a crashed job resumes by polling, never by resubmitting.
 Run standalone (never inside uvicorn):
     cd backend && ../.venv/bin/python -m app.bulk_pipeline \
         --ids-file /tmp/ids.txt --stages extract,resolve,relationships \
-        --job-dir ~/grove-bulk-jobs/p5-probe
+        --job-dir ~/sgr-bulk-jobs/p5-probe
 
 The API trigger (app/api/v1/bulk.py) spawns exactly this as a subprocess.
 """
@@ -166,7 +166,7 @@ class BatchClient:
                             headers=self.headers,
                             json={"inputs": [{"message": p} for p in chunk],
                                   "execution_mode": "provider",
-                                  "trigger_id_prefix": f"grove-bulk-{round_key}"},
+                                  "trigger_id_prefix": f"sgr-bulk-{round_key}"},
                         )
                     if r.is_error:
                         raise RuntimeError(
@@ -536,7 +536,7 @@ async def stage_relationships(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
 
     replies = await client.run_round("relationships", rel.RELATIONSHIP_AGENT
                                      if hasattr(rel, "RELATIONSHIP_AGENT")
-                                     else "grove/relationship-oneshot-agent",
+                                     else "sgr/relationship-oneshot-agent",
                                      flat)
 
     # persist: same extractor, stored replies keyed by consumption order

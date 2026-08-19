@@ -57,7 +57,7 @@ class RunCreateIn(BaseModel):
     Unknown fields are REJECTED. In particular a caller still sending the
     old `stages` key must get a 422, not a silent full-pipeline run at
     ~5× the cost of the parts it thought it asked for (bitten in the
-    wild on 7 Aug: grove_sink sent stages=["oneshot"] and paid for
+    wild on 7 Aug: sgr_sink sent stages=["oneshot"] and paid for
     everything). Same fail-loudly rule as RunFilter."""
 
     model_config = {"extra": "forbid"}

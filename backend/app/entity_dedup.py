@@ -18,7 +18,7 @@ Modes:
 
 Run standalone:
     cd backend && ../.venv/bin/python -m app.entity_dedup --report
-    ... --apply-exact --apply-llm --job-dir ~/grove-bulk-jobs/dedup
+    ... --apply-exact --apply-llm --job-dir ~/sgr-bulk-jobs/dedup
 """
 
 from __future__ import annotations
@@ -129,7 +129,7 @@ async def _judge_and_merge(fuzzy) -> int:
 
     if not fuzzy:
         return 0
-    job_dir = Path.home() / "grove-bulk-jobs" / "dedup-api"
+    job_dir = Path.home() / "sgr-bulk-jobs" / "dedup-api"
     job_dir.mkdir(parents=True, exist_ok=True)
     client = BatchClient(job_dir)
     _PAIRS_PER_PROMPT = 40
@@ -230,7 +230,7 @@ async def main() -> None:
     ap.add_argument("--report", action="store_true")
     ap.add_argument("--apply-exact", action="store_true")
     ap.add_argument("--apply-llm", action="store_true")
-    ap.add_argument("--job-dir", default="~/grove-bulk-jobs/entity-dedup")
+    ap.add_argument("--job-dir", default="~/sgr-bulk-jobs/entity-dedup")
     ap.add_argument("--tighten", action="store_true",
                     help="restrict fuzzy pairs to jaccard>=0.8 or full "
                          "name-containment (>=2 tokens), max 3 partners "

@@ -13,8 +13,8 @@ Spec (kept deliberately small):
   - Top-level lists of scalars → property candidate, cardinality "many".
   - Top-level lists of dicts   → entity candidate; the dict shape becomes the
                                  entity's likely properties.
-  - Reserved key `grove:`      → optional override block:
-        grove:
+  - Reserved key `sgr:`      → optional override block:
+        sgr:
           class: my_class_slug
           properties:
             fine_amount: { type: money, cardinality: one }
@@ -27,14 +27,14 @@ from typing import Any
 
 import yaml
 
-RESERVED_KEY = "grove"
+RESERVED_KEY = "sgr"
 # Bookkeeping fields the SPIP exporter (and similar pipelines) emit; never
-# useful as Grove properties. Users can extend this via grove.ignore.
+# useful as SGR properties. Users can extend this via sgr.ignore.
 DEFAULT_IGNORE: frozenset[str] = frozenset(
     {"content_hash", "metadata_hash", "staleness_key"}
 )
 # Top-level keys that, if present as scalar strings, are treated as the
-# document's declared class. `grove.class` always wins if both are present.
+# document's declared class. `sgr.class` always wins if both are present.
 CLASS_KEYS: tuple[str, ...] = (
     "document_class",
     "document_type",
@@ -85,19 +85,19 @@ def infer_candidates(
       - name, plus shape fields (cardinality, schema, sample_value(s) /
         object_shape, sample_canonical_form)
     """
-    grove_block = fm.get(RESERVED_KEY) if isinstance(fm.get(RESERVED_KEY), dict) else {}
-    overrides: dict[str, Any] = grove_block.get("properties") or {}
-    explicit_ignore = set(grove_block.get("ignore") or [])
+    sgr_block = fm.get(RESERVED_KEY) if isinstance(fm.get(RESERVED_KEY), dict) else {}
+    overrides: dict[str, Any] = sgr_block.get("properties") or {}
+    explicit_ignore = set(sgr_block.get("ignore") or [])
     skip = (extra_ignore or set()) | DEFAULT_IGNORE | {RESERVED_KEY} | explicit_ignore
 
     out: list[dict[str, Any]] = []
 
-    # Document-class hint: explicit grove.class wins; otherwise first matching
+    # Document-class hint: explicit sgr.class wins; otherwise first matching
     # well-known key. Whichever key is used is also added to skip so it's not
     # also proposed as a property.
     class_value: str | None = None
-    if isinstance(grove_block.get("class"), str) and grove_block["class"].strip():
-        class_value = grove_block["class"].strip()
+    if isinstance(sgr_block.get("class"), str) and sgr_block["class"].strip():
+        class_value = sgr_block["class"].strip()
     else:
         for k in CLASS_KEYS:
             v = fm.get(k)
@@ -110,7 +110,7 @@ def infer_candidates(
             {
                 "kind": "document_class",
                 "name": class_value,
-                "source_key": "grove.class" if isinstance(grove_block.get("class"), str) else None,
+                "source_key": "sgr.class" if isinstance(sgr_block.get("class"), str) else None,
             }
         )
 

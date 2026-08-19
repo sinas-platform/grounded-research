@@ -23,11 +23,11 @@ async def test_waves_flush_and_second_calls_form_next_wave(monkeypatch):
     monkeypatch.setattr(client, "_submit_and_resolve", fake_submit)
 
     async def doc_one_call(n):
-        return await client.invoke("grove/doc-metadata-agent", f"doc{n}")
+        return await client.invoke("sgr/doc-metadata-agent", f"doc{n}")
 
     async def doc_two_calls(n):
-        first = await client.invoke("grove/doc-metadata-agent", f"doc{n}")
-        second = await client.invoke("grove/doc-metadata-agent", f"doc{n}-props")
+        first = await client.invoke("sgr/doc-metadata-agent", f"doc{n}")
+        second = await client.invoke("sgr/doc-metadata-agent", f"doc{n}-props")
         return first, second
 
     tasks = [
@@ -56,7 +56,7 @@ async def test_wave_failure_isolates_to_its_futures(monkeypatch):
     monkeypatch.setattr(client, "_submit_and_resolve", fake_submit)
 
     async def doc(n):
-        return await client.invoke("grove/doc-metadata-agent", f"doc{n}")
+        return await client.invoke("sgr/doc-metadata-agent", f"doc{n}")
 
     tasks = [asyncio.ensure_future(doc(1))]
     await client.drive(tasks)

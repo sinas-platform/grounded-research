@@ -28,7 +28,7 @@ router = APIRouter(prefix="/answers", tags=["answers"])
 async def _visible_answer_or_404(
     answer_id: uuid.UUID, session: AsyncSession, caller: CallerIdentity
 ) -> Answer:
-    read_all = await caller.has_permission("grove.answers.read:all")
+    read_all = await caller.has_permission("sgr.answers.read:all")
     stmt = (
         select(Answer)
         .where(Answer.id == answer_id)
@@ -47,7 +47,7 @@ async def list_answers(
     limit: int = 50,
     offset: int = 0,
 ):
-    read_all = await caller.has_permission("grove.answers.read:all")
+    read_all = await caller.has_permission("sgr.answers.read:all")
     stmt = (
         select(Answer)
         .where(visible_clause(Answer, caller, read_all=read_all))
@@ -162,7 +162,7 @@ async def get_claim_evidence(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    read_all = await caller.has_permission("grove.answers.read:all")
+    read_all = await caller.has_permission("sgr.answers.read:all")
     claim = (
         await session.execute(
             select(AnswerClaim)

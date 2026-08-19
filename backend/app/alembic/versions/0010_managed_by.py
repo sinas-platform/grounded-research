@@ -1,6 +1,6 @@
 """add managed_by to package-managed config tables
 
-`managed_by` marks a row as installed by a GrovePackage so the importer can
+`managed_by` marks a row as installed by a SgrPackage so the importer can
 prune resources that were removed from the manifest on re-import. NULL means
 the row was created manually (UI / API) and is left alone by the importer.
 

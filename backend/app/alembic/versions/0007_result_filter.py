@@ -1,6 +1,6 @@
 """add persistent filter state to result
 
-The deep-search agent loop mutates a GroveFilter iteratively. Previously the
+The deep-search agent loop mutates a SgrFilter iteratively. Previously the
 filter only lived in the agent's chat context, which made the trace
 agent-discipline-dependent and forced the full filter object on the wire
 every introspect call.

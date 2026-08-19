@@ -13,7 +13,7 @@ the app as a library, writes the DB directly); the API route
     cd backend && ../.venv/bin/python -m app.bulk_pipeline \
       --ids-file /tmp/ids.txt \
       --stages extract,resolve,relationships \
-      --job-dir ~/grove-bulk-jobs/<job-name>
+      --job-dir ~/sgr-bulk-jobs/<job-name>
 
 - `--ids-file`: one document id per line. Build it with SQL, e.g. all
   registered docs of a source that lack entities (see gate query below).
@@ -50,7 +50,7 @@ completeness from data (this query), never from run/unit status.
 
 - Retrieval: `python -m app.retrieval_first --question "…" --effort medium
   --store` prints `stored result <id>`. Optional regression harness needs
-  `GROVE_BENCH_DIR` pointing at a benchmark folder.
+  `SGR_BENCH_DIR` pointing at a benchmark folder.
 - Synthesis: `POST /api/v1/query-runs {question, mode: "synthesis",
   effort, parent_result_id}`. Resume a failed run:
   `POST /api/v1/query-runs/{id}/resume`.
@@ -59,26 +59,26 @@ completeness from data (this query), never from run/unit status.
   `failed` (infrastructure, retryable), `cancelled`.
 
 ### Settings (backend `.env`, read at process start)
-- `GROVE_DRAFT_MODE=extract` — split drafting: plan (strong model) →
+- `SGR_DRAFT_MODE=extract` — split drafting: plan (strong model) →
   verbatim passage extraction (cheap model, quotes string-verified
   against document lines) → one-shot draft (strong model), all stateless;
   thin drafts become honest partials, never silent fallbacks. Unset =
   chat drafting.
-- `GROVE_RUN_COST_CAP_USD` (default 10) — per-run spend ceiling summed
+- `SGR_RUN_COST_CAP_USD` (default 10) — per-run spend ceiling summed
   over the synthesis chat; tripping it produces a `partial`.
-- `GROVE_BENCH_DIR` — regression benchmark folder for retrieval_first.
-- `GROVE_DOMAIN`, `GROVE_AUDIENCE` — the only place a deployment states what
+- `SGR_BENCH_DIR` — regression benchmark folder for retrieval_first.
+- `SGR_DOMAIN`, `SGR_AUDIENCE` — the only place a deployment states what
   kind of corpus and reader it serves (prompt wording only; nothing branches
   on them). Unset = generic framing; a legal deployment sets e.g. `legal` and
-  `a legal researcher`. Grove itself must stay domain-neutral — never
+  `a legal researcher`. SGR itself must stay domain-neutral — never
   hardcode a domain into a prompt. Query languages are deliberately NOT
   configured: the planner reads them off the corpus schema, whose entity and
   property examples are in the corpus's own languages.
 
 ### Required agent registry (Sinas)
-- `grove/retrieval-planner-agent` — tool-less, temp 0, strong model:
+- `sgr/retrieval-planner-agent` — tool-less, temp 0, strong model:
   retrieval planning, argument planning, extract-mode drafting.
-- `grove/passage-extractor-agent` — tool-less, temp 0, cheap model:
+- `sgr/passage-extractor-agent` — tool-less, temp 0, cheap model:
   verbatim passage extraction.
 - The synthesis/validator/gate agents as installed by the package.
 Model/provider assignments are deployment config; agents read them per

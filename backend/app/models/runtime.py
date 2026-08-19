@@ -377,7 +377,7 @@ class Result(Base, TimestampMixin, OwnedMixin):
         UUID(as_uuid=True), ForeignKey("result.id", ondelete="SET NULL")
     )
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    # The current draft filter (GroveFilter shape). Mutated via the
+    # The current draft filter (SgrFilter shape). Mutated via the
     # /retrieval/results/{id}/filter/* endpoints. Frozen on publish.
     filter: Mapped[dict] = mapped_column(
         JSONB, nullable=False, default=dict, server_default="{}"

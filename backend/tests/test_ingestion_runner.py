@@ -112,7 +112,7 @@ async def test_extract_error_skips_downstream_passes(monkeypatch):
 def test_legacy_stages_key_is_rejected_not_silently_ignored():
     """A caller still sending the retired `stages` key must get a
     validation error, not a silent full-pipeline run (the 5x-cost trap
-    grove_sink hit on 7 Aug)."""
+    sgr_sink hit on 7 Aug)."""
     import pydantic
     import pytest as _pytest
 

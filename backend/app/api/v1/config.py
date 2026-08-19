@@ -1,7 +1,7 @@
 """Configuration introspection and CRUD.
 
-Read endpoints (`get_*`) are how Grove agents discover the domain model at runtime.
-Admin endpoints require `grove.admin:all`.
+Read endpoints (`get_*`) are how SGR agents discover the domain model at runtime.
+Admin endpoints require `sgr.admin:all`.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ async def list_document_classes(session: AsyncSession = Depends(get_session)):
     "/document-classes",
     response_model=DocumentClassOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_document_class(
     payload: DocumentClassCreate, session: AsyncSession = Depends(get_session)
@@ -84,7 +84,7 @@ async def get_document_class(class_id: uuid.UUID, session: AsyncSession = Depend
 @router.put(
     "/document-classes/{class_id}",
     response_model=DocumentClassOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def update_document_class(
     class_id: uuid.UUID,
@@ -105,7 +105,7 @@ async def update_document_class(
 @router.delete(
     "/document-classes/{class_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_document_class(class_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     row = await session.get(DocumentClass, class_id)
@@ -135,7 +135,7 @@ async def list_class_properties(
     "/document-classes/{class_id}/properties",
     response_model=DocumentClassPropertyOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_class_property(
     class_id: uuid.UUID,
@@ -154,7 +154,7 @@ async def create_class_property(
 @router.put(
     "/document-classes/properties/{property_id}",
     response_model=DocumentClassPropertyOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def update_class_property(
     property_id: uuid.UUID,
@@ -174,7 +174,7 @@ async def update_class_property(
 @router.delete(
     "/document-classes/properties/{property_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_class_property(
     property_id: uuid.UUID, session: AsyncSession = Depends(get_session)
@@ -204,7 +204,7 @@ async def list_class_entity_types(
 @router.post(
     "/document-classes/{class_id}/entity-types/{entity_type_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def attach_entity_type(
     class_id: uuid.UUID,
@@ -227,7 +227,7 @@ async def list_entity_types(session: AsyncSession = Depends(get_session)):
     "/entity-types",
     response_model=EntityTypeOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_entity_type(
     payload: EntityTypeIn, session: AsyncSession = Depends(get_session)
@@ -242,7 +242,7 @@ async def create_entity_type(
 @router.put(
     "/entity-types/{entity_type_id}",
     response_model=EntityTypeOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def update_entity_type(
     entity_type_id: uuid.UUID,
@@ -262,7 +262,7 @@ async def update_entity_type(
 @router.delete(
     "/entity-types/{entity_type_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_entity_type(
     entity_type_id: uuid.UUID, session: AsyncSession = Depends(get_session)
@@ -284,7 +284,7 @@ async def list_relationship_definitions(session: AsyncSession = Depends(get_sess
     "/relationship-definitions",
     response_model=RelationshipDefinitionOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_relationship_definition(
     payload: RelationshipDefinitionIn, session: AsyncSession = Depends(get_session)
@@ -299,7 +299,7 @@ async def create_relationship_definition(
 @router.put(
     "/relationship-definitions/{def_id}",
     response_model=RelationshipDefinitionOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def update_relationship_definition(
     def_id: uuid.UUID,
@@ -319,7 +319,7 @@ async def update_relationship_definition(
 @router.delete(
     "/relationship-definitions/{def_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_relationship_definition(
     def_id: uuid.UUID, session: AsyncSession = Depends(get_session)
@@ -350,7 +350,7 @@ async def list_relationship_states(
     "/relationship-definitions/{def_id}/states",
     response_model=RelationshipStateOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_relationship_state(
     def_id: uuid.UUID,
@@ -369,7 +369,7 @@ async def create_relationship_state(
 @router.put(
     "/relationship-states/{state_id}",
     response_model=RelationshipStateOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def update_relationship_state(
     state_id: uuid.UUID,
@@ -389,7 +389,7 @@ async def update_relationship_state(
 @router.delete(
     "/relationship-states/{state_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_relationship_state(
     state_id: uuid.UUID, session: AsyncSession = Depends(get_session)
@@ -411,7 +411,7 @@ async def list_dossier_classes(session: AsyncSession = Depends(get_session)):
     "/dossier-classes",
     response_model=DossierClassOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_dossier_class(
     payload: DossierClassCreate, session: AsyncSession = Depends(get_session)
@@ -429,7 +429,7 @@ async def create_dossier_class(
 @router.put(
     "/dossier-classes/{class_id}",
     response_model=DossierClassOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def update_dossier_class(
     class_id: uuid.UUID,
@@ -450,7 +450,7 @@ async def update_dossier_class(
 @router.delete(
     "/dossier-classes/{class_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_dossier_class(class_id: uuid.UUID, session: AsyncSession = Depends(get_session)):
     row = await session.get(DossierClass, class_id)
@@ -479,7 +479,7 @@ async def list_dossier_class_properties(
     "/dossier-classes/{class_id}/properties",
     response_model=DossierClassPropertyOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_dossier_class_property(
     class_id: uuid.UUID,

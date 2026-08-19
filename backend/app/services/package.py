@@ -1,6 +1,6 @@
-"""GrovePackage import / export service.
+"""SgrPackage import / export service.
 
-Idempotent apply of a GrovePackage YAML against the Grove DB. Rows installed
+Idempotent apply of a SgrPackage YAML against the SGR DB. Rows installed
 by a package are tagged `managed_by = pkg:<name>` so a re-import can prune
 resources that were removed from the manifest.
 
@@ -13,7 +13,7 @@ Order of operations on apply (single transaction):
      → playbooks (+ scope rows).
   4. If prune=True, delete managed_by-tagged rows not in the manifest.
 
-Playbook content is Grove-owned (see migration 0014). No Sinas writes.
+Playbook content is SGR-owned (see migration 0014). No Sinas writes.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from app.services.annotations import (
     parse_path,
 )
 from app.schemas.package import (
-    GrovePackage,
+    SgrPackage,
     PackageDiff,
     PackageImportResult,
     PackagePlaybookEntry,
@@ -58,8 +58,8 @@ from app.schemas.package import (
 # ─────────────────────────────────────────────────────────────
 # Parsing
 # ─────────────────────────────────────────────────────────────
-def parse_package(yaml_text: str) -> tuple[GrovePackage | None, list[str]]:
-    """Parse YAML into a GrovePackage; return (package, errors)."""
+def parse_package(yaml_text: str) -> tuple[SgrPackage | None, list[str]]:
+    """Parse YAML into a SgrPackage; return (package, errors)."""
     try:
         raw = yaml.safe_load(yaml_text)
     except yaml.YAMLError as exc:
@@ -67,19 +67,19 @@ def parse_package(yaml_text: str) -> tuple[GrovePackage | None, list[str]]:
     if not isinstance(raw, dict):
         return None, ["YAML root must be a mapping"]
     try:
-        return GrovePackage.model_validate(raw), []
+        return SgrPackage.model_validate(raw), []
     except ValidationError as exc:
         return None, [str(e) for e in exc.errors()]
 
 
-def _tag(pkg: GrovePackage) -> str:
+def _tag(pkg: SgrPackage) -> str:
     return f"pkg:{pkg.package.name}"
 
 
 # ─────────────────────────────────────────────────────────────
 # Cross-reference validation
 # ─────────────────────────────────────────────────────────────
-def validate_crossrefs(pkg: GrovePackage) -> tuple[list[str], list[str]]:
+def validate_crossrefs(pkg: SgrPackage) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
 
@@ -128,7 +128,7 @@ def validate_crossrefs(pkg: GrovePackage) -> tuple[list[str], list[str]]:
         for missing in sorted(path.names - rdef_names):
             warnings.append(
                 f"annotation '{ann.name}' references relationship '{missing}' not defined "
-                "in this package; it must already exist in the target Grove at import"
+                "in this package; it must already exist in the target SGR at import"
             )
 
     for pb in pkg.spec.playbooks:
@@ -159,7 +159,7 @@ def validate(yaml_text: str) -> PackageValidateResult:
 # ─────────────────────────────────────────────────────────────
 @dataclass
 class _ApplyCtx:
-    pkg: GrovePackage
+    pkg: SgrPackage
     tag: str
     session: AsyncSession
     prune: bool
@@ -985,8 +985,8 @@ async def export_package(
         ]
 
     doc = {
-        "apiVersion": "grove.sinas.co/v1",
-        "kind": "GrovePackage",
+        "apiVersion": "sgr.sinas.co/v1",
+        "kind": "SgrPackage",
         "metadata": {"name": name},
         "package": {"name": name, "version": version},
         "spec": spec,

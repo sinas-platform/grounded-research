@@ -4,12 +4,12 @@
 
 ## Context
 
-By default, a file dropped in the `grove/documents` Sinas collection triggers `grove/post_upload`, which registers the document and immediately invokes `ingestion-coordinator`. The coordinator fans out to classifier, summarizer, extractors, and dossier-assigner — six LLM calls per document.
+By default, a file dropped in the `sgr/documents` Sinas collection triggers `sgr/post_upload`, which registers the document and immediately invokes `ingestion-coordinator`. The coordinator fans out to classifier, summarizer, extractors, and dossier-assigner — six LLM calls per document.
 
 This is wrong for two real workflows:
 
 1. **Greenfield schema design.** Upload N docs to design the schema against, run the suggest pipeline, approve classes, *then* extract. Auto-firing the pipeline burns LLM budget classifying against zero classes and extracting properties that don't exist yet.
-2. **Adding documents from a class not yet configured.** If 300 new docs arrive of a kind Grove hasn't been told about, the classifier-agent can't classify them, but the extractors still run and produce noise.
+2. **Adding documents from a class not yet configured.** If 300 new docs arrive of a kind SGR hasn't been told about, the classifier-agent can't classify them, but the extractors still run and produce noise.
 
 The discovery and front-matter scans (see [2026-05-12 suggest pipeline architecture](2026-05-12-suggest-pipeline-architecture.md)) genuinely *need* unprocessed documents — they scan the body to design the schema.
 
@@ -19,7 +19,7 @@ Add a `staged: bool` flag (`Document.staged`, default `false`) that means "skipp
 
 1. UI / API caller passes `staged=true` to `POST /api/v1/uploads` (form field).
 2. `uploads.py` merges `staged: true` into the metadata sent to Sinas.
-3. The `grove/post_upload` Sinas function reads `metadata.staged`. If true, it registers the document with `staged=true` and **does not invoke `ingestion-coordinator`**. Otherwise behavior is unchanged.
+3. The `sgr/post_upload` Sinas function reads `metadata.staged`. If true, it registers the document with `staged=true` and **does not invoke `ingestion-coordinator`**. Otherwise behavior is unchanged.
 
 **Visibility carve-out:** retrieval (`api/v1/retrieval.py:_apply_filter`) excludes staged docs unconditionally — they're not indexed yet, so they shouldn't appear in search results. The admin Documents listing shows them with a "Staged" badge and a toggle for staged-only view.
 
@@ -34,7 +34,7 @@ Add a `staged: bool` flag (`Document.staged`, default `false`) that means "skipp
 
 ## Alternatives considered
 
-**Separate Sinas collection.** A `grove-staging` collection without the `post_upload` function configured. Architecturally pure — Sinas collections are the natural boundary. Rejected because (a) it requires a new collection definition in the package, (b) promotion would need re-upload or a "move" operation with file rewiring, and (c) admins would have to know which collection to use for what.
+**Separate Sinas collection.** A `sgr-staging` collection without the `post_upload` function configured. Architecturally pure — Sinas collections are the natural boundary. Rejected because (a) it requires a new collection definition in the package, (b) promotion would need re-upload or a "move" operation with file rewiring, and (c) admins would have to know which collection to use for what.
 
 **Always skip the auto-pipeline; trigger explicitly.** Cleanest mental model, no special state. Rejected because the happy path (config exists, user just wants their doc indexed) becomes an extra click every time. The default has to serve the common case.
 

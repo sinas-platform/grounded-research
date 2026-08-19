@@ -1,17 +1,17 @@
-"""move playbook content into Grove (drop Sinas dual-write)
+"""move playbook content into SGR (drop Sinas dual-write)
 
 A playbook was previously:
-  - content stored as a Sinas skill in `grove_retrieval_playbooks` /
-    `grove_synthesis_playbooks`
-  - scope (which doc/dossier classes it applies to) stored in Grove
+  - content stored as a Sinas skill in `sgr_retrieval_playbooks` /
+    `sgr_synthesis_playbooks`
+  - scope (which doc/dossier classes it applies to) stored in SGR
 
-That split made multi-Grove on one Sinas impossible (namespace collision),
+That split made multi-SGR on one Sinas impossible (namespace collision),
 required a Sinas token for every playbook write, and forced the package
 importer to do a brittle dual-write. Sinas wasn't actually injecting the
-content into agents either — agents are wired to fetch via the Grove
+content into agents either — agents are wired to fetch via the SGR
 connector.
 
-This migration moves content into a new Grove `playbook` table and rewrites
+This migration moves content into a new SGR `playbook` table and rewrites
 `playbook_scope` to reference it by id.
 
 The project is unused — destructive migration is safe.

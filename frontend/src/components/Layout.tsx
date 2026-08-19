@@ -19,7 +19,7 @@ export function Layout() {
       <aside className="w-60 border-r border-stone-200 bg-white flex flex-col">
         <div className="px-5 pt-6 pb-8">
           <div className="text-base font-semibold tracking-tight text-forest-700">
-            Sinas Grove
+            Sinas Grounded Research
           </div>
           <div className="text-[11px] text-stone-400 uppercase tracking-wider mt-0.5">
             alpha

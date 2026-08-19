@@ -21,7 +21,7 @@ import uuid
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -80,9 +80,19 @@ async def create_job(payload: BulkJobIn,
 @router.post("/upload", response_model=BulkJobOut,
              status_code=status.HTTP_202_ACCEPTED)
 async def upload_zip(file: UploadFile,
+                     staged: bool = Query(
+                         default=False,
+                         description="Hold the documents back from the live "
+                                     "corpus (schema still being designed). "
+                                     "Nothing unstages them automatically."),
                      session: AsyncSession = Depends(get_session),
                      caller: CallerIdentity = Depends(get_caller)):
-    """Zip of .md files in -> registered, staged, pipeline spawned."""
+    """Zip of .md files in -> registered, pipeline spawned.
+
+    Documents land live by default. Staging is a deliberate choice — it hides
+    them from the default listing until someone unstages them, and a bulk load
+    that stages by mistake leaves a corpus that looks empty.
+    """
     raw = await file.read()
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -111,7 +121,7 @@ async def upload_zip(file: UploadFile,
         else:
             doc = Document(filename=base, collection_file_id=cfid,
                            owner_id=caller.user_id,
-                           roles=caller.roles or [], staged=True)
+                           roles=caller.roles or [], staged=staged)
             session.add(doc)
             await session.flush()
             version = 1

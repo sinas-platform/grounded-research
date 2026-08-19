@@ -59,8 +59,8 @@ class Settings(BaseSettings):
     grove_bench_dir: str = Field(default="", validation_alias="GROVE_BENCH_DIR")
 
     # ── what this deployment holds (prompt framing only) ──
-    # Grove is domain-neutral; these three are the only place a deployment
-    # tells the models what kind of corpus and reader they are serving. No
+    # Grove is domain-neutral; these are the only place a deployment tells
+    # the models what kind of corpus and reader they are serving. No
     # behaviour branches on them — they change wording, not logic.
     #
     # Adjective for the corpus domain, e.g. "legal", "clinical", "regulatory".
@@ -69,12 +69,6 @@ class Settings(BaseSettings):
     # Who a client-facing note is written for, e.g. "a legal researcher".
     grove_audience: str = Field(
         default="a researcher", validation_alias="GROVE_AUDIENCE"
-    )
-    # Languages the corpus is written in, as a hint for query generation —
-    # e.g. "EN, FR; NL/DE/ES when relevant". Empty lets the planner infer them
-    # from the question and the schema.
-    grove_query_languages: str = Field(
-        default="", validation_alias="GROVE_QUERY_LANGUAGES"
     )
 
     @property

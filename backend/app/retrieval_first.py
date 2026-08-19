@@ -42,14 +42,6 @@ def _domain_prefix() -> str:
     return f"{d} " if d else ""
 
 
-def _language_hint() -> str:
-    langs = get_settings().grove_query_languages.strip()
-    return (
-        f"; per concept per language ({langs})" if langs
-        else "; one per concept, in each language the corpus uses"
-    )
-
-
 _ROUND1_PROMPT = """You are planning document retrieval for a {domain}research
 question against a corpus with this schema:
 
@@ -59,7 +51,7 @@ Propose retrieval probes grounded in the schema. Reply ONLY JSON:
 {{"named_entities": ["<entities NAMED in the question>"],
   "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'food deliv'>"}}],
   "seed_cases": ["<specific cases/decisions/parties you KNOW bear on this topic even if unnamed>"],
-  "websearch_queries": ["<3-10 SHORT queries: one quoted phrase or 2-4 words each; several small queries beat one long one{lang_hint}>"]}}
+  "websearch_queries": ["<3-10 SHORT queries: one quoted phrase or 2-4 words each; several small queries beat one long one; one per concept, in each language the corpus uses>"]}}
 
 QUESTION: {question}"""
 
@@ -193,8 +185,7 @@ async def plan_question(question: str, effort: str = "medium") -> dict:
     sinas = _Sinas()
     corpus_map = await build_corpus_map()
     r1 = _parse(await sinas.invoke(PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question,
-        domain=_domain_prefix(), lang_hint=_language_hint())))
+        corpus_map=corpus_map, question=question, domain=_domain_prefix())))
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))

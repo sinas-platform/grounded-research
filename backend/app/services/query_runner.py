@@ -1312,7 +1312,9 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
             "grove/answer-gate-agent",
             "Reply with ONLY the note text itself — no preamble, no commentary "
             "about the task, no restatement of these instructions. "
-            "Write a note (max 200 words) to a legal researcher, in the SAME "
+            "Write a note (max 200 words) to "
+            + get_settings().grove_audience
+            + ", in the SAME "
             "LANGUAGE as the question below. Structure: (1) state plainly which "
             "part of the question could NOT be established and why (reason "
             "below, rephrased plainly — no internal jargon, no dollar amounts; if "

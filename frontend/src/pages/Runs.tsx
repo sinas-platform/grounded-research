@@ -231,6 +231,20 @@ function buildStages(
   // the retired agent-driven path carry "decompose" and keep the old diagram.
   const retrievalFirst = run.mode !== 'synthesis' && !tel.decompose;
 
+  // A synthesis run answers from a result some earlier run retrieved. That
+  // retrieval is still readable through the result, so show it here rather
+  // than making someone hunt for the upstream run in the list.
+  if (run.mode === 'synthesis' && plan?.queries?.length) {
+    rows.push([{
+      id: 'retrieve', title: 'Retrieved earlier', sub: 'the searches behind this document set',
+      state: 'done',
+      items: plan.queries,
+      count: `${plan.queries.length} searches`,
+      wide: true,
+    }]);
+    edges.push(['query', 'retrieve']);
+  }
+
   if (retrievalFirst) {
     const rDone = !!tel.retrieval?.completed || !!run.parent_result_id;
     const queries = plan?.queries ?? [];
@@ -283,7 +297,10 @@ function buildStages(
     count: docCount != null && run.parent_result_id ? `${docCount} documents${run.mode === 'retrieval' && published ? ' · published' : ''}` : undefined,
     wide: true,
   }]);
-  edges.push([run.mode === 'synthesis' ? 'query' : retrievalFirst ? 'retrieve' : 'merge', 'result']);
+  const beforeResult = run.mode === 'synthesis'
+    ? (plan?.queries?.length ? 'retrieve' : 'query')
+    : retrievalFirst ? 'retrieve' : 'merge';
+  edges.push([beforeResult, 'result']);
 
   if (withSynthesis) {
     // the synthesis stage writes telemetry under "draft"
@@ -809,12 +826,14 @@ function Inspector({
   } else if (inspected === 'retrieve') {
     title = 'Retrieval';
     const anchors = Object.values(plan?.anchor_names ?? {});
+    const upstream = run.mode === 'synthesis';
     body = (
       <>
         <Label>What ran</Label>
         <div className="text-stone-700">
           The question is turned into a set of targeted searches over the corpus, which
           are then run and ranked into one document set — no search agents involved.
+          {upstream && ' This run answers from a document set an earlier run retrieved; the plan below is that run’s.'}
         </div>
         <Label>Searches run ({plan?.queries?.length ?? tel.retrieval?.queries ?? 0})</Label>
         {(plan?.queries ?? []).map((q, i) => (
@@ -947,12 +966,11 @@ function Inspector({
       <>
         <Label>Approach</Label>
         <div className="text-stone-700 text-xs">
-          Drafting runs without an agent, in three steps: plan what the answer has to
-          establish, pull verbatim passages for each point out of the documents that
-          should carry it, then write the answer from those passages alone. Every quote
-          is checked against the source text first, so a passage that was not actually
-          printed in the document never reaches the drafter — which is why there are no
-          agent actions to list here.
+          Three steps, no agent: plan what the answer has to establish, pull verbatim
+          passages for each point out of the documents that should carry it, then write
+          the answer from those passages alone. Every quote is checked against the
+          source text first, so a passage that was not printed in the document never
+          reaches the drafter.
         </div>
         {ex && (
           <>
@@ -1057,7 +1075,7 @@ function Inspector({
         {[
           ['Question', ''],
           ...(run.mode === 'synthesis'
-            ? []
+            ? (plan?.queries?.length ? [['Retrieved earlier', `${plan.queries.length} searches`]] : [])
             : !tel.decompose
               ? [['Retrieve', plan?.queries?.length ? `${plan.queries.length} searches` : tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
               : [

@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 
-type Tab = 'proposals' | 'unresolved';
+type Tab = 'proposals' | 'relationships' | 'unresolved';
 
 interface EntityType {
   id: string;
@@ -41,16 +41,28 @@ interface Entity {
   entity_type_id?: string;
 }
 
+interface RelationshipProposal {
+  id: string;
+  definition_name: string | null;
+  source_name: string | null;
+  target_name: string | null;
+  proposing_agent: string | null;
+  reasoning: string | null;
+  confidence: number | null;
+  status: string;
+  created_at: string;
+}
+
 export default function EntityReviewPage() {
   const [tab, setTab] = useState<Tab>('proposals');
   return (
     <div>
       <PageHeader
         title="Entity review"
-        description="Proposed entities awaiting approval, and mentions that didn't match a known entity in a locked type."
+        description="The graph most answers are retrieved through: proposed entities and relationships awaiting approval, and mentions that didn't match a known entity in a locked type."
       />
       <nav className="flex gap-1 border-b border-stone-200 mb-6">
-        {(['proposals', 'unresolved'] as Tab[]).map((t) => (
+        {(['proposals', 'relationships', 'unresolved'] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -60,11 +72,15 @@ export default function EntityReviewPage() {
                 : 'border-transparent text-stone-600 hover:text-stone-900'
             }`}
           >
-            {t === 'proposals' ? 'Proposals (Review mode)' : 'Unresolved mentions (Locked mode)'}
+            {t === 'proposals'
+              ? 'Entities (Review mode)'
+              : t === 'relationships'
+                ? 'Relationships'
+                : 'Unresolved mentions (Locked mode)'}
           </button>
         ))}
       </nav>
-      {tab === 'proposals' ? <ProposalsTab /> : <UnresolvedTab />}
+      {tab === 'proposals' ? <ProposalsTab /> : tab === 'relationships' ? <RelationshipsTab /> : <UnresolvedTab />}
     </div>
   );
 }
@@ -122,6 +138,78 @@ function ProposalsTab() {
               )}
             </div>
             <div className="flex gap-2">
+              <button
+                onClick={() => decide.mutate({ id: p.id, approve: true })}
+                className="px-3 py-1 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"
+              >
+                Approve
+              </button>
+              <button
+                onClick={() => decide.mutate({ id: p.id, approve: false })}
+                className="px-3 py-1 rounded border border-stone-300 text-sm hover:bg-stone-100"
+              >
+                Reject
+              </button>
+            </div>
+          </div>
+          {p.proposing_agent && (
+            <div className="text-xs text-stone-500">by {p.proposing_agent}</div>
+          )}
+          {p.reasoning && <div className="text-xs text-stone-600 mt-1">{p.reasoning}</div>}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RelationshipsTab() {
+  const qc = useQueryClient();
+  const list = useQuery({
+    queryKey: ['relationship-proposals', 'pending'],
+    queryFn: () =>
+      api<RelationshipProposal[]>('/relationships/proposals?status_filter=pending&limit=200'),
+  });
+
+  const decide = useMutation({
+    mutationFn: ({ id, approve }: { id: string; approve: boolean }) =>
+      api(`/relationships/proposals/${id}/decision`, {
+        method: 'POST',
+        body: JSON.stringify({ approve }),
+      }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['relationship-proposals'] }),
+  });
+
+  if (list.isLoading) return <div className="text-stone-500 text-sm">Loading…</div>;
+  const rows = list.data ?? [];
+  if (rows.length === 0) {
+    return (
+      <div className="text-stone-500 text-sm py-12 text-center border border-dashed border-stone-300 rounded">
+        No pending relationship proposals.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-3">
+      <div className="text-xs text-stone-500">
+        Showing {rows.length} pending. Approving writes the edge into the graph that
+        retrieval traverses.
+      </div>
+      {rows.map((p) => (
+        <div key={p.id} className="border border-stone-200 rounded p-3 bg-white">
+          <div className="flex items-center justify-between gap-3 mb-1">
+            <div className="min-w-0">
+              <span className="font-medium">{p.source_name ?? '(unknown source)'}</span>
+              <span className="mx-2 text-xs text-stone-500">
+                {p.definition_name ?? 'related to'}
+              </span>
+              <span className="font-medium">{p.target_name ?? '(unknown target)'}</span>
+              {p.confidence !== null && (
+                <span className="ml-2 text-xs text-stone-500">
+                  ({Math.round(p.confidence * 100)}%)
+                </span>
+              )}
+            </div>
+            <div className="flex gap-2 shrink-0">
               <button
                 onClick={() => decide.mutate({ id: p.id, approve: true })}
                 className="px-3 py-1 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"

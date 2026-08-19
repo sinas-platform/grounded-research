@@ -5,14 +5,21 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
-from app.models import Relationship, RelationshipProposal, UnresolvedRelationship
+from app.models import (
+    Entity,
+    Relationship,
+    RelationshipDefinition,
+    RelationshipProposal,
+    UnresolvedRelationship,
+)
 from app.schemas.runtime import (
     RelationshipOut,
     RelationshipProposalOut,
@@ -42,19 +49,59 @@ async def list_relationships(
     return (await session.execute(stmt)).scalars().all()
 
 
-@router.get("/proposals", response_model=list[RelationshipProposalOut])
+class RelationshipProposalRow(RelationshipProposalOut):
+    """A proposal plus the names behind its ids. A reviewer decides on
+    "Commission → investigated → Servier", not on three UUIDs, and joining
+    here beats three lookups per row from the client."""
+
+    definition_name: str | None = None
+    source_name: str | None = None
+    target_name: str | None = None
+
+
+@router.get("/proposals", response_model=list[RelationshipProposalRow])
 async def list_proposals(
     status_filter: str = "pending",
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ):
+    src = aliased(Entity)
+    tgt = aliased(Entity)
     rows = (
         await session.execute(
-            select(RelationshipProposal)
+            select(
+                RelationshipProposal,
+                RelationshipDefinition.name,
+                src.canonical_form,
+                tgt.canonical_form,
+            )
+            .outerjoin(
+                RelationshipDefinition,
+                RelationshipDefinition.id
+                == RelationshipProposal.relationship_definition_id,
+            )
+            .outerjoin(src, src.id == RelationshipProposal.source_id)
+            .outerjoin(tgt, tgt.id == RelationshipProposal.target_id)
             .where(RelationshipProposal.status == status_filter)
             .order_by(RelationshipProposal.created_at.desc())
+            .limit(limit)
+            .offset(offset)
         )
-    ).scalars().all()
-    return rows
+    ).all()
+    return [
+        RelationshipProposalRow.model_validate(
+            {
+                **RelationshipProposalOut.model_validate(
+                    p, from_attributes=True
+                ).model_dump(),
+                "definition_name": dname,
+                "source_name": sname,
+                "target_name": tname,
+            }
+        )
+        for p, dname, sname, tname in rows
+    ]
 
 
 @router.get("/unresolved", response_model=list[UnresolvedRelationshipOut])

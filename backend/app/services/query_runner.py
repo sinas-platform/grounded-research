@@ -1087,6 +1087,16 @@ async def _stage_validate_publish(
         answer_id, chat_id = run.answer_id, run.synthesis_chat_id
         caller = _runner_caller(run)
 
+    # Remediation is a conversation with the drafting chat: it is handed the
+    # failed rows and reworks them. Chatless drafting has no such chat, so
+    # there is nobody to hand them to — every remediation message would go
+    # nowhere and every wait would run its full window before re-judging
+    # claims that could not have changed. Judge once, then drop what cannot
+    # be supported, which is where the loop ends up regardless.
+    can_remediate = bool(chat_id)
+    # A redraft cycle without a drafter is the same dead end.
+    gate_cycles = gate_cycles if can_remediate else 0
+
     async def _await_chat_quiescence() -> None:
         """Never judge while the drafter is mid-write: require the synthesis
         chat to be continuously idle for IDLE_DEAD_S before proceeding (run 10
@@ -1160,6 +1170,8 @@ async def _stage_validate_publish(
             f"- claim seq {f['claim_sequence']} (claim_id {f['claim_id']}, evidence {f['evidence_id']}): {f['reason']}"
             for f in verdict["failed"]
         ) or "(transport errors only — rebind those spans)"
+        if not can_remediate:
+            break  # nothing can rework these rows; drop them below
         sinas.send_detached(
             chat_id,
             "Validation results. Apply the TWO-STRIKES rule to these failed rows "

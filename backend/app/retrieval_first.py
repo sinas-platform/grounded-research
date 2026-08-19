@@ -1,6 +1,6 @@
 """Retrieval-first query execution — v2 (16 Aug, schema-aware planner).
 
-Kjeld's spec: the planner is grounded in the corpus schema (entity types,
+The planner is grounded in the corpus schema (entity types,
 document classes, properties — with counts and frequency-ranked examples),
 uses TWO rounds (propose probes/value-queries -> see real matched values
 with counts -> finalize), and emits websearch-syntax text queries plus

@@ -51,7 +51,7 @@ async def list_relationships(
 
 class RelationshipProposalRow(RelationshipProposalOut):
     """A proposal plus the names behind its ids. A reviewer decides on
-    "Commission → investigated → Servier", not on three UUIDs, and joining
+    "<source> → <definition> → <target>", not on three UUIDs, and joining
     here beats three lookups per row from the client."""
 
     definition_name: str | None = None

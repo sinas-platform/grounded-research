@@ -17,6 +17,8 @@ interface QueryRun {
   error: string | null;
   telemetry: Record<string, any>;
   created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
 }
 
 interface AgentAction {
@@ -84,13 +86,14 @@ interface StageNode {
   wide: boolean;
 }
 
-const TERMINAL = new Set(['published', 'failed']);
+const TERMINAL = new Set(['published', 'failed', 'partial', 'cancelled']);
 const isLive = (r?: QueryRun | null) => !!r && !TERMINAL.has(r.status);
 
 function stageOf(tel: Record<string, any>, key: string): StageState {
   const t = tel?.[key];
-  if (!t?.started) return 'pending';
-  return t.completed ? 'done' : 'active';
+  // `completed` alone is enough: some stages record only their outcome.
+  if (t?.completed) return 'done';
+  return t?.started ? 'active' : 'pending';
 }
 
 /* ------------------------------- replay masking -------------------------------
@@ -187,6 +190,7 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
   const tel = run.telemetry ?? {};
   const failed = run.status === 'failed';
   const published = run.status === 'published';
+  const partial = run.status === 'partial';
   const withSynthesis = run.mode !== 'retrieval';
 
   const subqueries: string[] =
@@ -205,7 +209,22 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
 
   rows.push([{ id: 'query', title: 'Question', sub: new Date(run.created_at).toLocaleString(), state: 'done', wide: true }]);
 
-  if (run.mode !== 'synthesis') {
+  // Retrieval-first runs write a single "retrieval" telemetry entry; runs from
+  // the retired agent-driven path carry "decompose" and keep the old diagram.
+  const retrievalFirst = run.mode !== 'synthesis' && !tel.decompose;
+
+  if (retrievalFirst) {
+    const rDone = !!tel.retrieval?.completed || !!run.parent_result_id;
+    rows.push([{
+      id: 'retrieve', title: 'Retrieve', sub: 'plan the searches, then gather the documents',
+      state: rDone ? 'done' : failed ? 'error' : run.status === 'pending' ? 'pending' : 'active',
+      count: tel.retrieval?.documents != null
+        ? `${tel.retrieval.documents} documents · ${tel.retrieval.queries ?? 0} queries`
+        : undefined,
+      wide: true,
+    }]);
+    edges.push(['query', 'retrieve']);
+  } else if (run.mode !== 'synthesis') {
     rows.push([{
       id: 'plan', title: 'Plan', sub: 'split into focused searches', state: planState,
       count: subqueries.length ? `${subqueries.length} sub-search${subqueries.length > 1 ? 'es' : ''}` : undefined,
@@ -244,7 +263,7 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
     count: docCount != null && run.parent_result_id ? `${docCount} documents${run.mode === 'retrieval' && published ? ' · published' : ''}` : undefined,
     wide: true,
   }]);
-  edges.push([run.mode === 'synthesis' ? 'query' : 'merge', 'result']);
+  edges.push([run.mode === 'synthesis' ? 'query' : retrievalFirst ? 'retrieve' : 'merge', 'result']);
 
   if (withSynthesis) {
     // the synthesis stage writes telemetry under "draft"
@@ -252,13 +271,22 @@ function buildStages(run: QueryRun, activity?: RunActivity, docCount?: number): 
     const vDone = !!tel.validate?.published;
     rows.push([{
       id: 'synth', title: 'Synthesis', sub: 'draft the answer, cite every claim',
-      state: failed && sState === 'active' ? 'error' : sState,
+      state: failed && sState === 'active' ? 'error' : partial && sState !== 'done' ? 'done' : sState,
       count: tel.draft?.claims != null ? `${tel.draft.claims} claims drafted` : undefined,
       wide: true,
     }]);
     rows.push([{
-      id: 'answer', title: 'Answer', sub: 'every claim checked against sources',
-      state: published && run.answer_id ? 'done' : vDone ? 'done' : tel.validate ? 'active' : run.answer_id ? 'active' : 'pending',
+      id: 'answer',
+      title: partial ? 'Partial outcome' : 'Answer',
+      sub: partial ? 'no full answer — sources and any verified claims kept' : 'every claim checked against sources',
+      state: partial ? 'done'
+        : published && run.answer_id ? 'done'
+          : vDone ? 'done'
+            : tel.validate ? 'active'
+              : run.answer_id ? 'active' : 'pending',
+      count: partial && tel.partial?.validated_claims != null
+        ? `${tel.partial.validated_claims} verified claims`
+        : undefined,
       wide: true,
     }]);
     edges.push(['result', 'synth'], ['synth', 'answer']);
@@ -553,8 +581,39 @@ function StatusPill({ status }: { status: string }) {
       ? 'bg-forest-100 text-forest-700'
       : status === 'failed'
         ? 'bg-red-50 text-red-700 border border-red-200'
-        : 'bg-amber-50 text-amber-700 border border-amber-200';
+        : status === 'partial'
+          ? 'bg-orange-50 text-orange-700 border border-orange-200'
+          : status === 'cancelled'
+            ? 'bg-stone-100 text-stone-500 border border-stone-200'
+            : 'bg-amber-50 text-amber-700 border border-amber-200';
   return <span className={`text-[10px] px-1.5 rounded ${cls}`}>{status}</span>;
+}
+
+/** The client-facing note a partial run ends with, plus why it stopped. */
+function PartialNote({ tel }: { tel: Record<string, any> }) {
+  const p = tel?.partial;
+  if (!p) return null;
+  const cause: Record<string, string> = {
+    budget_ceiling: 'the run reached its spend ceiling',
+    coverage: 'the sources found did not cover the question',
+    no_progress: 'drafting produced too little to stand behind',
+  };
+  return (
+    <div className="mb-3 rounded border border-orange-200 bg-orange-50 p-2.5">
+      <div className="text-[10.5px] font-semibold text-orange-700 uppercase tracking-wider mb-1">
+        Partial outcome — {cause[p.cause] ?? p.cause}
+      </div>
+      {p.message && <div className="text-[13px] leading-relaxed text-stone-800 whitespace-pre-wrap">{p.message}</div>}
+      {!!p.sources?.length && (
+        <div className="mt-2 text-xs text-stone-600">
+          <div className="font-semibold mb-0.5">Sources identified</div>
+          {(p.sources as string[]).map((s) => (
+            <div key={s} className="truncate font-mono text-[11px] text-stone-500">{s}</div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 function stateDot(state: StageState) {
@@ -660,10 +719,8 @@ function Inspector({
     tel._replay_elapsed_s != null
       ? `${Math.floor(tel._replay_elapsed_s / 60)}:${String(tel._replay_elapsed_s % 60).padStart(2, '0')}`
       : fmtDuration(
-          tel.decompose?.started ?? run.created_at,
-          run.status === 'published' || run.status === 'failed'
-            ? tel.validate?.published ?? tel.draft?.completed ?? tel.search?.completed
-            : undefined,
+          run.started_at ?? tel.decompose?.started ?? run.created_at,
+          run.completed_at ?? undefined,
         );
 
   const Label = ({ children }: { children: React.ReactNode }) => (
@@ -699,6 +756,29 @@ function Inspector({
               </button>
             )}
           </>
+        )}
+      </>
+    );
+  } else if (inspected === 'retrieve') {
+    title = 'Retrieval';
+    body = (
+      <>
+        <Label>What ran</Label>
+        <div className="text-stone-700">
+          The question is turned into a set of targeted searches over the corpus, which
+          are then run and ranked into one document set — no search agents involved.
+        </div>
+        <Label>Outcome</Label>
+        <KV k="Searches run" v={tel.retrieval?.queries ?? '—'} />
+        <KV k="Documents kept" v={tel.retrieval?.documents ?? '—'} />
+        {run.parent_result_id && (
+          <KV k="Result" v={<span className="font-mono text-xs text-stone-500">{run.parent_result_id.slice(0, 8)}</span>} />
+        )}
+        {tel.retrieval?.completed && (
+          <div className="text-xs text-stone-400 italic mt-2">
+            Retrieval is stored as its own result — it can be reopened, re-scored, or
+            re-used as the input to a separate synthesis run.
+          </div>
         )}
       </>
     );
@@ -806,12 +886,16 @@ function Inspector({
       </>
     );
   } else if (inspected === 'answer') {
-    title = 'Answer';
+    const isPartial = run.status === 'partial';
+    title = isPartial ? 'Partial outcome' : 'Answer';
     const verified = (claims ?? []).filter((c) => c.evidence.length > 0 && c.evidence.every((e) => e.validated));
     body = (
       <>
+        {isPartial && <PartialNote tel={tel} />}
         <Label>
-          The complete answer · {claims?.length ?? 0} claims · {verified.length} fully verified
+          {isPartial
+            ? `Claims kept · ${claims?.length ?? 0} drafted · ${verified.length} fully verified`
+            : `The complete answer · ${claims?.length ?? 0} claims · ${verified.length} fully verified`}
         </Label>
         <div className="space-y-3">
           {(claims ?? []).map((c) => {
@@ -847,19 +931,22 @@ function Inspector({
     // overview
     body = (
       <>
+        {run.status === 'partial' && <PartialNote tel={tel} />}
         <Label>Stages</Label>
         {[
           ['Question', ''],
-          ...(run.mode !== 'synthesis'
-            ? [
+          ...(run.mode === 'synthesis'
+            ? []
+            : !tel.decompose
+              ? [['Retrieve', tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
+              : [
                 ['Plan', tel.decompose?.subqueries ? `${tel.decompose.subqueries.length} sub-search${tel.decompose.subqueries.length > 1 ? 'es' : ''}` : ''],
                 ...((tel.decompose?.subqueries ?? run.subqueries ?? []) as string[]).map((sq: string, i: number) => {
                   const act = activity?.searches.find((s) => s.subquery === sq);
                   return [`Search ${i + 1}`, act ? `${act.actions.length} actions` : ''];
                 }),
                 ['Consolidate', tel.merge ? `${tel.merge.total_documents} documents` : ''],
-              ]
-            : []),
+              ]),
           ['Result', docs ? `${docs.length} documents` : ''],
           ...(run.mode !== 'retrieval'
             ? [

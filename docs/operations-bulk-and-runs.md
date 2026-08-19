@@ -31,7 +31,10 @@ the app as a library, writes the DB directly); the API route
 
 ## Completeness gate (run before ANY question batch)
 
-Registered vs extracted vs related, per source bucket:
+`GET /api/v1/maintenance/completeness` returns this per document class,
+plus a total row: registered / with_content / with_entities /
+with_relationships. It scans the corpus, so expect it to take a minute or
+two on a large one. The equivalent SQL, per source bucket:
 
     SELECT <source-bucket-expr>, count(*),
       count(*) FILTER (WHERE EXISTS (SELECT 1 FROM entity_mention m
@@ -55,7 +58,7 @@ completeness from data (this query), never from run/unit status.
   client-facing note in `telemetry.partial`; verified claims retained),
   `failed` (infrastructure, retryable), `cancelled`.
 
-### Env flags (read at process start)
+### Settings (backend `.env`, read at process start)
 - `GROVE_DRAFT_MODE=extract` — split drafting: plan (strong model) →
   verbatim passage extraction (cheap model, quotes string-verified
   against document lines) → one-shot draft (strong model), all stateless;
@@ -80,10 +83,15 @@ call, so provider swaps take effect without restarts.
     python -m app.entity_dedup --apply-exact       # identical-form merges
     python -m app.entity_dedup --apply-llm --tighten [--types "A,B"]
 
+Or over HTTP: `POST /api/v1/maintenance/dedup/report` (read-only) and
+`POST /api/v1/maintenance/dedup/apply {mode: "exact"|"llm", tighten,
+types}`, which returns a `job_id` to poll at
+`/api/v1/maintenance/dedup/jobs/{job_id}`.
+
 `--tighten`: jaccard ≥ 0.8 or full containment, ≤3 partners per entity.
-After ANY apply, repoint relationship edges from merged-away entities to
-their survivors (the apply currently repoints mentions only — see fixes
-ledger) and re-materialize annotations.
+Every apply repoints relationship edges from merged-away entities to their
+terminal survivors. Re-materialize annotations afterwards, and re-apply
+authority tiers if alias merges changed which entity is canonical.
 
 ## Operational cautions
 - Cancelling a run requires BOTH marking the row and deleting/stopping its

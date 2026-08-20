@@ -49,10 +49,25 @@ A span FAILS if it is only tangentially related, contradicts the claim, or
 covers no part of it (e.g. the claim's precise figure appears in no span).
 A span PASSES if it substantively grounds a part of the claim, even if other
 parts are grounded by the other spans.
-Reply with exactly one line PER SPAN, in order, nothing else:
+
+Then judge the claim AS A WHOLE. Per-span verdicts say whether each span
+carries the part it covers; they cannot say whether anything is left over.
+Take every proposition the claim asserts — each figure, date, attribution,
+causal reason, and any generalisation across jurisdictions or authorities —
+and check it against the union of the passing spans. A case caption or party
+list establishes only that the case exists and which court decided it; it
+carries no holding.
+
+COVERAGE is FULL only if every proposition is carried. Otherwise PARTIAL,
+and name what is missing.
+
+Reply with exactly one line PER SPAN, in order, then one COVERAGE line,
+nothing else:
 SPAN 1: PASS — <one short clause>
 SPAN 2: FAIL — <one short clause>
-..."""
+COVERAGE: FULL — <one short clause>
+or
+COVERAGE: PARTIAL — <the propositions no span establishes>"""
 
 _SPAN_TMPL = """SPAN {i} (stance: {stance}; lines {line_from}-{line_to}):
 ---
@@ -83,6 +98,8 @@ async def _judge_claim(
     settings,
     claim_text: str,
     rows: list[tuple[ClaimEvidence, str, int, int]],
+    claim_id: uuid.UUID | None = None,
+    sequence: int | None = None,
 ) -> list[dict[str, Any]]:
     """One judging call for a claim and ALL its spans; per-span verdicts."""
     spans_block = "\n\n".join(
@@ -123,6 +140,17 @@ async def _judge_claim(
             body.split("-", 1)[1].strip() if "-" in body else body
         )
         verdicts.append({"evidence_id": ev.id, "validated": ok, "reasoning": reason[:500]})
+
+    cov = next((l for l in lines if l.upper().startswith("COVERAGE:")), None)
+    if cov:
+        body = cov.split(":", 1)[1].strip()
+        full = body.upper().startswith("FULL")
+        why = body.split("—", 1)[1].strip() if "—" in body else body
+        verdicts.append({"claim_coverage": "full" if full else "partial",
+                         "claim_id": str(claim_id) if claim_id else None,
+                         "claim_sequence": sequence,
+                         "claim_text": claim_text,
+                         "uncovered": why[:500]})
     return verdicts
 
 
@@ -180,11 +208,16 @@ async def validate_answer_evidence(
             errors.append({"evidence_id": ev.id, "error": "no extracted content"})
             continue
         span_text, lf, lt = _slice_span(content, ev.span or {})
-        entry = by_claim.setdefault(claim.id, {"claim_text": claim.claim_text, "rows": []})
+        entry = by_claim.setdefault(
+            claim.id,
+            {"claim_id": claim.id, "claim_text": claim.claim_text,
+             "sequence": claim.sequence, "rows": []},
+        )
         entry["rows"].append((ev, span_text, lf, lt))
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
-            _judge_claim(client, sem, settings, e["claim_text"], e["rows"])
+            _judge_claim(client, sem, settings, e["claim_text"], e["rows"],
+                         e["claim_id"], e["sequence"])
             for e in by_claim.values()
         ]) if by_claim else []
     verdicts = [v for group in grouped for v in group]
@@ -192,7 +225,12 @@ async def validate_answer_evidence(
     by_id = {ev.id: ev for ev, _ in rows}
     claims_by_ev = {ev.id: c for ev, c in rows}
     passed, failed = 0, []
+    overreaching: list[dict[str, Any]] = []
     for v in verdicts:
+        if v.get("claim_coverage"):
+            if v["claim_coverage"] != "full":
+                overreaching.append(v)
+            continue
         if "error" in v:
             errors.append(v)
             continue
@@ -215,6 +253,9 @@ async def validate_answer_evidence(
         "judged": passed + len(failed),
         "passed": passed,
         "failed": failed,
+        # claims whose spans each pass but which assert more than the spans
+        # carry — the defect per-span judging structurally cannot see
+        "overreaching": overreaching,
         "errors": [
             {**e, "evidence_id": str(e["evidence_id"])} if not isinstance(e.get("evidence_id"), str) else e
             for e in errors

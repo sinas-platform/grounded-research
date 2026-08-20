@@ -1077,6 +1077,58 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
     await _tele(run_id, "validate", published=_iso(), **tele)
 
 
+async def _narrow_overreaching(
+    sinas: _Sinas, run_id: uuid.UUID, overreaching: list[dict]
+) -> int:
+    """Rewrite claims that assert more than their evidence carries.
+
+    Every span passed, so nothing here is unsourced — the claim simply says
+    more than the passages establish: a figure, a date, an attribution, or a
+    generalisation across authorities that no passage supports. Expert review
+    of 126 claims found 57 in exactly this state. Dropping them all would gut
+    the answer; the right move is to say only what the sources say, so the
+    claim is rewritten to its supported core and keeps its evidence.
+    """
+    if not overreaching:
+        return 0
+
+    async def one(item: dict) -> tuple[uuid.UUID, str] | None:
+        try:
+            reply = await sinas.invoke(
+                "grove/answer-gate-agent",
+                "Rewrite the CLAIM so it asserts only what the evidence "
+                "establishes. Remove the propositions listed as UNCOVERED — "
+                "drop them outright, or narrow the wording so the claim no "
+                "longer depends on them. Keep the legal substance that is "
+                "supported, keep the same voice, do not add anything, and do "
+                "not hedge with 'appears to' or 'may'. Reply with ONLY the "
+                "rewritten claim.\n\nCLAIM: " + str(item.get("claim_text") or "")
+                + "\n\nUNCOVERED: " + str(item.get("uncovered") or ""),
+            )
+        except Exception:  # noqa: BLE001
+            return None
+        text = (reply or "").strip().strip('"')
+        if len(text) < 30 or not item.get("claim_id"):
+            return None
+        return uuid.UUID(str(item["claim_id"])), text[:4000]
+
+    results = [r for r in await asyncio.gather(*(one(i) for i in overreaching)) if r]
+    if results:
+        async with AsyncSessionLocal() as session:
+            for cid, text in results:
+                claim = await session.get(AnswerClaim, cid)
+                if claim is not None:
+                    claim.claim_text = text
+            await session.commit()
+    await _tele(run_id, "validate",
+                overreaching=len(overreaching), narrowed=len(results),
+                overreach_detail=[
+                    {"seq": i.get("claim_sequence"), "uncovered": i.get("uncovered")}
+                    for i in overreaching[:12]
+                ])
+    return len(results)
+
+
 async def _stage_validate_publish(
     run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int = ANSWER_GATE_CYCLES
 ) -> None:
@@ -1125,6 +1177,7 @@ async def _stage_validate_publish(
         await _await_chat_quiescence()
         async with AsyncSessionLocal() as session:
             verdict = await validate_answer_evidence(session, caller, answer_id, pending_only=True)
+        await _narrow_overreaching(sinas, run_id, verdict.get("overreaching") or [])
         failed_history.append(len(verdict["failed"]))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
@@ -1204,7 +1257,24 @@ async def _stage_validate_publish(
                 )
             ).scalars().all()
         )
+        # Record what is being removed before removing it. Only a count was
+        # kept, so a reader of the published answer saw claim numbering jump
+        # from 1 to 3 to 10 with nothing to explain the gap, and no way to
+        # tell a dropped claim from an export fault.
+        dropped = []
         for cid in failing_ids:
+            claim = await session.get(AnswerClaim, cid)
+            if claim is not None:
+                reasons = (await session.execute(
+                    select(ClaimEvidence.validation_reasoning)
+                    .where(ClaimEvidence.claim_id == cid)
+                    .where(ClaimEvidence.validated.is_(False))
+                )).scalars().all()
+                dropped.append({
+                    "sequence": claim.sequence,
+                    "claim": (claim.claim_text or "")[:400],
+                    "why": [r for r in reasons if r][:3],
+                })
             await session.execute(
                 ClaimEvidence.__table__.delete().where(ClaimEvidence.claim_id == cid)
             )
@@ -1212,6 +1282,10 @@ async def _stage_validate_publish(
                 AnswerClaim.__table__.delete().where(AnswerClaim.id == cid)
             )
         await session.commit()
+    if dropped:
+        await _tele(run_id, "validate",
+                    dropped_detail=sorted(dropped, key=lambda d: d["sequence"]))
+    async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues = await _gate_answer(sinas, question, answer_id)
     if ok and (not issues or gate_cycles <= 0):

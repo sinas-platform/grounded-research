@@ -785,6 +785,30 @@ async def _extract_passages(
     return out
 
 
+async def _synthesis_playbook() -> str:
+    """The deployment's drafting rules, as house style for the drafter.
+
+    These were reaching the model through the agent-chat synthesis path,
+    which fetched them as a skill. Chatless drafting replaced that path and
+    consulted nothing, so every rule in the playbook silently stopped
+    applying — sentence length, precedent attribution, the claim target. The
+    file was installed and correct the whole time; nothing read it.
+
+    Rules only, never facts: the playbook says how to write, and the verified
+    passages remain the only thing a claim may assert.
+    """
+    from app.models import Playbook
+
+    async with AsyncSessionLocal() as session:
+        content = (await session.execute(
+            select(Playbook.content).where(Playbook.kind == "synthesis")
+            .limit(1))).scalar_one_or_none()
+    if not content:
+        return ""
+    return ("\n\nHOUSE RULES for drafting (how to write, not what is true — "
+            "only the passages decide that):\n" + content.strip() + "\n")
+
+
 def _claims_json(reply: str) -> dict:
     """The drafter's reply as JSON, or JSONDecodeError naming what broke."""
     cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
@@ -843,7 +867,8 @@ async def _draft_from_extracts(
         '"legal_principle|factual|procedural|conclusion", '
         '"rationale": "<why this claim rests on this source>", "evidence": '
         '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
-        "QUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
+        + await _synthesis_playbook()
+        + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
     )
     # One retry on a malformed reply. Drafting is the last call in a run that
     # has already paid for retrieval, planning and extraction, and a single
@@ -1444,7 +1469,8 @@ async def _revise_answer(
         'procedural|conclusion", "rationale": "<why this claim rests on this '
         'source>", "evidence": [{"filename": "...", '
         '"line_from": <int>, "line_to": <int>}]}]}\n\n'
-        f"QUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
+        + await _synthesis_playbook()
+        + f"\nQUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
         f"FEEDBACK:\n- " + "\n- ".join(feedback[:10])
         + (f"\n\nADDITIONAL VERIFIED PASSAGES:{fresh}" if fresh else ""),
     )

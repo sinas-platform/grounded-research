@@ -785,6 +785,15 @@ async def _extract_passages(
     return out
 
 
+def _claims_json(reply: str) -> dict:
+    """The drafter's reply as JSON, or JSONDecodeError naming what broke."""
+    cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end <= start:
+        raise json.JSONDecodeError("no JSON object in reply", cleaned or "", 0)
+    return json.loads(cleaned[start:end + 1])
+
+
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
     question: str, extracts: list[dict], append: bool = False,
@@ -836,8 +845,22 @@ async def _draft_from_extracts(
         '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
         "QUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
     )
-    cleaned = reply.strip().strip("`").removeprefix("json").strip()
-    data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+    # One retry on a malformed reply. Drafting is the last call in a run that
+    # has already paid for retrieval, planning and extraction, and a single
+    # unescaped quote inside a claim threw all of it away. The retry is the
+    # cheap half of the work, and a second failure still raises: a run that
+    # cannot draft must say so, not publish nothing.
+    try:
+        data = _claims_json(reply)
+    except json.JSONDecodeError as exc:
+        await _tele(run_id, "draft", draft_reparse=str(exc)[:200])
+        reply = await sinas.invoke(
+            "grove/retrieval-planner-agent",
+            "Your previous reply was not valid JSON: " + str(exc)[:200]
+            + ". Send the same claims again as strictly valid JSON. Escape "
+            'every quotation mark inside a string as \\", and use no line '
+            "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
+        data = _claims_json(reply)
     claims = data.get("claims") or []
     written = 0
     async with AsyncSessionLocal() as session:

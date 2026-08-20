@@ -19,9 +19,11 @@ the app as a library, writes the DB directly); the API route
   registered docs of a source that lack entities (see gate query below).
 - `--stages`: `extract` (front matter, props, chunks), `resolve`
   (grounding + entity resolution), `relationships`. Run extract jobs in
-  parallel freely; **run only ONE resolve stage at a time** across all
-  jobs — concurrent resolution races entity creation and produces
-  duplicates.
+  parallel freely. Resolve stages may now also run concurrently: entity
+  identity is enforced by a unique index on (entity_type_id,
+  normalized_form), so a losing race links to the winner instead of
+  creating a twin. Before that index existed this was a hard rule, and
+  breaking it produced 267k duplicate entities.
 - Checkpoints in `<job-dir>/batches.json`; jobs resume. Caveat: resuming
   an extract stage with a SHRUNKEN worklist misaligns cached chat ids —
   use a fresh job dir + fresh ids-file of the remaining docs instead.

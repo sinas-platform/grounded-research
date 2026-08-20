@@ -38,7 +38,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
-from app.models import Document, Entity, EntityMention
+from app.models import Document, Entity, EntityAlias, EntityMention
 from app.models.config import EntityType
 from app.models.runtime import DocumentVersion, EntityProposal
 from app.services.query_runner import _Sinas
@@ -170,12 +170,25 @@ async def resolve_document(
             )
         ).scalar_one_or_none() or ""
 
+    learned_aliases: set[tuple[uuid.UUID, str]] = set()
+
     def link(m: EntityMention, eid: uuid.UUID, method: str, conf: float, ev: dict):
         m.entity_id = eid
         m.link_method = method
         m.link_confidence = conf
         m.link_evidence = ev
         report[method if method in report else "adjudicated"] += 1
+        # A surface that needed judgment to resolve is a spelling of this
+        # entity we did not know. Record it, so the next document matches it
+        # for free instead of paying for the same call — or, worse, creating
+        # a second entity. Aliases were previously written only by merges,
+        # which is why 4.1M links ran through the gazetteer and only 19,876
+        # through an alias.
+        if method in ("adjudicated", "alias") and m.surface_form:
+            surf = normalize(m.surface_form)
+            ent = index.by_id.get(eid)
+            if surf and (ent is None or normalize(ent.canonical_form) != surf):
+                learned_aliases.add((eid, m.surface_form[:500]))
 
     needs_judge: list[tuple[EntityMention, list[Entity]]] = []
     needs_creation: list[EntityMention] = []
@@ -254,6 +267,21 @@ async def resolve_document(
     # T4 — creation per the type's creation_mode
     await _t4_create(session, index, types, document_id, needs_creation,
                      link, report, write)
+    if write and learned_aliases:
+        existing = set()
+        ids = {eid for eid, _ in learned_aliases}
+        if ids:
+            existing = {
+                (a.entity_id, normalize(a.alias))
+                for a in (await session.execute(
+                    select(EntityAlias).where(EntityAlias.entity_id.in_(ids))
+                )).scalars()
+            }
+        for eid, surf in learned_aliases:
+            if (eid, normalize(surf)) in existing:
+                continue
+            session.add(EntityAlias(entity_id=eid, alias=surf))
+            report["aliases_learned"] = report.get("aliases_learned", 0) + 1
     if write:
         await session.commit()
     return report
@@ -294,10 +322,42 @@ async def _t4_create(session, index, types, document_id, needs_creation,
                     link(m, index.nk[nk][0], "natural_key", 0.95,
                          {"key": nk, "linked_instead_of_created": True})
                     continue
+                norm = normalize(m.surface_form or "")
+                # An entity created concurrently in another session is not in
+                # our index; the unique index on (type, normalized_form) is
+                # the only thing that can see it, so consult the database
+                # before inserting rather than trusting the snapshot.
+                # only for entities with no natural key: those are the ones
+                # the database could not protect, and the keyed path above
+                # already handles the rest without a wasted insert
+                if norm and not nk:
+                    # in-document twin: the index is updated on every create,
+                    # so a second spelling in the same document finds the
+                    # first here — the same guard the keyed path has above
+                    seen = [e for e in index.norm.get(norm, [])
+                            if index.by_id[e].entity_type_id == t.id]
+                    if seen:
+                        link(m, seen[0], "exact", 0.9,
+                             {"matched": index.by_id[seen[0]].canonical_form,
+                              "linked_instead_of_created": True})
+                        continue
+                    twin = (await session.execute(
+                        select(Entity).where(
+                            Entity.entity_type_id == t.id,
+                            Entity.normalized_form == norm,
+                            Entity.merged_into_id.is_(None),
+                        ).limit(1)
+                    )).scalars().first()
+                    if twin is not None:
+                        link(m, twin.id, "exact", 0.9,
+                             {"matched": twin.canonical_form,
+                              "linked_instead_of_created": True})
+                        continue
                 ent = Entity(
                     entity_type_id=t.id,
                     canonical_form=(m.surface_form or "")[:500],
                     natural_key=nk,
+                    normalized_form=norm or None,
                 )
                 try:
                     # savepoint: a plain failed flush would roll back
@@ -306,17 +366,17 @@ async def _t4_create(session, index, types, document_id, needs_creation,
                         session.add(ent)
                         await session.flush()
                 except IntegrityError:
-                    # cross-session race: the keyed owner appeared after
-                    # our index was built. The partial unique index
-                    # guarantees exactly one live owner; link to it.
-                    owner = (
-                        await session.execute(
-                            select(Entity)
-                            .where(Entity.entity_type_id == t.id)
-                            .where(Entity.natural_key == nk)
-                            .where(Entity.merged_into_id.is_(None))
-                        )
-                    ).scalars().first()
+                    # cross-session race: an owner appeared after our index
+                    # was built. Either unique index can be the one that
+                    # fired — natural_key for a keyed entity, normalized_form
+                    # for a name — so recover on whichever identity we have.
+                    stmt = select(Entity).where(
+                        Entity.entity_type_id == t.id,
+                        Entity.merged_into_id.is_(None),
+                    )
+                    stmt = (stmt.where(Entity.natural_key == nk) if nk
+                            else stmt.where(Entity.normalized_form == norm))
+                    owner = (await session.execute(stmt)).scalars().first()
                     if owner is None:
                         report["left_unlinked"] += 1
                         continue

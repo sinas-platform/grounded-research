@@ -109,6 +109,12 @@ class Entity(Base, TimestampMixin):
     # package-declared identity (e.g. a case number, an act+year signature);
     # unique per type among live (unmerged) entities
     natural_key: Mapped[str | None] = mapped_column(String(300))
+    # Name identity: entity_resolver.normalize(canonical_form). Unique per
+    # type among live entities, so a second "CMA" cannot be created at all —
+    # 98.9% of entities carry no natural_key, which left name-identified
+    # entities with no constraint whatsoever and made duplicates a matter of
+    # timing rather than correctness.
+    normalized_form: Mapped[str | None] = mapped_column(String(500))
     # merge tombstone: set when this entity was merged into another
     merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("entity.id", ondelete="SET NULL")

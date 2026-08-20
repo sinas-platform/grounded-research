@@ -45,15 +45,29 @@ departments are DIFFERENT entities. Reply ONLY JSON:
 
 
 def _norm(s: str) -> str:
-    import re
-    return re.sub(r"[^a-z0-9 ]", "", (s or "").lower()).strip()
+    """The one identity function, shared with the resolver and the database
+    constraint. The local variant this replaces stripped accented characters
+    instead of folding them, so "Autorité" and "Autorite" were different
+    entities forever — and it disagreed with what resolution had matched on,
+    which is how two normalizations produced two sets of duplicates."""
+    from app.services.entity_resolver import normalize
+    return normalize(s or "")
 
 
 def _tokens(s: str) -> set[str]:
     return {t for t in _norm(s).split() if len(t) >= 3}
 
 
-async def find_pairs():
+async def find_pairs(want_fuzzy: bool = True, only_types: set | None = None):
+    """Exact-duplicate pairs always; fuzzy candidates only when asked for.
+
+    The fuzzy half is a token-overlap comparison inside each entity type, and
+    on the big types it is quadratic: Competition Decision / Case alone is
+    260k entities. Exact merging needs none of it — grouping by normalized
+    form is a fraction of a second over the whole corpus — and an --apply-llm
+    scoped to two small types should pay for those two types only. Computing
+    it unconditionally is what turned a 25-minute job into an overnight one.
+    """
     from app.db import AsyncSessionLocal
     from app.models import Entity, EntityType
 
@@ -77,6 +91,10 @@ async def find_pairs():
                 group.sort(key=lambda e: e.created_at)
                 for loser in group[1:]:
                     exact.append((group[0], loser))
+        if not want_fuzzy:
+            continue
+        if only_types and types.get(tid) not in only_types:
+            continue
         # fuzzy: token-overlap blocking within type (Jaccard >= 0.6)
         norms = [(e, _tokens(e.canonical_form)) for e in rows]
         token_index: dict[str, list[int]] = defaultdict(list)
@@ -200,7 +218,9 @@ async def run_apply(mode: str, tighten: bool = True, types=None) -> dict:
     Returns a summary dict. mode: 'exact' | 'llm'."""
     from app.db import AsyncSessionLocal
 
-    exact, fuzzy = await find_pairs()
+    wanted = {t.strip() for t in types} if types else None
+    exact, fuzzy = await find_pairs(
+        want_fuzzy=(mode != "exact"), only_types=wanted)
     merged = 0
     if mode == "exact":
         async with AsyncSessionLocal() as session:
@@ -244,7 +264,11 @@ async def main() -> None:
 
     from app.db import AsyncSessionLocal
 
-    exact, fuzzy = await find_pairs()
+    wanted = ({t.strip() for t in args.types.split(",")}
+              if args.types else None)
+    exact, fuzzy = await find_pairs(
+        want_fuzzy=not (args.apply_exact and not args.apply_llm),
+        only_types=wanted)
     print(f"exact-duplicate pairs: {len(exact)}")
     print(f"fuzzy candidate pairs: {len(fuzzy)}")
 

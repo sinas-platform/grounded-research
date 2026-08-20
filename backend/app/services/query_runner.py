@@ -826,7 +826,10 @@ async def _draft_from_extracts(
         "the same point, say which you relied on and why the other did not "
         "carry it. The rationale is your reasoning, not a restatement of the "
         "claim, and it is not evidence — nothing in it may assert anything "
-        "the passages do not show.\n\n"
+        "the passages do not show. Name a source the way the claim names it "
+        "— the deciding body and its case or document reference — never by "
+        "the filename it is stored under: a reader of the answer has the "
+        "sources, not our file names.\n\n"
         'Reply ONLY JSON: {"claims": [{"text": "<claim>", "type": '
         '"legal_principle|factual|procedural|conclusion", '
         '"rationale": "<why this claim rests on this source>", "evidence": '
@@ -1070,7 +1073,11 @@ async def _gate_answer(
     ) or "(working set unavailable)"
     reply = await sinas.invoke(
         "grove/answer-gate-agent",
-        "QUESTION:\n" + run_question + "\n\nCLAIMS OF THE DRAFT ANSWER:\n" + claims
+        "QUESTION:\n" + run_question
+        + "\n\nCLAIMS OF THE DRAFT ANSWER (the number before each claim is "
+          "its identifier, not its position: revision drops claims, so gaps "
+          "in the numbering are expected and are not a defect — there is no "
+          "claim missing from this list):\n" + claims
         + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
         + '\n\nFirst split the QUESTION into the distinct things it asks — '
         'a question asking what the conditions are, whether a regulation '
@@ -1389,10 +1396,12 @@ async def _revise_answer(
         "changes neither the claim nor its evidence. Use it only when you "
         "have read the passages from the named source and they do not carry "
         "the point better — not to avoid the work.\n\n"
-        "Give a RATIONALE with every claim you revise or add: which part of "
-        "the question it answers and why the source you cite settles it. It "
-        "is your reasoning, not evidence — nothing in it may assert anything "
-        "the passages do not show.\n\n"
+        "Give a RATIONALE with every claim you revise or add, and with every "
+        "claim you keep: which part of the question it answers and why the "
+        "source you cite settles it. It is your reasoning, not evidence — "
+        "nothing in it may assert anything the passages do not show. Name a "
+        "source the way the claim names it — the deciding body and its case "
+        "or document reference — never by the filename it is stored under.\n\n"
         + ("This is the final revision. If the passages available genuinely "
            "cannot settle a point the question asks about, do not stretch a "
            "source to cover it and do not leave the point unmentioned: add a "

@@ -175,3 +175,20 @@ def test_a_question_with_no_run_still_gets_a_tab():
                for r in range(1, ws.max_row + 1))
     _write_index(wb, [ENTRY], [meta], "Expert review")
     assert wb["Review status"].cell(4, 5).value == "NOT RUN"
+
+
+def test_a_filename_in_the_reasoning_gets_its_reference_number():
+    """The reasoning is told to name a source by its citation, not by the
+    file it is stored under. Where one gets through anyway, a reader should
+    be able to find it in the list below rather than meet an opaque string."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    data = _data(n_claims=1, n_docs=3)
+    data["claims"][0]["rationale"] = (
+        "doc2.md restates the conclusion; doc0.md carries the reasoning.")
+    _write_question(wb, ENTRY, data)
+    ws = wb["Q03"]
+    hdr = next(r for r in range(1, ws.max_row + 1)
+               if ws.cell(r, 1).value == "Claim ID")
+    assert ws.cell(hdr + 1, 3).value == (
+        "[3] doc2.md restates the conclusion; [1] doc0.md carries the reasoning.")

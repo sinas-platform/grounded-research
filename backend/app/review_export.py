@@ -211,6 +211,20 @@ def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
         r = rank_of.get(fn)
         return f"[{r}] {fn}" if r else fn
 
+    def numbered(prose: str) -> str:
+        """Give any filename the reasoning mentions its reference number.
+
+        The reasoning is told to name a source by its citation rather than by
+        the file it is stored under, and mostly does. Where a filename gets
+        through, a reader should at least be able to find it in the list
+        below instead of meeting an opaque string.
+        """
+        out = prose or ""
+        for fn in sorted(rank_of, key=len, reverse=True):
+            if fn in out:
+                out = out.replace(fn, ref(fn))
+        return out
+
     # ── claim by claim ───────────────────────────────────────────────────
     # Claims come before the retrieval set: the answer is what a reviewer
     # reads first, and the ranked list runs to a hundred rows.
@@ -232,8 +246,8 @@ def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
             f"{_passage(e['content_md'], e['span'])}" for e in rows)
         if c["claim_type"] == "abstention":
             docs_ = docs_ or "(no source — the answer states this is not established)"
-        ws.append([c["sequence"], c["claim_text"], c["rationale"] or "",
-                   docs_, passages, "", ""])
+        ws.append([c["sequence"], c["claim_text"],
+                   numbered(c["rationale"] or ""), docs_, passages, "", ""])
         for col in (2, 3, 4, 5, 7):
             ws.cell(ws.max_row, col).alignment = WRAP
         for col in (6, 7):

@@ -63,6 +63,17 @@ async def _latest_run(session, question: str) -> dict | None:
     return dict(best) | {"match": round(score, 2)} if best and score >= 0.45 else None
 
 
+async def _run_cost(run_id) -> float:
+    """What the run spent. Only measurable since run_llm_call: before it,
+    every quality change was argued without its price."""
+    from app.services.query_runner import _run_cost_usd
+
+    try:
+        return round(await _run_cost_usd(run_id), 3)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
 async def _cited_files(session, answer_id) -> set[str]:
     if not answer_id:
         return set()
@@ -73,14 +84,16 @@ async def _cited_files(session, answer_id) -> set[str]:
         WHERE c.answer_id = :a"""), {"a": answer_id})).all() if fn}
 
 
-async def _run_gold(effort: str) -> None:
-    """Fire every gold question and wait for it to settle."""
+async def _run_gold(effort: str, limit: int | None = None) -> None:
+    """Fire the gold questions and wait for them to settle."""
     import httpx
 
     from app.config import get_settings
 
     gold, _c, _a = _load_gold()
     qs = [q.get("question") for q in (gold.get("questions") or []) if q.get("question")]
+    if limit:
+        qs = qs[:limit]
     st = get_settings()
     hdr = {"Authorization": f"Bearer {st.sinas_api_key}"}
     ids = []
@@ -114,10 +127,14 @@ async def main() -> None:
                          "only matches when the approved wording and the "
                          "benchmark wording happen to agree.")
     ap.add_argument("--effort", default="medium")
+    ap.add_argument("--limit", type=int,
+                    help="with --run: fire only the first N gold questions, "
+                         "to check a change is sane before paying for the "
+                         "whole sweep")
     args = ap.parse_args()
 
     if args.run:
-        await _run_gold(args.effort)
+        await _run_gold(args.effort, args.limit)
 
     gold, canon, a2c = _load_gold()
     results = []
@@ -156,25 +173,45 @@ async def main() -> None:
                 "core_sources": f"{hit}/{core}" if core else "-",
                 "core_pct": round(100 * hit / core) if core else None,
                 "missed_core": missed,
-                "overreach": (val.get("revision") or {}).get("feedback_items"),
+                # per-round counts, not a revision summary: overreach is
+                # judged every validation round and now blocks publication,
+                # so what matters is whether the last round still saw any
+                "overreach": ([(v or {}).get("overreaching")
+                               for k, v in sorted(val.items())
+                               if k.startswith("round_")] or [None])[-1],
                 "uncovered_parts": val.get("gate_redraft"),
+                "gate_unparseable": val.get("gate_unparseable"),
+                "quality_issues": len(val.get("quality_issues") or []),
+                "dropped_claims": val.get("dropped_claims"),
+                "cost_usd": await _run_cost(run["id"]),
                 "partial_cause": (tel.get("partial") or {}).get("cause"),
             })
 
     scored = [r for r in results if r.get("core_pct") is not None]
-    print(f"{'question':34} {'status':10} {'claims':>6} {'no-ev':>6} {'core sources':>13}")
-    print("-" * 76)
+    print(f"{'question':30} {'status':10} {'claims':>6} {'no-ev':>6} "
+          f"{'over':>5} {'core sources':>13} {'usd':>6}")
+    print("-" * 84)
     for r in results:
-        print(f"{str(r.get('title'))[:33]:34} {str(r.get('status')):10} "
+        print(f"{str(r.get('title'))[:29]:30} {str(r.get('status')):10} "
               f"{str(r.get('claims','-')):>6} {str(r.get('unsupported_claims','-')):>6} "
-              f"{str(r.get('core_sources','-')):>13}")
+              f"{str(r.get('overreach') if r.get('overreach') is not None else '-'):>5} "
+              f"{str(r.get('core_sources','-')):>13} "
+              f"{str(r.get('cost_usd','-')):>6}")
+        if r.get("gate_unparseable"):
+            print(f"{'':30} GATE DID NOT RUN: {str(r['gate_unparseable'])[:60]}")
         if r.get("missed_core"):
             print(f"{'':34} missed: {', '.join(str(m) for m in r['missed_core'])[:90]}")
     if scored:
         print("-" * 76)
         print(f"core sources cited: {round(sum(r['core_pct'] for r in scored)/len(scored))}%"
               f"   answers scored: {len(scored)}"
-              f"   unsupported claims: {sum(r.get('unsupported_claims') or 0 for r in scored)}")
+              f"   unsupported claims: {sum(r.get('unsupported_claims') or 0 for r in scored)}"
+              f"   overreaching: {sum(r.get('overreach') or 0 for r in scored)}"
+              f"   ${sum(r.get('cost_usd') or 0 for r in scored):.2f}"
+              f" (${sum(r.get('cost_usd') or 0 for r in scored)/len(scored):.2f}/run)")
+        blind = [r for r in results if r.get("gate_unparseable")]
+        if blind:
+            print(f"!! {len(blind)} run(s) published without a gate verdict")
     if args.out:
         Path(args.out).write_text(json.dumps(results, indent=1, default=str))
         print(f"\nwritten to {args.out}")

@@ -61,13 +61,17 @@ completeness from data (this query), never from run/unit status.
   `failed` (infrastructure, retryable), `cancelled`.
 
 ### Settings (backend `.env`, read at process start)
-- `GROVE_DRAFT_MODE=extract` — split drafting: plan (strong model) →
-  verbatim passage extraction (cheap model, quotes string-verified
-  against document lines) → one-shot draft (strong model), all stateless;
-  thin drafts become honest partials, never silent fallbacks. Unset =
-  chat drafting.
-- `GROVE_RUN_COST_CAP_USD` (default 10) — per-run spend ceiling summed
-  over the synthesis chat; tripping it produces a `partial`.
+- `GROVE_DRAFT_MODE` — `extract` is the only value. Drafting is a plan
+  (strong model) → verbatim passage extraction (cheap model, quotes
+  string-verified against document lines) → one drafting call, all
+  stateless. **Grounding is on raw source text only**: the document
+  manifest (summaries, classes, annotations) decides what to READ and
+  never reaches a drafting prompt, because it is interpretation produced
+  at ingestion and verified against nothing.
+- `GROVE_RUN_COST_CAP_USD` is currently inert. It measured one Sinas chat
+  and drafting no longer opens one; llm_usage carries no run id, so spend
+  cannot be attributed to a run without over-counting concurrent ones. A
+  run is bounded by its validation rounds and gate cycles instead.
 - `GROVE_BENCH_DIR` — regression benchmark folder for retrieval_first.
 - Effort buys persistence as well as breadth: retrieval depth (low 1, medium
   2, high 3) and the number of times a run may act on the answer gate's

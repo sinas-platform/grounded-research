@@ -328,3 +328,34 @@ def test_abstention_is_offered_only_on_the_final_gate_cycle():
     assert len(calls) >= 2, "every gate-driven revision must state its cycle"
     for line in calls:
         assert "gate_cycles <= 1" in line, line
+
+
+def test_drafting_input_carries_no_interpretation():
+    """Grounding is on raw source text only.
+
+    The manifest — summaries, classes, annotations — is interpretation
+    produced at ingestion and checked against nothing. It may decide what to
+    READ; it may never be what a claim asserts. One answer attributed an
+    Opinion to the right Advocate General on the strength of a summary, with
+    no passage behind it: true, and uncheckable.
+    """
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._draft_from_extracts)
+    # the plan's prose target must not be interpolated into the draft prompt
+    assert 'e.get("establishes")' not in src and "e['establishes']" not in src
+    assert "PASSAGE GROUP" in src
+    assert "ONLY thing you know" in src
+
+    # the manifest may steer reading, but must never reach a drafting prompt
+    synth = inspect.getsource(qr._stage_synthesize)
+    assert "_doc_manifest" in synth, "the manifest still guides the plan"
+    assert "+ manifest" not in synth, "manifest text reaches a drafting prompt"
+
+    # the chat drafting loop, which sent the manifest to the drafter, is gone
+    assert not hasattr(qr, "_dead_chat_diagnosis") or "synthesis-agent" not in synth
+    from app.config import Settings
+    import pytest as _pytest
+    with _pytest.raises(Exception):
+        Settings(GROVE_DRAFT_MODE="chat")

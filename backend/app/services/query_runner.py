@@ -58,7 +58,6 @@ HARD_VALIDATE_ROUNDS = 8
 # missing.
 EFFORT_GATE_CYCLES = {"low": 2, "medium": 3, "high": 5}
 ANSWER_GATE_CYCLES = EFFORT_GATE_CYCLES["medium"]
-REMEDIATION_WINDOW_S = 8 * 60
 MIN_CLAIMS = 6
 # The synthesis playbook targets about 12 claims and says not to exceed 12.
 # Remediation appends, and with several cycles it walked straight past that —
@@ -705,24 +704,33 @@ async def _draft_from_extracts(
     """Inverted split, writing half: one tool-less Sonnet call drafts all
     claims from the verified extracts; the runner persists claims and
     evidence rows itself. No chat loop, no nudges, no wedge surface."""
+    # Grounding is on raw source text only. The plan's "establishes" sentence
+    # is written from the manifest — summaries, classes, annotations — which
+    # are themselves interpretation produced at ingestion, unverified and
+    # never checked against anything. Handing it to the drafter let it assert
+    # what a summary said: one answer attributed an Opinion to the Advocate
+    # General who wrote it, correctly, from a summary rather than from any
+    # passage, so the attribution was true and uncheckable. The plan decides
+    # what to READ; only what was read may be asserted.
     blocks = []
-    for e in extracts:
+    for i, e in enumerate(extracts, start=1):
         if not e.get("passages"):
             continue
         ps = "\n".join(
             f"  [{p['filename']} lines {p['line_from']}-{p['line_to']}]\n"
             f"  {p['text']}" for p in e["passages"])
-        blocks.append(f"CLAIM {e.get('n')} — must establish: "
-                      f"{e.get('establishes')}\n{ps}")
+        blocks.append(f"PASSAGE GROUP {i}\n{ps}")
     if not blocks:
         return 0
     reply = await sinas.invoke(
         "grove/retrieval-planner-agent",
         f"Draft the claims of {_domain_article()}answer from the VERIFIED "
         "PASSAGES below "
-        "— use nothing else; every claim must be supported entirely by the "
-        "passages you cite for it. Skip any planned claim whose passages are "
-        "insufficient. The final claim states the overall conclusion. Reply "
+        "— these passages are the ONLY thing you know. Every claim must be "
+        "supported entirely by the passages you cite for it. Do not name a "
+        "court, an Advocate General, a case number or a date that no passage "
+        "shows. Skip a passage group that establishes nothing usable. The "
+        "final claim states the overall conclusion. Reply "
         'ONLY JSON: {"claims": [{"text": "<claim>", "type": '
         '"legal_principle|factual|procedural|conclusion", "evidence": '
         '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
@@ -819,24 +827,13 @@ async def _argument_plan(
         return "", []
 
 
-async def _claim_count(answer_id: uuid.UUID) -> int:
-    async with AsyncSessionLocal() as session:
-        return int(
-            (
-                await session.execute(
-                    select(AnswerClaim.id).where(AnswerClaim.answer_id == answer_id)
-                )
-            ).scalars().unique().all().__len__()
-        )
-
-
 async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     from app.models import Answer
 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         question, parent_id = run.question, run.parent_result_id
-        answer_id, chat_id = run.answer_id, run.synthesis_chat_id
+        answer_id = run.answer_id
         if answer_id and (run.telemetry or {}).get("draft", {}).get("completed"):
             return answer_id
         caller = _runner_caller(run)
@@ -858,140 +855,32 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
         await _mark(run_id, answer_id=answer_id)
     _ = caller  # ownership derives from the parent result above
 
-    if not chat_id:
-        manifest = await _doc_manifest(parent_id)
-        plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
-        if DRAFT_MODE == "extract" and plan_claims:
-            try:
-                # started/completed bracket the stage for duration reporting;
-                # the chat path writes its own pair alongside the chat id.
-                await _tele(run_id, "draft", started=_iso())
-                extracts = await _extract_passages(sinas, plan_claims, run_id)
-                n = await _draft_from_extracts(
-                    run_id, answer_id, sinas, question, extracts)
-                if n >= MIN_CLAIMS:
-                    await _tele(run_id, "draft", completed=_iso(), claims=n)
-                    return answer_id
-                if DRAFT_MODE == "extract":
-                    if n:
-                        # A thin draft is not a dead end any more. This guard
-                        # predates remediation: it fired before validation ran,
-                        # so a run that drafted four good claims died instead
-                        # of letting the gate ask for the rest. The gate still
-                        # refuses to publish an answer that does not answer the
-                        # question, so nothing thin gets through — it just gets
-                        # a chance to grow first.
-                        await _tele(run_id, "draft", completed=_iso(), claims=n,
-                                    thin=True, minimum=MIN_CLAIMS)
-                        _log.info("run %s drafted %s claims (below %s) — "
-                                  "continuing to validation", run_id, n, MIN_CLAIMS)
-                        return answer_id
-                    raise PartialOutcome(
-                        "no_progress",
-                        "extract drafting produced no claims at all")
-                _log.warning(
-                    "extract-mode drafted only %s claims for run %s; "
-                    "falling back to chat drafting", n, run_id)
-            except PartialOutcome:
-                raise
-            except Exception:  # noqa: BLE001 — infra failures still fail open
-                _log.exception(
-                    "extract-mode failed for run %s; chat drafting", run_id)
-        chat_id = await sinas.chat_create("grove/synthesis-agent", "[query-run] synthesis")
-        sinas.send_detached(
-            chat_id,
-            f"Question: {question}\n\n"
-            f"An answer has already been started for you: answer_id {answer_id} "
-            f"(source result {parent_id}). Do NOT call start_answer.\n\n"
-            "Your scope is DRAFTING ONLY: draft the claims with nested evidence per "
-            "your workflow and playbook target, then reply exactly DRAFTING COMPLETE. "
-            "Validation and publishing run outside your chat — do not call "
-            "validate_answer_evidence or publish_answer.\n\n"
-            "HARD RULES: (1) Never reference anything by name that does not appear "
-            "in the provided documents — no knowledge from outside the sources, "
-            "however confident you are. (2) Every claim must rest entirely on "
-            "evidence you bind from the provided documents. (3) The final claim "
-            "must state the answer's overall conclusion, itself supported by "
-            "bound evidence.\n\n"
-            + plan_text
-            + "The result's documents (filename | class | provenance | summary):\n"
-            + manifest,
-        )
-        await _mark(run_id, synthesis_chat_id=chat_id)
-        await _tele(run_id, "draft", started=_iso(), chat_id=chat_id)
+    manifest = await _doc_manifest(parent_id)
+    # The manifest is navigation: it decides which documents are worth
+    # reading. Nothing it says may become a claim — summaries, classes and
+    # annotations are interpretation produced at ingestion and verified
+    # against nothing. Only extracted, verbatim-checked passages ground an
+    # answer.
+    _plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
+    if not plan_claims:
+        raise PartialOutcome(
+            "no_progress", "no argument plan could be formed from the result")
 
-    nudges = 0
-    # DRAFT_TIMEOUT_S bounds IDLE time, not productive work: every sign of
-    # progress (a new claim, chat activity) pushes the deadline out. A run is
-    # only "timed out" after a full quiet window — killing a drafter that
-    # wrote a claim 46 seconds ago is how run f7049916 died.
-    loop_t = asyncio.get_event_loop().time
-    deadline = loop_t() + DRAFT_TIMEOUT_S
-    hard_deadline = loop_t() + 3 * DRAFT_TIMEOUT_S  # runaway backstop
-    last_n, stable_at = -1, loop_t()
-    while loop_t() < min(deadline, hard_deadline):
-        await asyncio.sleep(POLL_S)
-        spent = await _chat_cost_usd(chat_id)
-        if spent > RUN_COST_CAP_USD:
-            raise PartialOutcome(
-                "budget_ceiling",
-                f"synthesis spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) during drafting")
-        n = await _claim_count(answer_id)
-        if n != last_n:
-            last_n, stable_at = n, loop_t()
-            deadline = loop_t() + DRAFT_TIMEOUT_S
-            continue
-        if not await _chat_is_idle(sinas, chat_id):
-            deadline = loop_t() + DRAFT_TIMEOUT_S
-            continue
-        settled = asyncio.get_event_loop().time() - stable_at > IDLE_DEAD_S
-        if n >= MIN_CLAIMS and settled:
-            await _tele(run_id, "draft", completed=_iso(), claims=n)
-            return answer_id
-        if nudges < MAX_NUDGES:
-            nudges += 1
-            sinas.send_detached(
-                chat_id,
-                f"Continue: answer {answer_id} has {n} claims. Draft the remaining "
-                "claims with evidence per the playbook target, then reply DRAFTING COMPLETE.",
-            )
-        else:
-            outage = await _dead_chat_diagnosis(sinas, chat_id)
-            if outage:
-                raise RuntimeError(outage)
-            raise PartialOutcome(
-                "no_progress",
-                f"drafting stalled at {n} claims after {MAX_NUDGES} nudges")
-    outage = await _dead_chat_diagnosis(sinas, chat_id)
-    if outage:
-        raise RuntimeError(outage)
-    raise PartialOutcome("no_progress", "synthesis drafting timed out")
-
-
-
-async def _dead_chat_diagnosis(sinas: _Sinas, chat_id: str) -> str | None:
-    """When a drafter dies producing nothing, check whether the chat shows an
-    infrastructure failure rather than a model failure: if (nearly) every tool
-    call errored, the story is a connector outage, and the run error should
-    say so instead of blaming the drafter (run a20feca3: 40+ failed calls,
-    reported as 'drafting dead at 0 claims')."""
-    msgs = await sinas.chat_messages(chat_id)
-    results = [m for m in msgs if m.get("role") == "tool"]
-    if len(results) < 3:
-        return None
-    errored = [m for m in results if str(m.get("content") or "").lstrip().startswith('{"error"')]
-    if len(errored) / len(results) < 0.9:
-        return None
-    sample = str(errored[-1].get("content") or "")[:200]
-    return (
-        f"connector outage: {len(errored)}/{len(results)} tool calls in the "
-        f"synthesis chat failed — last error: {sample}"
-    )
-
-
-# The gate names the claims it objects to by sequence number; keeping them
-# lets remediation act on those claims instead of only appending new ones.
-_gate_seqs: dict[str, list[int]] = {}
+    await _tele(run_id, "draft", started=_iso())
+    extracts = await _extract_passages(sinas, plan_claims, run_id)
+    n = await _draft_from_extracts(run_id, answer_id, sinas, question, extracts)
+    if not n:
+        raise PartialOutcome(
+            "no_progress", "no passage supported a claim well enough to draft")
+    await _tele(run_id, "draft", completed=_iso(), claims=n,
+                **({"thin": True, "minimum": MIN_CLAIMS} if n < MIN_CLAIMS else {}))
+    if n < MIN_CLAIMS:
+        # Thin is not fatal: validation and the gate decide whether the answer
+        # stands, and revision can still grow it. Failing here killed runs
+        # that had drafted four sound claims.
+        _log.info("run %s drafted %s claims (below %s) — continuing to validation",
+                  run_id, n, MIN_CLAIMS)
+    return answer_id
 
 
 async def _gate_answer(
@@ -1423,47 +1312,32 @@ async def _stage_validate_publish(
 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
-        answer_id, chat_id = run.answer_id, run.synthesis_chat_id
+        answer_id = run.answer_id
         caller = _runner_caller(run)
         question_text = run.question
         if gate_cycles is None:
             gate_cycles = EFFORT_GATE_CYCLES.get(
                 run.effort or "medium", ANSWER_GATE_CYCLES)
 
-    # Remediation is a conversation with the drafting chat: it is handed the
-    # failed rows and reworks them. Chatless drafting has no such chat, so
-    # there is nobody to hand them to — every remediation message would go
-    # nowhere and every wait would run its full window before re-judging
-    # claims that could not have changed. Judge once, then drop what cannot
-    # be supported, which is where the loop ends up regardless.
-    can_remediate = bool(chat_id)
-
-    async def _await_chat_quiescence() -> None:
-        """Never judge while the drafter is mid-write: require the synthesis
-        chat to be continuously idle for IDLE_DEAD_S before proceeding (run 10
-        failed on exactly this race — a validate round judged mid-remediation
-        and the late resets had no round left)."""
-        while not await _chat_is_idle(sinas, chat_id):
-            await asyncio.sleep(POLL_S)
-
     await _mark(run_id, status="validating")
     failed_history: list[int] = []
     round_no = 0
     while True:
         round_no += 1
-        spent = await _chat_cost_usd(chat_id)
-        if spent > RUN_COST_CAP_USD:
-            raise PartialOutcome(
-                "budget_ceiling",
-                f"synthesis spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) in validation round {round_no}")
-        # Base budget, extended round by round while the failed count is
-        # strictly shrinking (a converging run finishes; a stalled one stops).
+        # NOTE: the per-run spend ceiling is not enforced here any more.
+        # It measured one Sinas chat, and chatless drafting has none;
+        # llm_usage carries no run id, so spend cannot be attributed to a run
+        # without over-counting concurrent ones, which would kill healthy
+        # runs. Calling the old helper with no chat returned 0.0 every time —
+        # a cap in name only. GROVE_RUN_COST_CAP_USD is inert until usage
+        # rows carry a run id; the round and gate-cycle bounds are what limit
+        # a run's cost today.
         if round_no > MAX_VALIDATE_ROUNDS:
-            converging = len(failed_history) >= 2 and failed_history[-1] < failed_history[-2]
+            converging = (len(failed_history) >= 2
+                          and failed_history[-1] < failed_history[-2])
             if round_no > HARD_VALIDATE_ROUNDS or not converging:
                 break
             await _tele(run_id, "validate", extended_to_round=round_no)
-        await _await_chat_quiescence()
         async with AsyncSessionLocal() as session:
             verdict = await validate_answer_evidence(session, caller, answer_id, pending_only=True)
         failed_history.append(len(verdict["failed"]))
@@ -1500,54 +1374,21 @@ async def _stage_validate_publish(
                         ("the answer could not be made internally consistent — "
                          + " ".join(correctness)[:600]))
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
-                if not can_remediate:
-                    await _revise_answer(
-                        sinas, run_id, answer_id, question,
-                        correctness + issues, [missing] if missing else [],
-                        last_attempt=gate_cycles <= 1)
-                    return await _stage_validate_publish(
-                        run_id, sinas, gate_cycles - 1)
-                sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
-                t0 = asyncio.get_event_loop().time()
-                saw = False
-                while asyncio.get_event_loop().time() - t0 < REMEDIATION_WINDOW_S:
-                    await asyncio.sleep(POLL_S)
-                    idle = await _chat_is_idle(sinas, chat_id)
-                    if not idle:
-                        saw = True
-                    elif saw:
-                        break
-                return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
-        failures = "\n".join(
-            f"- claim seq {f['claim_sequence']} (claim_id {f['claim_id']}, evidence {f['evidence_id']}): {f['reason']}"
-            for f in verdict["failed"]
-        ) or "(transport errors only — rebind those spans)"
-        if not can_remediate:
-            # One revision per round, over everything this round found.
-            fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
-                  for f in verdict["failed"]]
-            fb += [f"Claim {o.get('claim_sequence')} asserts more than its "
-                   f"passages establish: {o.get('uncovered')}"
-                   for o in (verdict.get("overreaching") or [])]
-            if fb and await _revise_answer(sinas, run_id, answer_id, question_text, fb):
-                continue
-            break  # revision produced nothing usable; drop below
-        sinas.send_detached(
-            chat_id,
-            "Validation results. Apply the TWO-STRIKES rule to these failed rows "
-            "(update_claim to weaken, delete_claim if unsupportable, or bind ONE "
-            "better span), then reply REMEDIATION COMPLETE. Do not validate or "
-            "publish yourself:\n" + failures,
-        )
-        t0 = asyncio.get_event_loop().time()
-        saw_activity = False
-        while asyncio.get_event_loop().time() - t0 < REMEDIATION_WINDOW_S:
-            await asyncio.sleep(POLL_S)
-            idle = await _chat_is_idle(sinas, chat_id)
-            if not idle:
-                saw_activity = True
-            elif saw_activity:
-                break  # worked, then went quiet — remediation done
+                await _revise_answer(
+                    sinas, run_id, answer_id, question,
+                    correctness + issues, [missing] if missing else [],
+                    last_attempt=gate_cycles <= 1)
+                return await _stage_validate_publish(
+                    run_id, sinas, gate_cycles - 1)
+        # One revision per round, over everything this round found.
+        fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
+              for f in verdict["failed"]]
+        fb += [f"Claim {o.get('claim_sequence')} asserts more than its "
+               f"passages establish: {o.get('uncovered')}"
+               for o in (verdict.get("overreaching") or [])]
+        if fb and await _revise_answer(sinas, run_id, answer_id, question_text, fb):
+            continue
+        break  # revision produced nothing usable; drop below
 
     # Rounds exhausted without convergence. Drop the claims that still carry
     # unvalidated evidence, then let the answer gate decide: the surviving
@@ -1612,24 +1453,9 @@ async def _stage_validate_publish(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
-    if not can_remediate:
-        await _revise_answer(sinas, run_id, answer_id, question,
-                             correctness + issues, [missing] if missing else [],
-                             last_attempt=gate_cycles <= 1)
-        return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
-    prefix = (
-        "Several claims were dropped as unverifiable.\n" if failing_ids else ""
-    )
-    sinas.send_detached(chat_id, prefix + _gate_remediation_msg(missing, issues))
-    t0 = asyncio.get_event_loop().time()
-    saw = False
-    while asyncio.get_event_loop().time() - t0 < REMEDIATION_WINDOW_S:
-        await asyncio.sleep(POLL_S)
-        idle = await _chat_is_idle(sinas, chat_id)
-        if not idle:
-            saw = True
-        elif saw:
-            break
+    await _revise_answer(sinas, run_id, answer_id, question,
+                         correctness + issues, [missing] if missing else [],
+                         last_attempt=gate_cycles <= 1)
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 
 

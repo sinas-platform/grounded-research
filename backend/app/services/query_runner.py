@@ -1470,7 +1470,8 @@ async def _stage_validate_publish(
                 if not can_remediate:
                     await _revise_answer(
                         sinas, run_id, answer_id, question,
-                        correctness + issues, [missing] if missing else [])
+                        correctness + issues, [missing] if missing else [],
+                        last_attempt=gate_cycles <= 1)
                     return await _stage_validate_publish(
                         run_id, sinas, gate_cycles - 1)
                 sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
@@ -1580,7 +1581,8 @@ async def _stage_validate_publish(
     )
     if not can_remediate:
         await _revise_answer(sinas, run_id, answer_id, question,
-                             correctness + issues, [missing] if missing else [])
+                             correctness + issues, [missing] if missing else [],
+                             last_attempt=gate_cycles <= 1)
         return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
     prefix = (
         "Several claims were dropped as unverifiable.\n" if failing_ids else ""

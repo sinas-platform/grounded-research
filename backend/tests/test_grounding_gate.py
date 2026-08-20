@@ -315,3 +315,16 @@ def test_revision_only_touches_the_claims_the_patch_names():
     revise_block = src[src.index('for item in patch["revise"]'):
                        src.index('if patch["add"]')]
     assert "ClaimEvidence.__table__.delete()" in revise_block
+
+
+def test_abstention_is_offered_only_on_the_final_gate_cycle():
+    """The flag exists inside the reviser; it has to be PASSED, or abstention
+    can never fire. It shipped once without a caller supplying it."""
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._stage_validate_publish)
+    calls = [l for l in src.splitlines() if "last_attempt=" in l]
+    assert len(calls) >= 2, "every gate-driven revision must state its cycle"
+    for line in calls:
+        assert "gate_cycles <= 1" in line, line

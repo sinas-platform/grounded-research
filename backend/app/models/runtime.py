@@ -451,6 +451,12 @@ class AnswerClaim(Base, TimestampMixin):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     claim_text: Mapped[str] = mapped_column(Text, nullable=False)
     claim_type: Mapped[str | None] = mapped_column(String(100))
+    # Why this claim rests on the source it cites, in the drafter's own
+    # words. Everything else stored about a claim looks backwards — the
+    # passage, and the validator's account of whether it carries the
+    # sentence. This is the forward argument, and it is also where a
+    # deliberate choice between two sources gets recorded.
+    rationale: Mapped[str | None] = mapped_column(Text)
 
 
 class ClaimEvidence(Base, TimestampMixin):

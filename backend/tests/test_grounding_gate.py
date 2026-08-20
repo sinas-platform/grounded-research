@@ -359,3 +359,64 @@ def test_drafting_input_carries_no_interpretation():
     import pytest as _pytest
     with _pytest.raises(Exception):
         Settings(GROVE_DRAFT_MODE="chat")
+
+
+def test_a_keep_records_a_reason_and_cannot_smuggle_in_a_claim():
+    """The gate names a stronger source; keeping the original citation is
+    often right, and was previously indistinguishable from ignoring the
+    finding — the reviser had no way to say "I read it, mine is better".
+
+    A keep carries a sequence number and a reason and nothing else: no text,
+    no spans. So it can never introduce or alter a claim, and the claim it
+    names keeps its verdicts because it is not rebuilt.
+    """
+    from app.services.query_runner import _parse_patch
+
+    patch = _parse_patch(
+        '{"keep": [{"seq": 3, "rationale": "32025M11936.md restates the '
+        'operative paragraph; m11936.md carries the Commission\'s own '
+        'reasoning on the point."}]}'
+    )
+    assert patch and patch["keep"] == [
+        {"seq": 3, "rationale": "32025M11936.md restates the operative "
+                                "paragraph; m11936.md carries the "
+                                "Commission's own reasoning on the point."}
+    ]
+    assert patch["revise"] == [] and patch["add"] == [] and patch["drop"] == []
+
+    for not_a_keep in [
+        # no reason given: a bare refusal to act is not a decision
+        '{"keep": [{"seq": 3}]}',
+        '{"keep": [{"seq": 3, "rationale": "no"}]}',
+        # no claim it applies to
+        '{"keep": [{"rationale": "the current citation is more direct here"}]}',
+    ]:
+        assert _parse_patch(not_a_keep) is None, not_a_keep
+
+
+def test_a_keep_alters_only_the_rationale():
+    import inspect
+
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._revise_answer)
+    block = src[src.index('for item in patch.get("keep")'):
+                src.index("await session.commit()",
+                          src.index('for item in patch.get("keep")'))]
+    assert "row.rationale = item" in block
+    for forbidden in ("claim_text", "_bind_spans", "ClaimEvidence"):
+        assert forbidden not in block, forbidden
+
+
+def test_a_revised_or_added_claim_carries_its_reasoning():
+    from app.services.query_runner import _parse_patch
+
+    patch = _parse_patch(
+        '{"revise": [{"seq": 4, "text": "Regulation (EU) 2018/1725, not the '
+        'GDPR, governs the processing of personal data during an inspection.",'
+        ' "rationale": "Answers the applicable-regime part of the question; '
+        '2018/1725 is the instrument addressed to the institutions.", '
+        '"evidence": [{"filename": "32018R1725.md", "line_from": 40, '
+        '"line_to": 52}]}]}'
+    )
+    assert patch["revise"][0]["rationale"].startswith("Answers the applicable")

@@ -819,9 +819,17 @@ async def _draft_from_extracts(
         "supported entirely by the passages you cite for it. Do not name a "
         "court, an Advocate General, a case number or a date that no passage "
         "shows. Skip a passage group that establishes nothing usable. The "
-        "final claim states the overall conclusion. Reply "
-        'ONLY JSON: {"claims": [{"text": "<claim>", "type": '
-        '"legal_principle|factual|procedural|conclusion", "evidence": '
+        "final claim states the overall conclusion.\n\n"
+        "For each claim also give a RATIONALE: one or two sentences saying "
+        "which part of the question the claim answers and why the source you "
+        "cite is the one that settles it. Where two passage groups spoke to "
+        "the same point, say which you relied on and why the other did not "
+        "carry it. The rationale is your reasoning, not a restatement of the "
+        "claim, and it is not evidence — nothing in it may assert anything "
+        "the passages do not show.\n\n"
+        'Reply ONLY JSON: {"claims": [{"text": "<claim>", "type": '
+        '"legal_principle|factual|procedural|conclusion", '
+        '"rationale": "<why this claim rests on this source>", "evidence": '
         '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
         "QUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
     )
@@ -842,6 +850,8 @@ async def _draft_from_extracts(
                 continue
             row = AnswerClaim(answer_id=answer_id, sequence=i,
                               claim_text=text_,
+                              rationale=(str(c.get("rationale") or "").strip()
+                                         or None),
                               claim_type=str(c.get("type") or "legal_principle")[:50])
             session.add(row)
             await session.flush()
@@ -1224,7 +1234,8 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         text = str(c.get("text") or "").strip()
         spans = _spans_of(c)
         if len(text) >= 30 and spans and str(c.get("seq", "")).lstrip("-").isdigit():
-            revise.append({"seq": int(c["seq"]), "text": text, "evidence": spans})
+            revise.append({"seq": int(c["seq"]), "text": text, "evidence": spans,
+                           "rationale": str(c.get("rationale") or "").strip()})
 
     add = []
     abstentions = 0
@@ -1236,19 +1247,35 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         if len(text) < 30:
             continue
         if spans:
-            add.append({"text": text, "type": c.get("type"), "evidence": spans})
+            add.append({"text": text, "type": c.get("type"), "evidence": spans,
+                        "rationale": str(c.get("rationale") or "").strip()})
         elif (allow_abstention
               and str(c.get("type") or "").lower() == "abstention"
               and abstentions < MAX_ABSTENTIONS):
             abstentions += 1
-            add.append({"text": text, "type": "abstention", "evidence": []})
+            add.append({"text": text, "type": "abstention", "evidence": [],
+                        "rationale": str(c.get("rationale") or "").strip()})
 
     drop = [int(x) for x in (data.get("drop") or [])
             if str(x).lstrip("-").isdigit()]
 
-    if not (revise or add or drop):
+    # Keeping a claim the gate objected to is an answer, not a non-answer.
+    # When the gate names a stronger source, the draft's citation is often
+    # still the right one — but with nowhere to say so, that decision was
+    # indistinguishable from having ignored the finding. A keep changes only
+    # the rationale, never the text or the spans, so it cannot smuggle in a
+    # claim: it needs a sequence number and a reason, and nothing else.
+    keep = []
+    for c in (data.get("keep") or []):
+        if not isinstance(c, dict):
+            continue
+        why = str(c.get("rationale") or "").strip()
+        if len(why) >= 20 and str(c.get("seq", "")).lstrip("-").isdigit():
+            keep.append({"seq": int(c["seq"]), "rationale": why})
+
+    if not (revise or add or drop or keep):
         return None
-    return {"revise": revise, "add": add, "drop": drop}
+    return {"revise": revise, "add": add, "drop": drop, "keep": keep}
 
 
 async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
@@ -1356,6 +1383,16 @@ async def _revise_answer(
         "fails to address the question. Every claim you write must be carried "
         "entirely by the passages you cite for it, and you may cite only "
         "passages shown below. Keep the answer at about 12 claims.\n\n"
+        "Where the feedback names a stronger source and you judge the current "
+        "citation to be the better one, say so instead of changing nothing: "
+        'put the claim in "keep" with a rationale giving the reason. A keep '
+        "changes neither the claim nor its evidence. Use it only when you "
+        "have read the passages from the named source and they do not carry "
+        "the point better — not to avoid the work.\n\n"
+        "Give a RATIONALE with every claim you revise or add: which part of "
+        "the question it answers and why the source you cite settles it. It "
+        "is your reasoning, not evidence — nothing in it may assert anything "
+        "the passages do not show.\n\n"
         + ("This is the final revision. If the passages available genuinely "
            "cannot settle a point the question asks about, do not stretch a "
            "source to cover it and do not leave the point unmentioned: add a "
@@ -1366,10 +1403,14 @@ async def _revise_answer(
            f"At most {MAX_ABSTENTIONS} such claims, and never for the central "
            "question if the sources do answer it.\n\n" if last_attempt else "")
         + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
+        '"rationale": "<why this claim rests on this source>", '
         '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
         '"drop": [<seq>], '
+        '"keep": [{"seq": <int>, "rationale": "<why the current citation '
+        'stands despite the feedback>"}], '
         '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
-        'procedural|conclusion", "evidence": [{"filename": "...", '
+        'procedural|conclusion", "rationale": "<why this claim rests on this '
+        'source>", "evidence": [{"filename": "...", '
         '"line_from": <int>, "line_to": <int>}]}]}\n\n'
         f"QUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
         f"FEEDBACK:\n- " + "\n- ".join(feedback[:10])
@@ -1402,6 +1443,8 @@ async def _revise_answer(
             if row is None:
                 continue
             row.claim_text = item["text"][:4000]
+            if item.get("rationale"):
+                row.rationale = item["rationale"][:2000]
             # its evidence is re-bound, so its verdicts no longer apply
             await session.execute(ClaimEvidence.__table__.delete()
                                   .where(ClaimEvidence.claim_id == row.id))
@@ -1418,6 +1461,8 @@ async def _revise_answer(
             for item in patch["add"][:max(0, MAX_CLAIMS - live)]:
                 row = AnswerClaim(answer_id=answer_id, sequence=nxt,
                                   claim_text=item["text"][:4000],
+                                  rationale=(item.get("rationale") or "")[:2000]
+                                  or None,
                                   claim_type=str(item.get("type")
                                                  or "legal_principle")[:50])
                 session.add(row)
@@ -1425,10 +1470,20 @@ async def _revise_answer(
                 await _bind_spans(session, row.id, item["evidence"])
                 nxt += 1
                 touched += 1
+        for item in patch.get("keep") or []:
+            claim = by_seq.get(item["seq"])
+            if claim is None:
+                continue
+            row = await session.get(AnswerClaim, claim.id)
+            if row is not None:
+                # text and spans untouched, so its verdicts still stand and
+                # it is not re-judged. Only the reasoning is recorded.
+                row.rationale = item["rationale"][:2000]
         await session.commit()
 
     await _tele(run_id, "validate",
                 revision={"claims": len(by_claim), "revised": len(patch["revise"]),
+                          "kept_with_reason": len(patch.get("keep") or []),
                           "abstentions": sum(
                               1 for a in patch["add"]
                               if a.get("type") == "abstention"),

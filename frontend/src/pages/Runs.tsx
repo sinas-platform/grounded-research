@@ -61,6 +61,9 @@ interface ClaimWithEvidence {
   sequence: number;
   claim_text: string;
   claim_type: string | null;
+  // why the claim rests on the source it cites. The evidence rows carry the
+  // opposite: whether the passage carries the sentence.
+  rationale: string | null;
   evidence: Evidence[];
 }
 
@@ -1078,6 +1081,11 @@ function Inspector({
                   ))}
                   {ok && <span className="text-[9.5px] text-forest-600 font-semibold">verified</span>}
                 </span>
+                {c.rationale && (
+                  <div className="mt-1 text-[11.5px] leading-relaxed text-stone-500 border-l-2 border-stone-200 pl-2">
+                    {c.rationale}
+                  </div>
+                )}
               </div>
             );
           })}

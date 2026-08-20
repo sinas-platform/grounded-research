@@ -1253,11 +1253,12 @@ async def _revise_answer(
             .where(AnswerClaim.answer_id == answer_id)
             .order_by(AnswerClaim.sequence)
         )).all()
-        corpus = [fn for (fn,) in (await session.execute(
-            select(Document.filename)
+        corpus_rows = (await session.execute(
+            select(Document.filename, Document.summary)
             .join(ResultDocument, ResultDocument.document_id == Document.id)
             .where(ResultDocument.result_id == parent_id)
-            .order_by(ResultDocument.rank).limit(30))).all() if fn]
+            .order_by(ResultDocument.rank).limit(60))).all()
+        corpus = [fn for fn, _ in corpus_rows if fn]
 
     # current claims, each with the passages already bound to it. A claim the
     # patch does not name keeps its row, its spans and its verdicts — it is
@@ -1277,9 +1278,41 @@ async def _revise_answer(
         for seq, c in sorted(by_claim.items()))
 
     # passages for anything the gate said was missing
+    def _anchors_for(point: str) -> list[str]:
+        """Documents that could actually contain the point, best first.
+
+        Taking the top-ranked handful is wrong when the gate names something
+        specific: on one question it asked for the answer to be grounded in
+        Les Laboratoires Servier, which sits at rank 26, and the reviser went
+        looking through ranks 1-8. It could not have found it. Rank orders the
+        whole result for the question; it does not order documents for one
+        missing point.
+        """
+        terms = {w.lower().strip(".,;:()'\"")
+                 for w in point.split() if len(w) > 4}
+        hay = {fn: (fn + " " + (summary or "")).lower()
+               for fn, summary in corpus_rows if fn}
+        # Weight each term by how rare it is HERE. The gate writes prose, so
+        # its sentence carries "cases", "question", "specific" alongside the
+        # one word that matters. Counting raw hits let the noise outvote
+        # "Servier", which appears in two documents and is the whole point.
+        df = {t: sum(1 for h in hay.values() if t in h) for t in terms}
+        scored = []
+        for pos, (fn, _summary) in enumerate(corpus_rows):
+            if not fn:
+                continue
+            score = sum(1.0 / df[t] for t in terms
+                        if df.get(t) and t in hay[fn])
+            if score:
+                scored.append((round(score, 4), -pos, fn))
+        scored.sort(reverse=True)
+        picked = [fn for _, _, fn in scored[:6]]
+        # always keep a couple of top-ranked documents for general context
+        return picked + [fn for fn in corpus[:4] if fn not in picked]
+
     fresh = ""
     if extra_points and corpus:
-        plan = [{"n": i, "establishes": pt[:600], "anchors": corpus[:8],
+        plan = [{"n": i, "establishes": pt[:600], "anchors": _anchors_for(pt),
                  "hint": "extract the passage that states this; a case caption "
                          "or party list is not a holding"}
                 for i, pt in enumerate(extra_points[:5], start=1)]

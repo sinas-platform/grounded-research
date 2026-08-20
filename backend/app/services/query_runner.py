@@ -48,9 +48,16 @@ MAX_VALIDATE_ROUNDS = 4
 # converging runs finish instead of dying at an arbitrary budget.
 HARD_VALIDATE_ROUNDS = 8
 # After drops, the surviving answer must still ANSWER THE QUESTION — judged
-# holistically by the answer-gate agent, with at most this many redraft
-# cycles before the run fails loudly. (Replaces the old counting floor.)
-ANSWER_GATE_CYCLES = 1
+# holistically by the answer-gate agent, with at most this many remediation
+# cycles before the run ends partial. One cycle meant a single attempt and
+# then surrender: the gate would name exactly what was missing and the run
+# would go partial rather than go and find it.
+# effort buys persistence: how many times the run may act on the gate's
+# verdict before it settles for a partial. Never 1 — one cycle means a single
+# attempt and then surrender, with the gate having named exactly what was
+# missing.
+EFFORT_GATE_CYCLES = {"low": 2, "medium": 3, "high": 5}
+ANSWER_GATE_CYCLES = EFFORT_GATE_CYCLES["medium"]
 REMEDIATION_WINDOW_S = 8 * 60
 MIN_CLAIMS = 6
 # Hard per-run spend ceiling in USD, summed over the run's synthesis chat
@@ -966,6 +973,11 @@ async def _dead_chat_diagnosis(sinas: _Sinas, chat_id: str) -> str | None:
     )
 
 
+# The gate names the claims it objects to by sequence number; keeping them
+# lets remediation act on those claims instead of only appending new ones.
+_gate_seqs: dict[str, list[int]] = {}
+
+
 async def _gate_answer(
     sinas: _Sinas, run_question: str, answer_id: uuid.UUID
 ) -> tuple[bool, str, list[str]]:
@@ -1031,6 +1043,13 @@ async def _gate_answer(
         start, end = cleaned.find("{"), cleaned.rfind("}")
         data = json.loads(cleaned[start : end + 1])
         issues: list[str] = []
+        # Correctness defects make the answer wrong or incoherent, and must be
+        # fixed before publication. Everything else — a claim that only
+        # describes its source, a better source left uncited — is recorded and
+        # does not hold the answer back. Both used to sit in one list, so
+        # "the answer contradicts itself" carried the same weight as "you
+        # could have cited a stronger source", and shipped.
+        correctness: list[str] = []
         seqs = [s for s in (data.get("unresponsive") or []) if isinstance(s, (int, str))]
         if seqs:
             issues.append(
@@ -1039,19 +1058,19 @@ async def _gate_answer(
                 "question, or be dropped."
             )
         if data.get("tension"):
-            issues.append(
+            correctness.append(
                 "Unreconciled tension: " + str(data["tension"]) + " Add a claim that "
                 "reconciles these positions (grounded in evidence), or revise them."
             )
         dang = [s for s in (data.get("dangling") or []) if isinstance(s, (int, str))]
         if dang:
-            issues.append(
+            correctness.append(
                 "Claims " + ", ".join(str(s) for s in dang) + " depend on reasoning "
                 "from a claim that is no longer in the answer. Rewrite each to stand "
                 "alone (restate the reasoning it relies on, with evidence), or drop it."
             )
         if data.get("no_conclusion"):
-            issues.append(
+            correctness.append(
                 "The answer never draws its overall conclusion. Add a final claim "
                 "that directly answers the question, supported by the evidence "
                 "already cited."
@@ -1061,11 +1080,16 @@ async def _gate_answer(
                 "Stronger source unused: " + str(src) + " Use it for the point it speaks "
                 "to (or keep the current citation only if it is genuinely the better fit)."
             )
-        return bool(data.get("publishable")), str(data.get("missing") or ""), issues
+        _gate_seqs["unresponsive"] = [int(x) for x in seqs
+                                      if str(x).lstrip("-").isdigit()]
+        _gate_seqs["dangling"] = [int(x) for x in dang
+                                  if str(x).lstrip("-").isdigit()]
+        return (bool(data.get("publishable")), str(data.get("missing") or ""),
+                issues + correctness, correctness)
     except Exception:
         # an unparseable verdict must never block publication of a fully
         # validated answer — log via telemetry and treat as pass
-        return True, "(gate verdict unparseable — treated as pass)", []
+        return True, "(gate verdict unparseable — treated as pass)", [], []
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -1285,10 +1309,31 @@ async def _remediate_gate(
     stronger sources it named. Both are drafting work, so they need passages
     first — extracted and verified like any other, then drafted as additional
     claims appended to the answer."""
+    # A claim the gate says only describes its source, or leans on reasoning
+    # that is no longer in the answer, is removed here. Remediation used to be
+    # additive only, so the answer could never be made coherent by taking
+    # something out — the offending claim stayed and a new one was stacked on
+    # top of it.
+    drop_seqs = set(_gate_seqs.get("unresponsive") or [])
+    dropped_here = 0
+    if drop_seqs:
+        async with AsyncSessionLocal() as session:
+            for c in (await session.execute(
+                select(AnswerClaim).where(AnswerClaim.answer_id == answer_id)
+            )).scalars().all():
+                if c.sequence in drop_seqs:
+                    await session.execute(ClaimEvidence.__table__.delete()
+                                          .where(ClaimEvidence.claim_id == c.id))
+                    await session.execute(AnswerClaim.__table__.delete()
+                                          .where(AnswerClaim.id == c.id))
+                    dropped_here += 1
+            await session.commit()
+        _gate_seqs["unresponsive"] = []
+
     wanted = [missing] if missing else []
     wanted += [i for i in (issues or []) if i]
     if not wanted:
-        return 0
+        return dropped_here
 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
@@ -1318,12 +1363,13 @@ async def _remediate_gate(
         run_id, answer_id, sinas, question, extracts, append=True)
     await _tele(run_id, "validate",
                 gate_remediation={"points": len(wanted), "claims_added": added,
+                                  "claims_dropped": dropped_here,
                                   "named_sources": named[:5]})
-    return added
+    return added + dropped_here
 
 
 async def _stage_validate_publish(
-    run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int = ANSWER_GATE_CYCLES
+    run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int | None = None
 ) -> None:
     from app.services.faithfulness import validate_answer_evidence
 
@@ -1331,6 +1377,9 @@ async def _stage_validate_publish(
         run = await session.get(QueryRun, run_id)
         answer_id, chat_id = run.answer_id, run.synthesis_chat_id
         caller = _runner_caller(run)
+        if gate_cycles is None:
+            gate_cycles = EFFORT_GATE_CYCLES.get(
+                run.effort or "medium", ANSWER_GATE_CYCLES)
 
     # Remediation is a conversation with the drafting chat: it is handed the
     # failed rows and reworks them. Chatless drafting has no such chat, so
@@ -1387,21 +1436,25 @@ async def _stage_validate_publish(
             if pending is None:
                 async with AsyncSessionLocal() as session:
                     question = (await session.get(QueryRun, run_id)).question
-                ok, missing, issues = await _gate_answer(sinas, question, answer_id)
-                if ok and (not issues or gate_cycles <= 0):
+                ok, missing, issues, correctness = await _gate_answer(
+                    sinas, question, answer_id)
+                if ok and not correctness and (not issues or gate_cycles <= 0):
                     # quality issues never block publication on their own —
                     # unremediated ones are recorded, not fatal
                     tele = {"quality_issues": issues} if issues else {}
                     await _publish_answer(run_id, answer_id, **tele)
                     return
-                if not ok and gate_cycles <= 0:
+                if gate_cycles <= 0 and (not ok or correctness):
                     raise PartialOutcome(
                         "coverage",
-                        f"the validated claims no longer answer the question — {missing}")
+                        (f"the validated claims no longer answer the question — {missing}")
+                        if not ok else
+                        ("the answer could not be made internally consistent — "
+                         + " ".join(correctness)[:600]))
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
                 if not can_remediate:
                     await _remediate_gate(sinas, run_id, answer_id, question,
-                                          missing, issues)
+                                          missing, correctness + issues)
                     return await _stage_validate_publish(
                         run_id, sinas, gate_cycles - 1)
                 sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
@@ -1487,24 +1540,27 @@ async def _stage_validate_publish(
                     dropped_detail=sorted(dropped, key=lambda d: d["sequence"]))
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
-    ok, missing, issues = await _gate_answer(sinas, question, answer_id)
-    if ok and (not issues or gate_cycles <= 0):
+    ok, missing, issues, correctness = await _gate_answer(sinas, question, answer_id)
+    if ok and not correctness and (not issues or gate_cycles <= 0):
         tele = {"quality_issues": issues} if issues else {}
         await _publish_answer(
             run_id, answer_id, dropped_claims=len(failing_ids), **tele
         )
         return
-    if not ok and gate_cycles <= 0:
+    if gate_cycles <= 0 and (not ok or correctness):
         raise PartialOutcome(
             "coverage",
-            "validation exhausted and the surviving claims do not answer the "
-            f"question — {missing}")
+            ("validation exhausted and the surviving claims do not answer the "
+             f"question — {missing}") if not ok else
+            ("the answer could not be made internally consistent — "
+             + " ".join(correctness)[:600]))
     await _tele(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
     if not can_remediate:
-        await _remediate_gate(sinas, run_id, answer_id, question, missing, issues)
+        await _remediate_gate(sinas, run_id, answer_id, question, missing,
+                              correctness + issues)
         return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
     prefix = (
         "Several claims were dropped as unverifiable.\n" if failing_ids else ""

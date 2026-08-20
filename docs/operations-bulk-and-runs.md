@@ -69,6 +69,9 @@ completeness from data (this query), never from run/unit status.
 - `GROVE_RUN_COST_CAP_USD` (default 10) — per-run spend ceiling summed
   over the synthesis chat; tripping it produces a `partial`.
 - `GROVE_BENCH_DIR` — regression benchmark folder for retrieval_first.
+- Effort buys persistence as well as breadth: retrieval depth (low 1, medium
+  2, high 3) and the number of times a run may act on the answer gate's
+  verdict before settling for a partial (low 2, medium 3, high 5).
 - `GROVE_DOMAIN`, `GROVE_AUDIENCE` — the only place a deployment states what
   kind of corpus and reader it serves (prompt wording only; nothing branches
   on them). Unset = generic framing; a legal deployment sets e.g. `legal` and

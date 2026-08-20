@@ -100,6 +100,7 @@ async def _judge_claim(
     rows: list[tuple[ClaimEvidence, str, int, int]],
     claim_id: uuid.UUID | None = None,
     sequence: int | None = None,
+    run_id: uuid.UUID | None = None,
 ) -> list[dict[str, Any]]:
     """One judging call for a claim and ALL its spans; per-span verdicts."""
     spans_block = "\n\n".join(
@@ -116,7 +117,13 @@ async def _judge_claim(
                 timeout=120.0,
             )
             resp.raise_for_status()
-            reply = (resp.json().get("reply") or "").strip()
+            payload = resp.json()
+            reply = (payload.get("reply") or "").strip()
+            if run_id is not None:
+                from app.services.query_runner import record_llm_call
+
+                await record_llm_call(run_id, payload.get("chat_id"),
+                                      _VALIDATOR_AGENT)
         except Exception as exc:
             return [{"evidence_id": ev.id, "error": f"invoke failed: {exc}"} for ev, *_ in rows]
 
@@ -159,6 +166,7 @@ async def validate_answer_evidence(
     caller: CallerIdentity,
     answer_id: uuid.UUID,
     pending_only: bool = True,
+    run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Judge (pending) evidence rows of an answer as parallel stateless calls
     and record the verdicts. Returns a summary the synthesis agent can act on
@@ -217,7 +225,7 @@ async def validate_answer_evidence(
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
             _judge_claim(client, sem, settings, e["claim_text"], e["rows"],
-                         e["claim_id"], e["sequence"])
+                         e["claim_id"], e["sequence"], run_id)
             for e in by_claim.values()
         ]) if by_claim else []
     verdicts = [v for group in grouped for v in group]

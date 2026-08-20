@@ -12,7 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, String, Text
+from sqlalchemy import DateTime, ForeignKey, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -38,6 +38,26 @@ QUERY_RUN_STATUSES = (
     "partial",
     "failed",
 )
+
+
+class RunLLMCall(Base):
+    """One model call a run made, by the chat id the invoke response returns.
+
+    Sinas keys its usage ledger by chat_id, and stateless calls each get their
+    own throwaway chat, so this is what makes a run's spend addable at all.
+    """
+
+    __tablename__ = "run_llm_call"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("query_run.id", ondelete="CASCADE"),
+        index=True, nullable=False)
+    chat_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), index=True, nullable=False)
+    agent: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False)
 
 
 class QueryRun(Base, TimestampMixin, OwnedMixin):

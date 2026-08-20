@@ -224,6 +224,26 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
     names: dict[str, str] = {}
 
     async with AsyncSessionLocal() as s:
+        # How common is each anchor? A mention of "Regulation (EU) 2018/1725"
+        # says almost nothing: every EU regulation carries a data-protection
+        # recital citing it, so an anchor on it pulls in the statute book —
+        # expert review found the AI Act, the Digital Markets Act, the Health
+        # Data Space, wine geographical indications and Ecodesign ranked into
+        # an answer about inspections, each on a single boilerplate mention.
+        # A mention of "E.ON Energie" says a great deal. Weight by inverse
+        # document frequency so aboutness beats boilerplate.
+        total_docs = (await s.execute(
+            text("SELECT count(*) FROM document"))).scalar() or 1
+        df_rows = (await s.execute(text("""
+            SELECT entity_id, count(DISTINCT document_id)
+            FROM entity_mention
+            WHERE entity_id = ANY(CAST(:eids AS uuid[])) AND status = 'active'
+            GROUP BY 1"""), {"eids": list(plan["anchors"])})).all()
+        import math
+        _ln_n = math.log(total_docs + 1)
+        idf = {str(eid): max(0.05, math.log((total_docs + 1) / (df + 1)) / _ln_n)
+               for eid, df in df_rows}
+
         frontier = set(plan["anchors"])
         seen_entities = set(frontier)
         for hop in range(depth):
@@ -240,7 +260,8 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 {"eids": list(frontier)})).all()
             for did, fn, eid, hits in rows:
                 did = str(did)
-                scores[did] += w_mention * min(hits, 10)
+                w = idf.get(str(eid), 1.0)
+                scores[did] += w_mention * min(hits, 10) * w
                 names[did] = fn
                 label = plan["anchor_names"].get(str(eid), str(eid)[:8])
                 reasons[did].append(

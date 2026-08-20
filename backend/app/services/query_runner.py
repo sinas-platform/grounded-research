@@ -110,10 +110,15 @@ def _iso() -> str:
 class _Sinas:
     """Minimal async Sinas client for chat supervision."""
 
-    def __init__(self) -> None:
+    def __init__(self, run_id: uuid.UUID | None = None) -> None:
         s = get_settings()
         self.base = s.sinas_url
         self.headers = {"Authorization": f"Bearer {s.sinas_api_key}"}
+        # Every invoke returns the chat Sinas opened for it, and its usage
+        # ledger is keyed by that chat. Recording the id against the run is
+        # the whole of the bookkeeping: a run's spend becomes a join, with no
+        # change needed on the Sinas side.
+        self.run_id = run_id
 
     async def chat_create(self, agent: str, title: str) -> str:
         async with httpx.AsyncClient(timeout=60.0) as c:
@@ -149,7 +154,9 @@ class _Sinas:
                 json={"message": message},
             )
             r.raise_for_status()
-            return r.json().get("reply", "") or ""
+            data = r.json()
+        await record_llm_call(self.run_id, data.get("chat_id"), agent)
+        return data.get("reply", "") or ""
 
     async def chat_messages(self, chat_id: str) -> list[dict]:
         # 120s: supervision reads must tolerate a Sinas API busy with bulk
@@ -178,6 +185,33 @@ class _Sinas:
             return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
         except Exception:
                 return None
+
+
+async def record_llm_call(run_id, chat_id, agent: str | None) -> None:
+    """Note that a run made this call. Best-effort: bookkeeping must never be
+    the thing that fails a run."""
+    if not run_id or not chat_id:
+        return
+    try:
+        from app.models.query import RunLLMCall
+
+        async with AsyncSessionLocal() as session:
+            session.add(RunLLMCall(run_id=run_id, chat_id=uuid.UUID(str(chat_id)),
+                                   agent=(agent or "")[:200]))
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _run_cost_usd(run_id: uuid.UUID) -> float:
+    """What this run has spent, over every call it made."""
+    from app.models.query import RunLLMCall
+
+    async with AsyncSessionLocal() as session:
+        ids = [str(c) for c in (await session.execute(
+            select(RunLLMCall.chat_id).where(RunLLMCall.run_id == run_id)
+        )).scalars().all()]
+    return await _chats_cost_usd(ids) if ids else 0.0
 
 
 def _runner_caller(run: QueryRun) -> CallerIdentity:
@@ -551,17 +585,26 @@ async def _doc_manifest(parent_id: uuid.UUID) -> str:
 _sinas_usage_engine = None
 
 
-async def _chat_cost_usd(chat_id: str) -> float:
-    """Spend on one Sinas chat, USD, from llm_usage. Sinas shares the
-    Postgres server with Grove (different database), so this is one
-    cross-database read; pricing matches the Anthropic rate card for the
-    Sonnet/Haiku tiers in use. Fails open (0.0) — the cap must never be
-    the thing that kills an otherwise healthy run on a transient error."""
+async def _chats_cost_usd(chat_ids: list[str]) -> float:
+    """Spend across these Sinas chats, USD, from llm_usage.
+
+    Sinas shares the Postgres server with Grove (different database), so this
+    is one cross-database read. Rates are per million tokens. The Anthropic
+    figures are the published rate card; the Gemini ones are calibrated
+    against this deployment's own ingestion bill, which the published tiers
+    reproduce to within a few percent. Gemini used to fall through to the
+    Sonnet branch — a 60x over-count on the agents that do most of the work.
+
+    Fails open (0.0): the cap must never be the thing that kills an otherwise
+    healthy run on a transient error.
+    """
     global _sinas_usage_engine
     from sqlalchemy.ext.asyncio import create_async_engine
 
     from app.config import get_settings
 
+    if not chat_ids:
+        return 0.0
     if _sinas_usage_engine is None:
         url = get_settings().grove_database_url
         _sinas_usage_engine = create_async_engine(
@@ -571,18 +614,24 @@ async def _chat_cost_usd(chat_id: str) -> float:
             row = await conn.execute(
                 __import__("sqlalchemy").text("""
                     SELECT coalesce(sum(
-                      CASE WHEN model LIKE '%haiku%' THEN
-                        (prompt_tokens - cache_read_tokens - cache_write_tokens) * 1.0
-                        + cache_write_tokens * 1.25 + cache_read_tokens * 0.10
-                        + completion_tokens * 5.0
-                      ELSE
-                        (prompt_tokens - cache_read_tokens - cache_write_tokens) * 3.0
-                        + cache_write_tokens * 3.75 + cache_read_tokens * 0.30
-                        + completion_tokens * 15.0
+                      CASE
+                        WHEN model ILIKE '%flash-lite%' THEN
+                          prompt_tokens * 0.05 + completion_tokens * 0.20
+                        WHEN model ILIKE '%gemini%' THEN
+                          prompt_tokens * 0.30 + completion_tokens * 2.50
+                        WHEN model ILIKE '%haiku%' THEN
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 1.0
+                          + cache_write_tokens * 1.25 + cache_read_tokens * 0.10
+                          + completion_tokens * 5.0
+                        ELSE
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 3.0
+                          + cache_write_tokens * 3.75 + cache_read_tokens * 0.30
+                          + completion_tokens * 15.0
                       END) / 1e6, 0)
-                    FROM llm_usage WHERE chat_id = CAST(:cid AS uuid)
+                    FROM llm_usage
+                    WHERE chat_id = ANY(CAST(:cids AS uuid[]))
                       AND error IS NULL"""),
-                {"cid": chat_id})
+                {"cids": chat_ids})
             return float(row.scalar() or 0.0)
     except Exception:  # noqa: BLE001 — fail open by design
         return 0.0
@@ -633,6 +682,33 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) ->
     return want[:200] in have
 
 
+def _relevant_docs(point: str, corpus_rows: list[tuple], take: int = 4) -> list[str]:
+    """Documents whose own text most specifically matches this point.
+
+    Rank orders the whole result for the question; it does not order
+    documents for one claim. Michelin sat at rank 18 and Servier at rank 26 —
+    both retrieved, neither read, because the planner names anchors from
+    summaries and extraction only reads what it names. Terms are weighted by
+    rarity within the candidate set, so a word appearing in two documents
+    outweighs one appearing in forty.
+    """
+    terms = {w.lower().strip(".,;:()'\"") for w in (point or "").split() if len(w) > 4}
+    if not terms:
+        return []
+    hay = {fn: (fn + " " + (summary or "")).lower()
+           for fn, summary in corpus_rows if fn}
+    df = {t: sum(1 for h in hay.values() if t in h) for t in terms}
+    scored = []
+    for pos, (fn, _s) in enumerate(corpus_rows):
+        if not fn:
+            continue
+        score = sum(1.0 / df[t] for t in terms if df.get(t) and t in hay[fn])
+        if score:
+            scored.append((round(score, 4), -pos, fn))
+    scored.sort(reverse=True)
+    return [fn for _, _, fn in scored[:take]]
+
+
 async def _extract_passages(
     sinas: _Sinas, plan_claims: list[dict], run_id: uuid.UUID | None = None
 ) -> list[dict]:
@@ -643,7 +719,7 @@ async def _extract_passages(
     sem = asyncio.Semaphore(4)
 
     async def one(c: dict) -> dict:
-        anchors = [str(a) for a in (c.get("anchors") or [])[:4]]
+        anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
         docs = await _fetch_numbered(anchors)
         if not docs:
             return {"n": c.get("n"), "passages": [], "proposed": 0, "read": 0}
@@ -663,9 +739,14 @@ async def _extract_passages(
                 )
                 cleaned = reply.strip().strip("`").removeprefix("json").strip()
                 data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                # A transport failure is not "this document says nothing".
+                # Swallowing it produced runs that ended `partial` — which
+                # here means the corpus cannot answer the question — when the
+                # real cause was an HTTP 429. Record it so the caller can
+                # tell an empty document from an unreachable one.
                 return {"n": c.get("n"), "passages": [], "proposed": 0,
-                        "read": len(docs)}
+                        "read": len(docs), "error": str(exc)[:200]}
         proposed = (data.get("passages") or [])[:4]
         good = []
         for p in proposed:
@@ -682,6 +763,13 @@ async def _extract_passages(
                 "read": len(docs)}
 
     out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
+    errors = [r.get("error") for r in out if r.get("error")]
+    if errors and not any(r.get("passages") for r in out):
+        # every extraction failed and none succeeded: infrastructure, not
+        # a judgment about the sources
+        raise RuntimeError(
+            f"passage extraction failed for all {len(out)} claims — "
+            f"first error: {errors[0]}")
     if run_id is not None:
         # The verified/proposed gap is the point of this stage: quotes that
         # did not match the source text never reach the drafter. A gap that
@@ -692,6 +780,7 @@ async def _extract_passages(
             documents_read=sum(r.get("read", 0) for r in out),
             passages_proposed=sum(r.get("proposed", 0) for r in out),
             passages_verified=sum(len(r.get("passages") or []) for r in out),
+            extraction_errors=len(errors),
         )
     return out
 
@@ -822,9 +911,16 @@ async def _argument_plan(
             "anchor documents, write the claim, bind its evidence; do not add "
             "claims beyond the plan):\n" + "\n".join(lines) + "\n\n"
         ), claims[:12]
-    except Exception:  # noqa: BLE001 — planning must never block drafting
-        _log.warning("argument plan failed for run %s; single-stage draft", run_id)
+    except json.JSONDecodeError:
+        # the planner answered, just not in the shape asked for
+        _log.warning("argument plan unparseable for run %s", run_id)
+        await _tele(run_id, "draft", plan_unparseable=True)
         return "", []
+    except Exception as exc:  # noqa: BLE001
+        # Reaching the planner failed. That is infrastructure, and returning
+        # an empty plan turns it into "the corpus supports no claims" — a
+        # semantic verdict the run then reports as its outcome.
+        raise RuntimeError(f"argument planning failed: {str(exc)[:200]}") from exc
 
 
 async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
@@ -863,8 +959,27 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # answer.
     _plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
     if not plan_claims:
+        # the planner ran and produced nothing usable: that IS a judgment
+        # about the sources, unlike a transport failure, which raises above
         raise PartialOutcome(
             "no_progress", "no argument plan could be formed from the result")
+
+    # Widen each planned claim's anchors with the documents whose own text
+    # matches it. The planner picks from summaries and tops out at the few it
+    # names, so an authority that is retrieved but not summarised in those
+    # terms is never opened.
+    async with AsyncSessionLocal() as session:
+        corpus_rows = (await session.execute(
+            select(Document.filename, Document.summary)
+            .join(ResultDocument, ResultDocument.document_id == Document.id)
+            .where(ResultDocument.result_id == parent_id)
+            .order_by(ResultDocument.rank).limit(60))).all()
+    for c in plan_claims:
+        named = [str(a) for a in (c.get("anchors") or [])]
+        extra = [d for d in _relevant_docs(str(c.get("establishes") or ""),
+                                           corpus_rows, take=4)
+                 if d not in named]
+        c["anchors"] = named + extra
 
     await _tele(run_id, "draft", started=_iso())
     extracts = await _extract_passages(sinas, plan_claims, run_id)
@@ -884,14 +999,25 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
 
 
 async def _gate_answer(
-    sinas: _Sinas, run_question: str, answer_id: uuid.UUID
-) -> tuple[bool, str, list[str]]:
+    sinas: _Sinas, run_question: str, answer_id: uuid.UUID, run_id: uuid.UUID
+) -> tuple[bool, str, list[str], list[str], list[str]]:
     """Judge whether the surviving claims still answer the question, and
     surface quality findings. Generic by construction: no claim-type
-    vocabulary, no counting floors — one holistic verdict from a stateless
-    judge. Returns (publishable, missing, issues). `publishable` is the hard
-    gate; `issues` are best-effort remediation targets that must never block
-    publication on their own."""
+    vocabulary, no counting floors — a stateless judge, per part of the
+    question.
+
+    Returns (publishable, missing, issues, correctness, uncovered).
+    `publishable` and `correctness` are the hard gate; `issues` are
+    best-effort remediation targets that must never block publication on
+    their own; `uncovered` is one entry per part of the question the claims
+    do not answer.
+
+    Everything the gate finds is returned. It used to leave some of it in a
+    module-level dict, which a later edit deleted the declaration of — so
+    every verdict raised NameError inside the try below and came back out of
+    the except as "treated as pass". The gate stopped gating and nothing
+    said so. A value that callers need is a return value.
+    """
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
@@ -935,66 +1061,90 @@ async def _gate_answer(
         "grove/answer-gate-agent",
         "QUESTION:\n" + run_question + "\n\nCLAIMS OF THE DRAFT ANSWER:\n" + claims
         + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
-        + '\n\nReply ONLY JSON: {"publishable": true|false,'
-        ' "missing": "<if not publishable: the one thing the claims fail to deliver on>",'
+        + '\n\nFirst split the QUESTION into the distinct things it asks — '
+        'a question asking what the conditions are, whether a regulation '
+        'applies, and whether a step is mandatory asks three things, not one. '
+        'Judge each separately against the claims.'
+        '\n\nReply ONLY JSON: {"publishable": true|false,'
+        ' "parts": [{"asks": "<one thing the question asks>", "covered": '
+        'true|false, "gap": "<what is missing, if not covered>"}],'
+        ' "missing": "<if not publishable: what the claims fail to deliver on>",'
         ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
         ' "tension": "<claims that contradict each other with no claim reconciling them, or null>",'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
         ' "unused_sources": ["<filename>: <why it is plainly more direct or authoritative for a point made than the source cited for it>", ...]}',
     )
+    # Only the parse is guarded. A wide try around the whole body turns a
+    # fault in this function into "the gate had no objection" — which is what
+    # happened here for three hours — so everything after the parse runs
+    # unguarded and fails the run loudly if it is broken.
     try:
         cleaned = reply.strip().strip("`").removeprefix("json").strip()
         start, end = cleaned.find("{"), cleaned.rfind("}")
         data = json.loads(cleaned[start : end + 1])
-        issues: list[str] = []
-        # Correctness defects make the answer wrong or incoherent, and must be
-        # fixed before publication. Everything else — a claim that only
-        # describes its source, a better source left uncited — is recorded and
-        # does not hold the answer back. Both used to sit in one list, so
-        # "the answer contradicts itself" carried the same weight as "you
-        # could have cited a stronger source", and shipped.
-        correctness: list[str] = []
-        seqs = [s for s in (data.get("unresponsive") or []) if isinstance(s, (int, str))]
-        if seqs:
-            issues.append(
-                "Claims " + ", ".join(str(s) for s in seqs) + " only describe their source "
-                "document; each must state what that source contributes to answering the "
-                "question, or be dropped."
-            )
-        if data.get("tension"):
-            correctness.append(
-                "Unreconciled tension: " + str(data["tension"]) + " Add a claim that "
-                "reconciles these positions (grounded in evidence), or revise them."
-            )
-        dang = [s for s in (data.get("dangling") or []) if isinstance(s, (int, str))]
-        if dang:
-            correctness.append(
-                "Claims " + ", ".join(str(s) for s in dang) + " depend on reasoning "
-                "from a claim that is no longer in the answer. Rewrite each to stand "
-                "alone (restate the reasoning it relies on, with evidence), or drop it."
-            )
-        if data.get("no_conclusion"):
-            correctness.append(
-                "The answer never draws its overall conclusion. Add a final claim "
-                "that directly answers the question, supported by the evidence "
-                "already cited."
-            )
-        for src in (data.get("unused_sources") or [])[:3]:
-            issues.append(
-                "Stronger source unused: " + str(src) + " Use it for the point it speaks "
-                "to (or keep the current citation only if it is genuinely the better fit)."
-            )
-        _gate_seqs["unresponsive"] = [int(x) for x in seqs
-                                      if str(x).lstrip("-").isdigit()]
-        _gate_seqs["dangling"] = [int(x) for x in dang
-                                  if str(x).lstrip("-").isdigit()]
-        return (bool(data.get("publishable")), str(data.get("missing") or ""),
-                issues + correctness, correctness)
-    except Exception:
-        # an unparseable verdict must never block publication of a fully
-        # validated answer — log via telemetry and treat as pass
-        return True, "(gate verdict unparseable — treated as pass)", [], []
+        if not isinstance(data, dict):
+            raise ValueError("gate verdict was not an object")
+    except Exception as exc:  # noqa: BLE001
+        # An unparseable verdict must never block publication of a fully
+        # validated answer. But treating it as a pass silently is how a
+        # broken gate looks exactly like a clean one, so it is recorded.
+        await _tele(run_id, "validate", gate_unparseable=str(exc)[:200])
+        return True, "(gate verdict unparseable — treated as pass)", [], [], []
+
+    # Coverage is judged per part. One holistic verdict let an answer
+    # addressing two of a question's three parts publish, and named one
+    # gap at a time when it failed — so revision fixed them one cycle
+    # each, or the run ran out of cycles first.
+    parts = [x for x in (data.get("parts") or []) if isinstance(x, dict)]
+    uncovered = [
+        str(x.get("gap") or x.get("asks") or "").strip()
+        for x in parts if not x.get("covered")
+    ]
+    uncovered = [u for u in uncovered if u]
+
+    issues: list[str] = []
+    # Correctness defects make the answer wrong or incoherent, and must be
+    # fixed before publication. Everything else — a claim that only
+    # describes its source, a better source left uncited — is recorded and
+    # does not hold the answer back. Both used to sit in one list, so
+    # "the answer contradicts itself" carried the same weight as "you
+    # could have cited a stronger source", and shipped.
+    correctness: list[str] = []
+    seqs = [s for s in (data.get("unresponsive") or []) if isinstance(s, (int, str))]
+    if seqs:
+        issues.append(
+            "Claims " + ", ".join(str(s) for s in seqs) + " only describe their source "
+            "document; each must state what that source contributes to answering the "
+            "question, or be dropped."
+        )
+    if data.get("tension"):
+        correctness.append(
+            "Unreconciled tension: " + str(data["tension"]) + " Add a claim that "
+            "reconciles these positions (grounded in evidence), or revise them."
+        )
+    dang = [s for s in (data.get("dangling") or []) if isinstance(s, (int, str))]
+    if dang:
+        correctness.append(
+            "Claims " + ", ".join(str(s) for s in dang) + " depend on reasoning "
+            "from a claim that is no longer in the answer. Rewrite each to stand "
+            "alone (restate the reasoning it relies on, with evidence), or drop it."
+        )
+    if data.get("no_conclusion"):
+        correctness.append(
+            "The answer never draws its overall conclusion. Add a final claim "
+            "that directly answers the question, supported by the evidence "
+            "already cited."
+        )
+    for src in (data.get("unused_sources") or [])[:3]:
+        issues.append(
+            "Stronger source unused: " + str(src) + " Use it for the point it speaks "
+            "to (or keep the current citation only if it is genuinely the better fit)."
+        )
+    # every uncovered part is a gap the answer must close, not just one
+    missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")
+    publishable = bool(data.get("publishable")) and not uncovered
+    return publishable, missing, issues + correctness, correctness, uncovered
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -1168,35 +1318,9 @@ async def _revise_answer(
 
     # passages for anything the gate said was missing
     def _anchors_for(point: str) -> list[str]:
-        """Documents that could actually contain the point, best first.
-
-        Taking the top-ranked handful is wrong when the gate names something
-        specific: on one question it asked for the answer to be grounded in
-        Les Laboratoires Servier, which sits at rank 26, and the reviser went
-        looking through ranks 1-8. It could not have found it. Rank orders the
-        whole result for the question; it does not order documents for one
-        missing point.
-        """
-        terms = {w.lower().strip(".,;:()'\"")
-                 for w in point.split() if len(w) > 4}
-        hay = {fn: (fn + " " + (summary or "")).lower()
-               for fn, summary in corpus_rows if fn}
-        # Weight each term by how rare it is HERE. The gate writes prose, so
-        # its sentence carries "cases", "question", "specific" alongside the
-        # one word that matters. Counting raw hits let the noise outvote
-        # "Servier", which appears in two documents and is the whole point.
-        df = {t: sum(1 for h in hay.values() if t in h) for t in terms}
-        scored = []
-        for pos, (fn, _summary) in enumerate(corpus_rows):
-            if not fn:
-                continue
-            score = sum(1.0 / df[t] for t in terms
-                        if df.get(t) and t in hay[fn])
-            if score:
-                scored.append((round(score, 4), -pos, fn))
-        scored.sort(reverse=True)
-        picked = [fn for _, _, fn in scored[:6]]
-        # always keep a couple of top-ranked documents for general context
+        """Documents that could contain this point, best first, plus a couple
+        of top-ranked ones for context. Same matcher planning uses."""
+        picked = _relevant_docs(point, corpus_rows, take=6)
         return picked + [fn for fn in corpus[:4] if fn not in picked]
 
     fresh = ""
@@ -1324,14 +1448,12 @@ async def _stage_validate_publish(
     round_no = 0
     while True:
         round_no += 1
-        # NOTE: the per-run spend ceiling is not enforced here any more.
-        # It measured one Sinas chat, and chatless drafting has none;
-        # llm_usage carries no run id, so spend cannot be attributed to a run
-        # without over-counting concurrent ones, which would kill healthy
-        # runs. Calling the old helper with no chat returned 0.0 every time —
-        # a cap in name only. GROVE_RUN_COST_CAP_USD is inert until usage
-        # rows carry a run id; the round and gate-cycle bounds are what limit
-        # a run's cost today.
+        spent = await _run_cost_usd(run_id)
+        if spent > RUN_COST_CAP_USD:
+            raise PartialOutcome(
+                "budget_ceiling",
+                f"run spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) "
+                f"in validation round {round_no}")
         if round_no > MAX_VALIDATE_ROUNDS:
             converging = (len(failed_history) >= 2
                           and failed_history[-1] < failed_history[-2])
@@ -1339,13 +1461,23 @@ async def _stage_validate_publish(
                 break
             await _tele(run_id, "validate", extended_to_round=round_no)
         async with AsyncSessionLocal() as session:
-            verdict = await validate_answer_evidence(session, caller, answer_id, pending_only=True)
+            verdict = await validate_answer_evidence(session, caller, answer_id,
+                                              pending_only=True, run_id=run_id)
         failed_history.append(len(verdict["failed"]))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
+            "overreaching": len(verdict.get("overreaching") or []),
         }})
-        if not verdict["failed"] and not verdict["errors"]:
+        # A claim whose every span passes can still assert more than those
+        # spans establish — "the whole period" on passages about a second
+        # infringement. That is what the reviewers marked as partially
+        # supported, and it was found here every round and then ignored:
+        # overreach only reached the reviser through the branch below, which
+        # a clean span-level result skips entirely. It is a defect in the
+        # answer, so it holds the answer back like any other.
+        over = verdict.get("overreaching") or []
+        if not verdict["failed"] and not verdict["errors"] and not over:
             async with AsyncSessionLocal() as session:
                 pending = (
                     await session.execute(
@@ -1358,8 +1490,8 @@ async def _stage_validate_publish(
             if pending is None:
                 async with AsyncSessionLocal() as session:
                     question = (await session.get(QueryRun, run_id)).question
-                ok, missing, issues, correctness = await _gate_answer(
-                    sinas, question, answer_id)
+                ok, missing, issues, correctness, uncovered = await _gate_answer(
+                    sinas, question, answer_id, run_id)
                 if ok and not correctness and (not issues or gate_cycles <= 0):
                     # quality issues never block publication on their own —
                     # unremediated ones are recorded, not fatal
@@ -1376,7 +1508,8 @@ async def _stage_validate_publish(
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
                 await _revise_answer(
                     sinas, run_id, answer_id, question,
-                    correctness + issues, [missing] if missing else [],
+                    correctness + issues,
+                    uncovered or ([missing] if missing else []),
                     last_attempt=gate_cycles <= 1)
                 return await _stage_validate_publish(
                     run_id, sinas, gate_cycles - 1)
@@ -1384,8 +1517,9 @@ async def _stage_validate_publish(
         fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
               for f in verdict["failed"]]
         fb += [f"Claim {o.get('claim_sequence')} asserts more than its "
-               f"passages establish: {o.get('uncovered')}"
-               for o in (verdict.get("overreaching") or [])]
+               f"passages establish: {o.get('uncovered')}. Narrow it to what "
+               f"the passages say, or bind evidence that carries the rest."
+               for o in over]
         if fb and await _revise_answer(sinas, run_id, answer_id, question_text, fb):
             continue
         break  # revision produced nothing usable; drop below
@@ -1435,7 +1569,8 @@ async def _stage_validate_publish(
                     dropped_detail=sorted(dropped, key=lambda d: d["sequence"]))
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
-    ok, missing, issues, correctness = await _gate_answer(sinas, question, answer_id)
+    ok, missing, issues, correctness, uncovered = await _gate_answer(
+        sinas, question, answer_id, run_id)
     if ok and not correctness and (not issues or gate_cycles <= 0):
         tele = {"quality_issues": issues} if issues else {}
         await _publish_answer(
@@ -1454,7 +1589,8 @@ async def _stage_validate_publish(
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
     await _revise_answer(sinas, run_id, answer_id, question,
-                         correctness + issues, [missing] if missing else [],
+                         correctness + issues,
+                         uncovered or ([missing] if missing else []),
                          last_attempt=gate_cycles <= 1)
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 
@@ -1587,7 +1723,7 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
 async def run_pipeline(run_id: uuid.UUID) -> None:
     """Drive one QueryRun to published/failed. Designed to be launched as an
     asyncio background task; safe to re-launch on a failed run (resume)."""
-    sinas = _Sinas()
+    sinas = _Sinas(run_id=run_id)
     await _mark(run_id, started_at=_now(), error=None)
     async with AsyncSessionLocal() as session:
         mode = (await session.get(QueryRun, run_id)).mode

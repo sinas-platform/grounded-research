@@ -260,3 +260,40 @@ async def test_judge_echoing_name_strings_still_parses(monkeypatch):
     assert report["rejected"] == 1
     assert m1.status == STATUS_ACTIVE
     assert m2.status == STATUS_REJECTED
+
+
+# ── claim narrowing must return a claim, never a message about the task ─────
+# A rewriter given no passages answers "I need to see the evidence…" — and
+# that text was persisted as a claim, reaching a published answer.
+
+def test_rewriter_replies_that_are_not_claims_are_rejected():
+    from app.services.query_runner import _narrow_overreaching  # noqa: F401
+    import app.services.query_runner as qr
+    import inspect
+
+    src = inspect.getsource(qr._narrow_overreaching)
+    assert "_is_a_claim" in src, "narrowing must screen the reply"
+    assert "PASSAGES" in src, "the rewriter must be given the evidence"
+
+    # exercise the screen itself
+    ns: dict = {}
+    fn_src = src[src.index("    def _is_a_claim"):]
+    fn_src = fn_src[:fn_src.index("\n    async def one")]
+    exec("\n".join(l[4:] for l in fn_src.splitlines()), ns)
+    is_a_claim = ns["_is_a_claim"]
+
+    for bad in [
+        "I need to see the evidence/spans you're referring to in order to rewrite.",
+        "I don't see the passages. Could you please provide the working document set?",
+        "To rewrite this claim accurately I would need the underlying documents.",
+        "Which passages did you mean?",
+        "short",
+    ]:
+        assert not is_a_claim(bad), bad
+    for good in [
+        "The Commission's processing of personal data during an inspection is "
+        "governed by Regulation (EU) 2018/1725, not the GDPR.",
+        "Article 20(4) of Regulation 1/2003 requires the inspection decision to "
+        "state its subject matter and purpose.",
+    ]:
+        assert is_a_claim(good), good

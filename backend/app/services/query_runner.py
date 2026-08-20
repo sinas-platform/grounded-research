@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.auth import CallerIdentity
 from app.config import get_settings
@@ -78,6 +78,14 @@ class PartialOutcome(Exception):
         self.cause = cause
         self.explanation = explanation
         super().__init__(f"{cause}: {explanation}")
+
+
+def _domain_article() -> str:
+    """"a legal " / "an " — deployment says what kind of corpus this is."""
+    d = get_settings().grove_domain.strip()
+    if not d:
+        return "an "
+    return f"an {d} " if d[0].lower() in "aeiou" else f"a {d} "
 
 
 def _now() -> datetime:
@@ -679,7 +687,7 @@ async def _extract_passages(
 
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
-    question: str, extracts: list[dict]
+    question: str, extracts: list[dict], append: bool = False,
 ) -> int:
     """Inverted split, writing half: one tool-less Sonnet call drafts all
     claims from the verified extracts; the runner persists claims and
@@ -697,7 +705,8 @@ async def _draft_from_extracts(
         return 0
     reply = await sinas.invoke(
         "grove/retrieval-planner-agent",
-        "Draft the claims of a legal answer from the VERIFIED PASSAGES below "
+        f"Draft the claims of {_domain_article()}answer from the VERIFIED "
+        "PASSAGES below "
         "— use nothing else; every claim must be supported entirely by the "
         "passages you cite for it. Skip any planned claim whose passages are "
         "insufficient. The final claim states the overall conclusion. Reply "
@@ -711,7 +720,13 @@ async def _draft_from_extracts(
     claims = data.get("claims") or []
     written = 0
     async with AsyncSessionLocal() as session:
-        for i, c in enumerate(claims[:14], start=1):
+        start_seq = 1
+        if append:
+            start_seq = ((await session.execute(
+                select(func.max(AnswerClaim.sequence))
+                .where(AnswerClaim.answer_id == answer_id)
+            )).scalar() or 0) + 1
+        for i, c in enumerate(claims[:14], start=start_seq):
             text_ = str(c.get("text") or "").strip()
             if not text_:
                 continue
@@ -1092,25 +1107,66 @@ async def _narrow_overreaching(
     if not overreaching:
         return 0
 
+    async def _passages_for(cid: uuid.UUID) -> str:
+        """The claim's own evidence, as the rewriter must see it — without the
+        passages there is nothing to narrow the claim TO, and the model
+        correctly answers by asking for them."""
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(ClaimEvidence, DocumentVersion.content_md, Document.filename)
+                .join(Document, Document.id == ClaimEvidence.document_id)
+                .join(DocumentVersion,
+                      DocumentVersion.id == Document.current_version_id)
+                .where(ClaimEvidence.claim_id == cid)
+            )).all()
+        out = []
+        for ev, content, fn in rows[:6]:
+            lf = (ev.span or {}).get("line_from")
+            lt = (ev.span or {}).get("line_to")
+            if not content or lf is None:
+                continue
+            lines = content.splitlines()
+            txt = "\n".join(lines[max(0, int(lf) - 1):int(lt or lf)])[:1500]
+            out.append(f"[{fn} lines {lf}-{lt}]\n{txt}")
+        return "\n\n".join(out)
+
+    def _is_a_claim(text: str) -> bool:
+        """The rewriter must return a claim, not a message about the task."""
+        low = text.lower()
+        if len(text) < 30 or text.endswith("?"):
+            return False
+        openers = ("i need", "i cannot", "i can't", "could you", "please provide",
+                   "to rewrite", "i don't see", "i do not see", "here is the",
+                   "sure,", "certainly")
+        return not any(low.startswith(o) for o in openers) and " you " not in low[:120]
+
     async def one(item: dict) -> tuple[uuid.UUID, str] | None:
+        cid = item.get("claim_id")
+        if not cid:
+            return None
+        passages = await _passages_for(uuid.UUID(str(cid)))
+        if not passages:
+            return None
         try:
             reply = await sinas.invoke(
                 "grove/answer-gate-agent",
-                "Rewrite the CLAIM so it asserts only what the evidence "
-                "establishes. Remove the propositions listed as UNCOVERED — "
+                "Rewrite the CLAIM so it asserts only what the PASSAGES "
+                "establish. Remove the propositions listed as UNCOVERED — "
                 "drop them outright, or narrow the wording so the claim no "
-                "longer depends on them. Keep the legal substance that is "
-                "supported, keep the same voice, do not add anything, and do "
-                "not hedge with 'appears to' or 'may'. Reply with ONLY the "
-                "rewritten claim.\n\nCLAIM: " + str(item.get("claim_text") or "")
-                + "\n\nUNCOVERED: " + str(item.get("uncovered") or ""),
+                "longer depends on them. Keep the supported substance, keep "
+                "the same voice, add nothing, and do not hedge with 'appears "
+                "to' or 'may'. Reply with ONLY the rewritten claim sentence — "
+                "no preamble, no commentary, no questions.\n\nCLAIM: "
+                + str(item.get("claim_text") or "")
+                + "\n\nUNCOVERED: " + str(item.get("uncovered") or "")
+                + "\n\nPASSAGES:\n" + passages,
             )
         except Exception:  # noqa: BLE001
             return None
-        text = (reply or "").strip().strip('"')
-        if len(text) < 30 or not item.get("claim_id"):
+        text = (reply or "").strip().strip('"').strip()
+        if not _is_a_claim(text):
             return None
-        return uuid.UUID(str(item["claim_id"])), text[:4000]
+        return uuid.UUID(str(cid)), text[:4000]
 
     results = [r for r in await asyncio.gather(*(one(i) for i in overreaching)) if r]
     if results:
@@ -1127,6 +1183,143 @@ async def _narrow_overreaching(
                     for i in overreaching[:12]
                 ])
     return len(results)
+
+
+
+async def _remediate(
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
+    failed: list[dict], gate_issues: list[str] | None = None,
+) -> int:
+    """One remediation pass over ALL of a round's feedback.
+
+    A claim whose span does not support it is not necessarily wrong — more
+    often the extractor bound the wrong passage, a case caption instead of the
+    holding. So rather than delete the claim, go back to the documents and
+    look for a passage that does support it, verified verbatim like any other.
+    Only a claim for which no such passage exists is dropped.
+
+    Feedback is collected for the whole round and applied in one pass, so a
+    claim is not reworked three times against three separate verdicts.
+    """
+    if not failed:
+        return 0
+
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        parent_id = run.parent_result_id
+        claims = {
+            str(c.id): c.claim_text
+            for c in (await session.execute(
+                select(AnswerClaim).where(AnswerClaim.answer_id == answer_id)
+            )).scalars()
+        }
+        # the documents this answer may draw on, best-ranked first
+        docs = [
+            fn for (fn,) in (await session.execute(
+                select(Document.filename)
+                .join(ResultDocument, ResultDocument.document_id == Document.id)
+                .where(ResultDocument.result_id == parent_id)
+                .order_by(ResultDocument.rank)
+                .limit(25)
+            )).all() if fn
+        ]
+    if not docs:
+        return 0
+
+    # one extraction task per failed claim, against the same document set
+    targets: dict[str, str] = {}
+    for f in failed:
+        cid = str(f.get("claim_id") or "")
+        if cid and cid in claims:
+            targets[cid] = claims[cid]
+    if not targets:
+        return 0
+
+    plan_claims = [
+        {"n": i, "establishes": text, "anchors": docs[:6],
+         "hint": "find the passage that states this; a case caption or party "
+                 "list is not a holding"}
+        for i, (cid, text) in enumerate(targets.items(), start=1)
+    ]
+    extracts = await _extract_passages(sinas, plan_claims, run_id)
+
+    rebound = 0
+    async with AsyncSessionLocal() as session:
+        for (cid, _text), ex in zip(targets.items(), extracts):
+            passages = ex.get("passages") or []
+            if not passages:
+                continue  # nothing found; the drop path below will take it
+            await session.execute(
+                ClaimEvidence.__table__.delete().where(
+                    ClaimEvidence.claim_id == uuid.UUID(cid),
+                    ClaimEvidence.validated.is_(False),
+                )
+            )
+            for pas in passages[:3]:
+                doc = (await session.execute(
+                    select(Document).where(Document.filename == pas["filename"])
+                )).scalars().first()
+                if doc is None:
+                    continue
+                session.add(ClaimEvidence(
+                    claim_id=uuid.UUID(cid), document_id=doc.id,
+                    span={"line_from": pas["line_from"], "line_to": pas["line_to"],
+                          "char_from": None, "char_to": None, "note": None},
+                    stance="supports", validated=False,
+                ))
+                rebound += 1
+        await session.commit()
+
+    await _tele(run_id, "validate",
+                remediated_claims=len(targets), spans_rebound=rebound,
+                gate_issues_seen=len(gate_issues or []))
+    return rebound
+
+
+
+async def _remediate_gate(
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
+    question: str, missing: str, issues: list[str],
+) -> int:
+    """Answer the gate's own feedback: cover what is missing, and use the
+    stronger sources it named. Both are drafting work, so they need passages
+    first — extracted and verified like any other, then drafted as additional
+    claims appended to the answer."""
+    wanted = [missing] if missing else []
+    wanted += [i for i in (issues or []) if i]
+    if not wanted:
+        return 0
+
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        docs = [
+            fn for (fn,) in (await session.execute(
+                select(Document.filename)
+                .join(ResultDocument, ResultDocument.document_id == Document.id)
+                .where(ResultDocument.result_id == run.parent_result_id)
+                .order_by(ResultDocument.rank).limit(30)
+            )).all() if fn
+        ]
+    if not docs:
+        return 0
+
+    # A "stronger source unused" issue names its file; prefer those documents.
+    named = [d for d in docs if any(d in w for w in wanted)]
+    anchors = (named + docs)[:8]
+
+    plan_claims = [
+        {"n": i, "establishes": w[:600], "anchors": anchors,
+         "hint": "extract the passage that establishes this point; a case "
+                 "caption or party list is not a holding"}
+        for i, w in enumerate(wanted[:6], start=1)
+    ]
+    extracts = await _extract_passages(sinas, plan_claims, run_id)
+    added = await _draft_from_extracts(
+        run_id, answer_id, sinas, question, extracts, append=True)
+    await _tele(run_id, "validate",
+                gate_remediation={"points": len(wanted), "claims_added": added,
+                                  "named_sources": named[:5]})
+    return added
 
 
 async def _stage_validate_publish(
@@ -1146,8 +1339,6 @@ async def _stage_validate_publish(
     # claims that could not have changed. Judge once, then drop what cannot
     # be supported, which is where the loop ends up regardless.
     can_remediate = bool(chat_id)
-    # A redraft cycle without a drafter is the same dead end.
-    gate_cycles = gate_cycles if can_remediate else 0
 
     async def _await_chat_quiescence() -> None:
         """Never judge while the drafter is mid-write: require the synthesis
@@ -1208,6 +1399,11 @@ async def _stage_validate_publish(
                         "coverage",
                         f"the validated claims no longer answer the question — {missing}")
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
+                if not can_remediate:
+                    await _remediate_gate(sinas, run_id, answer_id, question,
+                                          missing, issues)
+                    return await _stage_validate_publish(
+                        run_id, sinas, gate_cycles - 1)
                 sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
                 t0 = asyncio.get_event_loop().time()
                 saw = False
@@ -1224,7 +1420,11 @@ async def _stage_validate_publish(
             for f in verdict["failed"]
         ) or "(transport errors only — rebind those spans)"
         if not can_remediate:
-            break  # nothing can rework these rows; drop them below
+            # No drafting chat, so remediate directly: re-extract passages for
+            # the failed claims and rebind. Bounded by the same round budget.
+            if await _remediate(sinas, run_id, answer_id, verdict["failed"]):
+                continue
+            break  # nothing better exists in the sources; drop below
         sinas.send_detached(
             chat_id,
             "Validation results. Apply the TWO-STRIKES rule to these failed rows "
@@ -1303,6 +1503,9 @@ async def _stage_validate_publish(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
+    if not can_remediate:
+        await _remediate_gate(sinas, run_id, answer_id, question, missing, issues)
+        return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
     prefix = (
         "Several claims were dropped as unverifiable.\n" if failing_ids else ""
     )

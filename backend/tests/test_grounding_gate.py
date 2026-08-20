@@ -262,38 +262,56 @@ async def test_judge_echoing_name_strings_still_parses(monkeypatch):
     assert m2.status == STATUS_REJECTED
 
 
-# ── claim narrowing must return a claim, never a message about the task ─────
-# A rewriter given no passages answers "I need to see the evidence…" — and
-# that text was persisted as a claim, reaching a published answer.
+# ── a revision reply is claims or it is nothing ─────────────────────────────
+# The reviser returns the corrected claim set as JSON. Anything that is not a
+# claim object cannot become a claim — refusals, questions and verdicts on the
+# evidence fail structurally, not because their wording was recognised.
 
-def test_rewriter_replies_that_are_not_claims_are_rejected():
-    from app.services.query_runner import _narrow_overreaching  # noqa: F401
-    import app.services.query_runner as qr
-    import inspect
 
-    src = inspect.getsource(qr._narrow_overreaching)
-    assert "_is_a_claim" in src, "narrowing must screen the reply"
-    assert "PASSAGES" in src, "the rewriter must be given the evidence"
+def test_only_patch_operations_survive_parsing():
+    from app.services.query_runner import _parse_patch
 
-    # exercise the screen itself
-    ns: dict = {}
-    fn_src = src[src.index("    def _is_a_claim"):]
-    fn_src = fn_src[:fn_src.index("\n    async def one")]
-    exec("\n".join(l[4:] for l in fn_src.splitlines()), ns)
-    is_a_claim = ns["_is_a_claim"]
+    good = (
+        '{"revise": [{"seq": 4, "text": "Regulation (EU) 2018/1725, not the '
+        'GDPR, governs the Commission\'s processing of personal data during '
+        'an inspection.", "evidence": [{"filename": "32018R1725.md", '
+        '"line_from": 40, "line_to": 52}]}], "drop": [9], "add": []}'
+    )
+    patch = _parse_patch(good)
+    assert patch and len(patch["revise"]) == 1 and patch["drop"] == [9]
 
-    for bad in [
+    for not_a_claim in [
         "I need to see the evidence/spans you're referring to in order to rewrite.",
-        "I don't see the passages. Could you please provide the working document set?",
-        "To rewrite this claim accurately I would need the underlying documents.",
-        "Which passages did you mean?",
-        "short",
+        "The passage provided is only a cover/header from the judgment and does "
+        "not contain the substantive holdings needed to support the claim.",
+        "Could you please provide the working document set?",
+        "",
+        "{}",
+        '{"revise": [], "drop": [], "add": []}',
+        # shaped like an operation but carries no citable span
+        '{"revise": [{"seq": 2, "text": "The Commission must protect personal '
+        'data during an inspection under the regime.", "evidence": []}]}',
+        # span without a document
+        '{"add": [{"text": "The Commission must protect personal data during an '
+        'inspection.", "evidence": [{"line_from": 4, "line_to": 9}]}]}',
     ]:
-        assert not is_a_claim(bad), bad
-    for good in [
-        "The Commission's processing of personal data during an inspection is "
-        "governed by Regulation (EU) 2018/1725, not the GDPR.",
-        "Article 20(4) of Regulation 1/2003 requires the inspection decision to "
-        "state its subject matter and purpose.",
-    ]:
-        assert is_a_claim(good), good
+        assert _parse_patch(not_a_claim) is None, not_a_claim[:60]
+
+
+def test_revision_only_touches_the_claims_the_patch_names():
+    """Re-judging claims the revision did not change was the loop's cost. A
+    patch names what to revise, drop and add; everything else keeps its row,
+    its spans and its verdicts, because it is never rebuilt."""
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._revise_answer)
+    # operations are applied by name, not by rebuilding the answer
+    for op in ('patch["drop"]', 'patch["revise"]', 'patch["add"]'):
+        assert op in src, op
+    # the whole-answer replacement is gone
+    assert "AnswerClaim.id.in_(old_ids)" not in src
+    # only revised claims lose their evidence (it is re-bound)
+    revise_block = src[src.index('for item in patch["revise"]'):
+                       src.index('if patch["add"]')]
+    assert "ClaimEvidence.__table__.delete()" in revise_block

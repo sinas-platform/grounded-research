@@ -60,6 +60,11 @@ EFFORT_GATE_CYCLES = {"low": 2, "medium": 3, "high": 5}
 ANSWER_GATE_CYCLES = EFFORT_GATE_CYCLES["medium"]
 REMEDIATION_WINDOW_S = 8 * 60
 MIN_CLAIMS = 6
+# The synthesis playbook targets about 12 claims and says not to exceed 12.
+# Remediation appends, and with several cycles it walked straight past that —
+# one answer reached 29 claims. Additions stop here; the gate can still have
+# claims dropped or rewritten when it objects.
+MAX_CLAIMS = 14
 # Hard per-run spend ceiling in USD, summed over the run's synthesis chat
 # (which also carries remediation traffic — empirically where runaway spend
 # lives; run 3d7f39d3 burned $23.81 there hunting unanchorable evidence).
@@ -695,6 +700,7 @@ async def _extract_passages(
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
     question: str, extracts: list[dict], append: bool = False,
+    cap: int | None = None,
 ) -> int:
     """Inverted split, writing half: one tool-less Sonnet call drafts all
     claims from the verified extracts; the runner persists claims and
@@ -733,7 +739,7 @@ async def _draft_from_extracts(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id)
             )).scalar() or 0) + 1
-        for i, c in enumerate(claims[:14], start=start_seq):
+        for i, c in enumerate(claims[:(cap or 14)], start=start_seq):
             text_ = str(c.get("text") or "").strip()
             if not text_:
                 continue
@@ -867,12 +873,22 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
                     await _tele(run_id, "draft", completed=_iso(), claims=n)
                     return answer_id
                 if DRAFT_MODE == "extract":
-                    # strict: a thin extract draft becomes an honest partial,
-                    # never a silent fallback onto expensive chat drafting
+                    if n:
+                        # A thin draft is not a dead end any more. This guard
+                        # predates remediation: it fired before validation ran,
+                        # so a run that drafted four good claims died instead
+                        # of letting the gate ask for the rest. The gate still
+                        # refuses to publish an answer that does not answer the
+                        # question, so nothing thin gets through — it just gets
+                        # a chance to grow first.
+                        await _tele(run_id, "draft", completed=_iso(), claims=n,
+                                    thin=True, minimum=MIN_CLAIMS)
+                        _log.info("run %s drafted %s claims (below %s) — "
+                                  "continuing to validation", run_id, n, MIN_CLAIMS)
+                        return answer_id
                     raise PartialOutcome(
                         "no_progress",
-                        f"extract drafting produced only {n} claims "
-                        f"(minimum {MIN_CLAIMS})")
+                        "extract drafting produced no claims at all")
                 _log.warning(
                     "extract-mode drafted only %s claims for run %s; "
                     "falling back to chat drafting", n, run_id)
@@ -1116,256 +1132,255 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
     await _tele(run_id, "validate", published=_iso(), **tele)
 
 
-async def _narrow_overreaching(
-    sinas: _Sinas, run_id: uuid.UUID, overreaching: list[dict]
-) -> int:
-    """Rewrite claims that assert more than their evidence carries.
+def _spans_of(obj: dict) -> list[dict]:
+    """Citable spans only: a filename and a line number, or it is not one."""
+    return [
+        {"filename": str(e["filename"]), "line_from": int(e["line_from"]),
+         "line_to": int(e.get("line_to") or e["line_from"])}
+        for e in (obj.get("evidence") or [])
+        if isinstance(e, dict) and e.get("filename")
+        and str(e.get("line_from", "")).lstrip("-").isdigit()
+    ]
 
-    Every span passed, so nothing here is unsourced — the claim simply says
-    more than the passages establish: a figure, a date, an attribution, or a
-    generalisation across authorities that no passage supports. Expert review
-    of 126 claims found 57 in exactly this state. Dropping them all would gut
-    the answer; the right move is to say only what the sources say, so the
-    claim is rewritten to its supported core and keeps its evidence.
+
+# An abstention says, in the answer, that the sources do not settle a point.
+# It carries no evidence, so it is the one claim the faithfulness machinery
+# cannot check — which is why it is allowed only on the last revision, capped,
+# and still judged by the gate.
+MAX_ABSTENTIONS = 2
+
+
+def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
+    """A revision is a patch: which claims to rewrite, drop and add.
+
+    The guard is structural. A rewritten claim needs a sequence number, text
+    and at least one citable span; an added claim needs text and a span. A
+    reply that is prose, a refusal, or a verdict on the evidence yields no
+    operations and changes nothing — nothing is decided by matching words.
     """
-    if not overreaching:
-        return 0
-
-    async def _passages_for(cid: uuid.UUID) -> str:
-        """The claim's own evidence, as the rewriter must see it — without the
-        passages there is nothing to narrow the claim TO, and the model
-        correctly answers by asking for them."""
-        async with AsyncSessionLocal() as session:
-            rows = (await session.execute(
-                select(ClaimEvidence, DocumentVersion.content_md, Document.filename)
-                .join(Document, Document.id == ClaimEvidence.document_id)
-                .join(DocumentVersion,
-                      DocumentVersion.id == Document.current_version_id)
-                .where(ClaimEvidence.claim_id == cid)
-            )).all()
-        out = []
-        for ev, content, fn in rows[:6]:
-            lf = (ev.span or {}).get("line_from")
-            lt = (ev.span or {}).get("line_to")
-            if not content or lf is None:
-                continue
-            lines = content.splitlines()
-            txt = "\n".join(lines[max(0, int(lf) - 1):int(lt or lf)])[:1500]
-            out.append(f"[{fn} lines {lf}-{lt}]\n{txt}")
-        return "\n\n".join(out)
-
-    def _is_a_claim(text: str) -> bool:
-        """The rewriter must return a claim, not a message about the task."""
-        low = text.lower()
-        if len(text) < 30 or text.endswith("?"):
-            return False
-        openers = ("i need", "i cannot", "i can't", "could you", "please provide",
-                   "to rewrite", "i don't see", "i do not see", "here is the",
-                   "sure,", "certainly")
-        return not any(low.startswith(o) for o in openers) and " you " not in low[:120]
-
-    async def one(item: dict) -> tuple[uuid.UUID, str] | None:
-        cid = item.get("claim_id")
-        if not cid:
+    try:
+        cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start < 0 or end <= start:
             return None
-        passages = await _passages_for(uuid.UUID(str(cid)))
-        if not passages:
-            return None
-        try:
-            reply = await sinas.invoke(
-                "grove/answer-gate-agent",
-                "Rewrite the CLAIM so it asserts only what the PASSAGES "
-                "establish. Remove the propositions listed as UNCOVERED — "
-                "drop them outright, or narrow the wording so the claim no "
-                "longer depends on them. Keep the supported substance, keep "
-                "the same voice, add nothing, and do not hedge with 'appears "
-                "to' or 'may'. Reply with ONLY the rewritten claim sentence — "
-                "no preamble, no commentary, no questions.\n\nCLAIM: "
-                + str(item.get("claim_text") or "")
-                + "\n\nUNCOVERED: " + str(item.get("uncovered") or "")
-                + "\n\nPASSAGES:\n" + passages,
-            )
-        except Exception:  # noqa: BLE001
-            return None
-        text = (reply or "").strip().strip('"').strip()
-        if not _is_a_claim(text):
-            return None
-        return uuid.UUID(str(cid)), text[:4000]
+        data = json.loads(cleaned[start : end + 1])
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, dict):
+        return None
 
-    results = [r for r in await asyncio.gather(*(one(i) for i in overreaching)) if r]
-    if results:
-        async with AsyncSessionLocal() as session:
-            for cid, text in results:
-                claim = await session.get(AnswerClaim, cid)
-                if claim is not None:
-                    claim.claim_text = text
-            await session.commit()
-    await _tele(run_id, "validate",
-                overreaching=len(overreaching), narrowed=len(results),
-                overreach_detail=[
-                    {"seq": i.get("claim_sequence"), "uncovered": i.get("uncovered")}
-                    for i in overreaching[:12]
-                ])
-    return len(results)
+    revise = []
+    for c in (data.get("revise") or []):
+        if not isinstance(c, dict):
+            continue
+        text = str(c.get("text") or "").strip()
+        spans = _spans_of(c)
+        if len(text) >= 30 and spans and str(c.get("seq", "")).lstrip("-").isdigit():
+            revise.append({"seq": int(c["seq"]), "text": text, "evidence": spans})
 
+    add = []
+    abstentions = 0
+    for c in (data.get("add") or []):
+        if not isinstance(c, dict):
+            continue
+        text = str(c.get("text") or "").strip()
+        spans = _spans_of(c)
+        if len(text) < 30:
+            continue
+        if spans:
+            add.append({"text": text, "type": c.get("type"), "evidence": spans})
+        elif (allow_abstention
+              and str(c.get("type") or "").lower() == "abstention"
+              and abstentions < MAX_ABSTENTIONS):
+            abstentions += 1
+            add.append({"text": text, "type": "abstention", "evidence": []})
+
+    drop = [int(x) for x in (data.get("drop") or [])
+            if str(x).lstrip("-").isdigit()]
+
+    if not (revise or add or drop):
+        return None
+    return {"revise": revise, "add": add, "drop": drop}
 
 
-async def _remediate(
-    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
-    failed: list[dict], gate_issues: list[str] | None = None,
+async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
+    for sp in spans[:4]:
+        doc = (await session.execute(
+            select(Document).where(Document.filename == sp["filename"]))
+        ).scalars().first()
+        if doc is None:
+            continue
+        session.add(ClaimEvidence(
+            claim_id=claim_id, document_id=doc.id,
+            document_version_id=doc.current_version_id,
+            span={"line_from": sp["line_from"], "line_to": sp["line_to"],
+                  "char_from": None, "char_to": None, "note": None},
+            validated=False))
+
+
+async def _revise_answer(
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID, question: str,
+    feedback: list[str], extra_points: list[str] | None = None,
+    last_attempt: bool = False,
 ) -> int:
-    """One remediation pass over ALL of a round's feedback.
+    """Rewrite the whole answer from its evidence and the round's feedback.
 
-    A claim whose span does not support it is not necessarily wrong — more
-    often the extractor bound the wrong passage, a case caption instead of the
-    holding. So rather than delete the claim, go back to the documents and
-    look for a passage that does support it, verified verbatim like any other.
-    Only a claim for which no such passage exists is dropped.
+    One operation replaces what used to be three — narrowing an overreaching
+    claim, rebinding a failed one, and appending claims the gate asked for.
+    They were all additive and all returned free text, so an answer could grow
+    to 29 claims, could never be made coherent by removing something, and a
+    model's reply about the task could land in the answer as a claim.
 
-    Feedback is collected for the whole round and applied in one pass, so a
-    claim is not reworked three times against three separate verdicts.
+    Here the reviser is given every current claim with its passages, plus any
+    newly extracted passages for points the gate raised, and returns the
+    corrected claim set as JSON. The set REPLACES the old one, so revising,
+    dropping and adding are the same operation. A reply that is not a claim
+    object is not a claim: no text matching decides it.
     """
-    if not failed:
+    if not feedback:
         return 0
 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         parent_id = run.parent_result_id
-        claims = {
-            str(c.id): c.claim_text
-            for c in (await session.execute(
-                select(AnswerClaim).where(AnswerClaim.answer_id == answer_id)
-            )).scalars()
-        }
-        # the documents this answer may draw on, best-ranked first
-        docs = [
-            fn for (fn,) in (await session.execute(
-                select(Document.filename)
-                .join(ResultDocument, ResultDocument.document_id == Document.id)
-                .where(ResultDocument.result_id == parent_id)
-                .order_by(ResultDocument.rank)
-                .limit(25)
-            )).all() if fn
-        ]
-    if not docs:
+        rows = (await session.execute(
+            select(AnswerClaim, ClaimEvidence, Document.filename,
+                   DocumentVersion.content_md)
+            .outerjoin(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
+            .outerjoin(Document, Document.id == ClaimEvidence.document_id)
+            .outerjoin(DocumentVersion,
+                       DocumentVersion.id == Document.current_version_id)
+            .where(AnswerClaim.answer_id == answer_id)
+            .order_by(AnswerClaim.sequence)
+        )).all()
+        corpus = [fn for (fn,) in (await session.execute(
+            select(Document.filename)
+            .join(ResultDocument, ResultDocument.document_id == Document.id)
+            .where(ResultDocument.result_id == parent_id)
+            .order_by(ResultDocument.rank).limit(30))).all() if fn]
+
+    # current claims, each with the passages already bound to it. A claim the
+    # patch does not name keeps its row, its spans and its verdicts — it is
+    # never rebuilt, so it is never re-judged.
+    by_claim: dict[int, dict] = {}
+    for claim, ev, fn, content in rows:
+        entry = by_claim.setdefault(claim.sequence, {"text": claim.claim_text,
+                                                     "passages": []})
+        if ev is None or not content or (ev.span or {}).get("line_from") is None:
+            continue
+        lf, lt = int(ev.span["line_from"]), int(ev.span.get("line_to") or ev.span["line_from"])
+        body = "\n".join(content.splitlines()[max(0, lf - 1):lt])[:1200]
+        entry["passages"].append(f"[{fn} lines {lf}-{lt}]\n{body}")
+
+    current = "\n\n".join(
+        f"CLAIM {seq}: {c['text']}\n" + ("\n".join(c["passages"]) or "(no passage)")
+        for seq, c in sorted(by_claim.items()))
+
+    # passages for anything the gate said was missing
+    fresh = ""
+    if extra_points and corpus:
+        plan = [{"n": i, "establishes": pt[:600], "anchors": corpus[:8],
+                 "hint": "extract the passage that states this; a case caption "
+                         "or party list is not a holding"}
+                for i, pt in enumerate(extra_points[:5], start=1)]
+        for ex in await _extract_passages(sinas, plan, run_id):
+            for pas in (ex.get("passages") or [])[:3]:
+                fresh += (f"\n[{pas['filename']} lines {pas['line_from']}-"
+                          f"{pas['line_to']}]\n{pas['text'][:1200]}\n")
+
+    reply = await sinas.invoke(
+        "grove/retrieval-planner-agent",
+        f"Correct {_domain_article()}answer. Every current claim is listed for "
+        "context, with the passages bound to it. Only some are wrong.\n\n"
+        "Change ONLY what the feedback identifies. Leave every other claim "
+        "alone — do not restate it, do not rephrase it, do not return it. "
+        "A claim you do not mention is kept exactly as it is.\n\n"
+        "For each claim you do change: narrow it if it asserts more than its "
+        "passages establish, rewrite it if it contradicts another claim, and "
+        "drop it if no passage can carry it. Add a claim only where the answer "
+        "fails to address the question. Every claim you write must be carried "
+        "entirely by the passages you cite for it, and you may cite only "
+        "passages shown below. Keep the answer at about 12 claims.\n\n"
+        + ("This is the final revision. If the passages available genuinely "
+           "cannot settle a point the question asks about, do not stretch a "
+           "source to cover it and do not leave the point unmentioned: add a "
+           'claim with "type": "abstention" and no evidence, stating plainly '
+           "which part of the question the available sources do not answer. "
+           "Say what is missing, not that you are unable — 'The documents "
+           "before us do not address X' rather than 'I cannot determine X'. "
+           f"At most {MAX_ABSTENTIONS} such claims, and never for the central "
+           "question if the sources do answer it.\n\n" if last_attempt else "")
+        + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
+        '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
+        '"drop": [<seq>], '
+        '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
+        'procedural|conclusion", "evidence": [{"filename": "...", '
+        '"line_from": <int>, "line_to": <int>}]}]}\n\n'
+        f"QUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
+        f"FEEDBACK:\n- " + "\n- ".join(feedback[:10])
+        + (f"\n\nADDITIONAL VERIFIED PASSAGES:{fresh}" if fresh else ""),
+    )
+
+    patch = _parse_patch(reply, allow_abstention=last_attempt)
+    if not patch:
+        await _tele(run_id, "validate", revision_yielded_no_change=True)
         return 0
 
-    # one extraction task per failed claim, against the same document set
-    targets: dict[str, str] = {}
-    for f in failed:
-        cid = str(f.get("claim_id") or "")
-        if cid and cid in claims:
-            targets[cid] = claims[cid]
-    if not targets:
-        return 0
-
-    plan_claims = [
-        {"n": i, "establishes": text, "anchors": docs[:6],
-         "hint": "find the passage that states this; a case caption or party "
-                 "list is not a holding"}
-        for i, (cid, text) in enumerate(targets.items(), start=1)
-    ]
-    extracts = await _extract_passages(sinas, plan_claims, run_id)
-
-    rebound = 0
+    by_seq = {c.sequence: c for c, *_ in rows}
+    touched = 0
     async with AsyncSessionLocal() as session:
-        for (cid, _text), ex in zip(targets.items(), extracts):
-            passages = ex.get("passages") or []
-            if not passages:
-                continue  # nothing found; the drop path below will take it
-            await session.execute(
-                ClaimEvidence.__table__.delete().where(
-                    ClaimEvidence.claim_id == uuid.UUID(cid),
-                    ClaimEvidence.validated.is_(False),
-                )
-            )
-            for pas in passages[:3]:
-                doc = (await session.execute(
-                    select(Document).where(Document.filename == pas["filename"])
-                )).scalars().first()
-                if doc is None:
-                    continue
-                session.add(ClaimEvidence(
-                    claim_id=uuid.UUID(cid), document_id=doc.id,
-                    span={"line_from": pas["line_from"], "line_to": pas["line_to"],
-                          "char_from": None, "char_to": None, "note": None},
-                    stance="supports", validated=False,
-                ))
-                rebound += 1
+        for seq in patch["drop"]:
+            claim = by_seq.get(seq)
+            if claim is None:
+                continue
+            await session.execute(ClaimEvidence.__table__.delete()
+                                  .where(ClaimEvidence.claim_id == claim.id))
+            await session.execute(AnswerClaim.__table__.delete()
+                                  .where(AnswerClaim.id == claim.id))
+            touched += 1
+
+        for item in patch["revise"]:
+            claim = by_seq.get(item["seq"])
+            if claim is None:
+                continue
+            row = await session.get(AnswerClaim, claim.id)
+            if row is None:
+                continue
+            row.claim_text = item["text"][:4000]
+            # its evidence is re-bound, so its verdicts no longer apply
+            await session.execute(ClaimEvidence.__table__.delete()
+                                  .where(ClaimEvidence.claim_id == row.id))
+            await _bind_spans(session, row.id, item["evidence"])
+            touched += 1
+
+        if patch["add"]:
+            live = (await session.execute(
+                select(func.count(AnswerClaim.id))
+                .where(AnswerClaim.answer_id == answer_id))).scalar() or 0
+            nxt = ((await session.execute(
+                select(func.max(AnswerClaim.sequence))
+                .where(AnswerClaim.answer_id == answer_id))).scalar() or 0) + 1
+            for item in patch["add"][:max(0, MAX_CLAIMS - live)]:
+                row = AnswerClaim(answer_id=answer_id, sequence=nxt,
+                                  claim_text=item["text"][:4000],
+                                  claim_type=str(item.get("type")
+                                                 or "legal_principle")[:50])
+                session.add(row)
+                await session.flush()
+                await _bind_spans(session, row.id, item["evidence"])
+                nxt += 1
+                touched += 1
         await session.commit()
 
     await _tele(run_id, "validate",
-                remediated_claims=len(targets), spans_rebound=rebound,
-                gate_issues_seen=len(gate_issues or []))
-    return rebound
-
-
-
-async def _remediate_gate(
-    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
-    question: str, missing: str, issues: list[str],
-) -> int:
-    """Answer the gate's own feedback: cover what is missing, and use the
-    stronger sources it named. Both are drafting work, so they need passages
-    first — extracted and verified like any other, then drafted as additional
-    claims appended to the answer."""
-    # A claim the gate says only describes its source, or leans on reasoning
-    # that is no longer in the answer, is removed here. Remediation used to be
-    # additive only, so the answer could never be made coherent by taking
-    # something out — the offending claim stayed and a new one was stacked on
-    # top of it.
-    drop_seqs = set(_gate_seqs.get("unresponsive") or [])
-    dropped_here = 0
-    if drop_seqs:
-        async with AsyncSessionLocal() as session:
-            for c in (await session.execute(
-                select(AnswerClaim).where(AnswerClaim.answer_id == answer_id)
-            )).scalars().all():
-                if c.sequence in drop_seqs:
-                    await session.execute(ClaimEvidence.__table__.delete()
-                                          .where(ClaimEvidence.claim_id == c.id))
-                    await session.execute(AnswerClaim.__table__.delete()
-                                          .where(AnswerClaim.id == c.id))
-                    dropped_here += 1
-            await session.commit()
-        _gate_seqs["unresponsive"] = []
-
-    wanted = [missing] if missing else []
-    wanted += [i for i in (issues or []) if i]
-    if not wanted:
-        return dropped_here
-
-    async with AsyncSessionLocal() as session:
-        run = await session.get(QueryRun, run_id)
-        docs = [
-            fn for (fn,) in (await session.execute(
-                select(Document.filename)
-                .join(ResultDocument, ResultDocument.document_id == Document.id)
-                .where(ResultDocument.result_id == run.parent_result_id)
-                .order_by(ResultDocument.rank).limit(30)
-            )).all() if fn
-        ]
-    if not docs:
-        return 0
-
-    # A "stronger source unused" issue names its file; prefer those documents.
-    named = [d for d in docs if any(d in w for w in wanted)]
-    anchors = (named + docs)[:8]
-
-    plan_claims = [
-        {"n": i, "establishes": w[:600], "anchors": anchors,
-         "hint": "extract the passage that establishes this point; a case "
-                 "caption or party list is not a holding"}
-        for i, w in enumerate(wanted[:6], start=1)
-    ]
-    extracts = await _extract_passages(sinas, plan_claims, run_id)
-    added = await _draft_from_extracts(
-        run_id, answer_id, sinas, question, extracts, append=True)
-    await _tele(run_id, "validate",
-                gate_remediation={"points": len(wanted), "claims_added": added,
-                                  "claims_dropped": dropped_here,
-                                  "named_sources": named[:5]})
-    return added + dropped_here
+                revision={"claims": len(by_claim), "revised": len(patch["revise"]),
+                          "abstentions": sum(
+                              1 for a in patch["add"]
+                              if a.get("type") == "abstention"),
+                          "dropped": len(patch["drop"]), "added": len(patch["add"]),
+                          "untouched": len(by_claim) - touched,
+                          "feedback_items": len(feedback)})
+    return touched
 
 
 async def _stage_validate_publish(
@@ -1377,6 +1392,7 @@ async def _stage_validate_publish(
         run = await session.get(QueryRun, run_id)
         answer_id, chat_id = run.answer_id, run.synthesis_chat_id
         caller = _runner_caller(run)
+        question_text = run.question
         if gate_cycles is None:
             gate_cycles = EFFORT_GATE_CYCLES.get(
                 run.effort or "medium", ANSWER_GATE_CYCLES)
@@ -1417,7 +1433,6 @@ async def _stage_validate_publish(
         await _await_chat_quiescence()
         async with AsyncSessionLocal() as session:
             verdict = await validate_answer_evidence(session, caller, answer_id, pending_only=True)
-        await _narrow_overreaching(sinas, run_id, verdict.get("overreaching") or [])
         failed_history.append(len(verdict["failed"]))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
@@ -1453,8 +1468,9 @@ async def _stage_validate_publish(
                          + " ".join(correctness)[:600]))
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
                 if not can_remediate:
-                    await _remediate_gate(sinas, run_id, answer_id, question,
-                                          missing, correctness + issues)
+                    await _revise_answer(
+                        sinas, run_id, answer_id, question,
+                        correctness + issues, [missing] if missing else [])
                     return await _stage_validate_publish(
                         run_id, sinas, gate_cycles - 1)
                 sinas.send_detached(chat_id, _gate_remediation_msg(missing, issues))
@@ -1473,11 +1489,15 @@ async def _stage_validate_publish(
             for f in verdict["failed"]
         ) or "(transport errors only — rebind those spans)"
         if not can_remediate:
-            # No drafting chat, so remediate directly: re-extract passages for
-            # the failed claims and rebind. Bounded by the same round budget.
-            if await _remediate(sinas, run_id, answer_id, verdict["failed"]):
+            # One revision per round, over everything this round found.
+            fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
+                  for f in verdict["failed"]]
+            fb += [f"Claim {o.get('claim_sequence')} asserts more than its "
+                   f"passages establish: {o.get('uncovered')}"
+                   for o in (verdict.get("overreaching") or [])]
+            if fb and await _revise_answer(sinas, run_id, answer_id, question_text, fb):
                 continue
-            break  # nothing better exists in the sources; drop below
+            break  # revision produced nothing usable; drop below
         sinas.send_detached(
             chat_id,
             "Validation results. Apply the TWO-STRIKES rule to these failed rows "
@@ -1559,8 +1579,8 @@ async def _stage_validate_publish(
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
     if not can_remediate:
-        await _remediate_gate(sinas, run_id, answer_id, question, missing,
-                              correctness + issues)
+        await _revise_answer(sinas, run_id, answer_id, question,
+                             correctness + issues, [missing] if missing else [])
         return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
     prefix = (
         "Several claims were dropped as unverifiable.\n" if failing_ids else ""

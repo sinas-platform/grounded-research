@@ -1006,11 +1006,12 @@ async def _gate_answer(
     vocabulary, no counting floors — a stateless judge, per part of the
     question.
 
-    Returns (publishable, missing, issues, correctness, uncovered).
+    Returns (publishable, missing, issues, correctness, points).
     `publishable` and `correctness` are the hard gate; `issues` are
     best-effort remediation targets that must never block publication on
-    their own; `uncovered` is one entry per part of the question the claims
-    do not answer.
+    their own; `points` are the things revision must be given passages for —
+    one entry per part of the question the claims do not answer, then each
+    stronger source the gate named.
 
     Everything the gate finds is returned. It used to leave some of it in a
     module-level dict, which a later edit deleted the declaration of — so
@@ -1136,15 +1137,23 @@ async def _gate_answer(
             "that directly answers the question, supported by the evidence "
             "already cited."
         )
-    for src in (data.get("unused_sources") or [])[:3]:
+    # Naming the document in prose is not enough. Revision may cite only
+    # passages it is shown, and it is shown passages for the points passed to
+    # it — so a run was told to use 32025M11936.md, given no line of it, and
+    # correctly changed nothing. Each named source becomes a point to ground,
+    # which is what causes it to be opened and quoted.
+    stronger = [str(src) for src in (data.get("unused_sources") or [])[:3] if src]
+    for src in stronger:
         issues.append(
-            "Stronger source unused: " + str(src) + " Use it for the point it speaks "
+            "Stronger source unused: " + src + " Use it for the point it speaks "
             "to (or keep the current citation only if it is genuinely the better fit)."
         )
     # every uncovered part is a gap the answer must close, not just one
     missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")
     publishable = bool(data.get("publishable")) and not uncovered
-    return publishable, missing, issues + correctness, correctness, uncovered
+    # Coverage gaps first: they are what blocks publication, and the reviser
+    # is given passages for a bounded number of points.
+    return publishable, missing, issues + correctness, correctness, uncovered + stronger
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -1490,7 +1499,7 @@ async def _stage_validate_publish(
             if pending is None:
                 async with AsyncSessionLocal() as session:
                     question = (await session.get(QueryRun, run_id)).question
-                ok, missing, issues, correctness, uncovered = await _gate_answer(
+                ok, missing, issues, correctness, points = await _gate_answer(
                     sinas, question, answer_id, run_id)
                 if ok and not correctness and (not issues or gate_cycles <= 0):
                     # quality issues never block publication on their own —
@@ -1509,7 +1518,7 @@ async def _stage_validate_publish(
                 await _revise_answer(
                     sinas, run_id, answer_id, question,
                     correctness + issues,
-                    uncovered or ([missing] if missing else []),
+                    points or ([missing] if missing else []),
                     last_attempt=gate_cycles <= 1)
                 return await _stage_validate_publish(
                     run_id, sinas, gate_cycles - 1)
@@ -1569,7 +1578,7 @@ async def _stage_validate_publish(
                     dropped_detail=sorted(dropped, key=lambda d: d["sequence"]))
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
-    ok, missing, issues, correctness, uncovered = await _gate_answer(
+    ok, missing, issues, correctness, points = await _gate_answer(
         sinas, question, answer_id, run_id)
     if ok and not correctness and (not issues or gate_cycles <= 0):
         tele = {"quality_issues": issues} if issues else {}
@@ -1590,7 +1599,7 @@ async def _stage_validate_publish(
     )
     await _revise_answer(sinas, run_id, answer_id, question,
                          correctness + issues,
-                         uncovered or ([missing] if missing else []),
+                         points or ([missing] if missing else []),
                          last_attempt=gate_cycles <= 1)
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 

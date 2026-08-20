@@ -110,6 +110,31 @@ async def test_correctness_defects_are_separated_from_quality_issues(gate_env):
 
 
 @pytest.mark.asyncio
+async def test_a_named_stronger_source_becomes_a_point_to_ground(gate_env):
+    """Naming the document in prose is not enough.
+
+    Revision may cite only passages it is shown, and it is shown passages for
+    the points it is handed. A run was told to use 32025M11936.md, given no
+    line of it, and correctly changed nothing — which read as the reviser
+    ignoring the gate.
+    """
+    _ok, _missing, issues, _corr, points = await _gate(
+        json.dumps({
+            "publishable": True,
+            "parts": [{"asks": "which market definition applies",
+                       "covered": False, "gap": "no market definition is given"}],
+            "unused_sources": ["32025M11936.md: records the decision defining "
+                               "the market, more authoritative than m11936.md"],
+        })
+    )
+    assert any("32025M11936.md" in p for p in points), points
+    # the coverage gap comes first: it is what blocks publication, and the
+    # number of points revision extracts for is bounded
+    assert points[0] == "no market definition is given"
+    assert any("Stronger source unused" in i for i in issues)
+
+
+@pytest.mark.asyncio
 async def test_unparseable_reply_passes_but_is_recorded(gate_env):
     ok, missing, issues, correctness, uncovered = await _gate("I cannot judge this.")
     assert ok is True

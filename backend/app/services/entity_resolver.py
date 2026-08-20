@@ -38,7 +38,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
-from app.models import Document, Entity, EntityAlias, EntityMention
+from app.models import (
+    Document,
+    Entity,
+    EntityAlias,
+    EntityMention,
+    UnresolvedEntityMention,
+)
 from app.models.config import EntityType
 from app.models.runtime import DocumentVersion, EntityProposal
 from app.services.query_runner import _Sinas
@@ -296,6 +302,24 @@ async def _t4_create(session, index, types, document_id, needs_creation,
             report["left_unlinked"] += 1
             continue
         if t.creation_mode == "closed":
+            # A closed type cannot grow on its own, but the mention is still
+            # evidence the corpus mentions something we do not model. File it
+            # for review rather than dropping it: the reviewer can match it to
+            # an existing body, promote it, or dismiss it. Without this the
+            # residue of a locked type is invisible — an unlinked mention and
+            # nothing in any queue.
+            if write:
+                session.add(UnresolvedEntityMention(
+                    entity_type_id=t.id,
+                    mention_text=(m.surface_form or "")[:500],
+                    document_id=document_id,
+                    document_version_id=getattr(m, "document_version_id", None),
+                    span=m.span or {},
+                    confidence=m.confidence if hasattr(m, "confidence") else None,
+                    proposing_agent="entity-resolver",
+                    reasoning="no candidate matched in a closed type",
+                    status="unresolved",
+                ))
             report["left_unlinked"] += 1
         elif t.creation_mode == "review":
             if write:

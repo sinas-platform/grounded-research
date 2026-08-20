@@ -74,10 +74,10 @@ def test_each_dropdown_covers_exactly_its_own_rows():
                      if ws.cell(r, 1).value == "Claim ID")
     verdict_col = next(c for c in range(1, 9)
                        if ws.cell(claim_hdr, c).value == "Expert verdict")
-    assert verdict_col == 4
+    assert verdict_col == 6
 
     rng = _ranges(ws)['"' + ",".join(CLAIM_VERDICTS) + '"']
-    assert rng == f"D{claim_hdr + 1}:D{claim_hdr + 3}"
+    assert rng == f"F{claim_hdr + 1}:F{claim_hdr + 3}"
     # and the rows it covers really are the claims, in order
     for offset in range(3):
         assert ws.cell(claim_hdr + 1 + offset, 1).value == offset + 1
@@ -101,14 +101,53 @@ def test_a_claims_row_carries_its_passage_and_its_reasoning():
     hdr = next(r for r in range(1, ws.max_row + 1)
                if ws.cell(r, 1).value == "Claim ID")
     headers = [ws.cell(hdr, c).value for c in range(1, 8)]
-    assert headers == ["Claim ID", "Claim from answer", "Cited document",
-                       "Expert verdict", "Cited passage", "Why this source",
+    assert headers == ["Claim ID", "Claim from answer",
+                       "Reasoning behind the claim", "Cited source",
+                       "Cited passage", "Expert verdict",
                        "Required fix / comment"]
     row = hdr + 1
-    assert ws.cell(row, 3).value == "doc0.md"
+    assert ws.cell(row, 3).value == "Why claim 1 rests on this source."
+    # a citation carries its rank, so it can be found in the list below
+    assert ws.cell(row, 4).value == "[1] doc0.md"
+    assert ws.cell(row, 5).value.startswith("[1] doc0.md l.10-12")
     assert "line 10" in ws.cell(row, 5).value and "line 12" in ws.cell(row, 5).value
-    assert ws.cell(row, 5).value.startswith("[doc0.md l.10-12]")
-    assert ws.cell(row, 6).value == "Why claim 1 rests on this source."
+
+
+def test_claims_come_before_the_retrieval_set():
+    """A reviewer reads the answer first; the ranked list runs to a hundred
+    rows and used to sit on top of it."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    _write_question(wb, ENTRY, _data())
+    ws = wb["Q03"]
+    heads = [(r, ws.cell(r, 1).value) for r in range(1, ws.max_row + 1)]
+    order = [v for _, v in heads
+             if v in ("Claim-by-claim review", "Retrieval set (full ranked list)",
+                      "Final expert verdict")]
+    assert order == ["Claim-by-claim review", "Retrieval set (full ranked list)",
+                     "Final expert verdict"]
+
+
+def test_only_the_reviewers_own_cells_are_yellow():
+    """"What is mine to fill in" should be answerable by looking."""
+    from app.review_export import INPUT
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    meta = _write_question(wb, ENTRY, _data(n_claims=2, n_docs=3))
+    ws = wb["Q03"]
+    yellow = {(c.row, c.column) for row in ws.iter_rows() for c in row
+              if c.fill is not None and c.fill.fgColor.rgb == INPUT.fgColor.rgb}
+
+    claim_hdr = next(r for r in range(1, ws.max_row + 1)
+                     if ws.cell(r, 1).value == "Claim ID")
+    src_hdr = next(r for r in range(1, ws.max_row + 1)
+                   if ws.cell(r, 1).value == "Rank")
+    expected = {(claim_hdr + i, c) for i in (1, 2) for c in (6, 7)}
+    expected |= {(src_hdr + i, c) for i in (1, 2, 3) for c in (6, 7, 8)}
+    expected |= {(r, 2) for r in range(meta["reviewer_row"],
+                                       meta["completed_row"] + 1)}
+    assert yellow == expected, sorted(yellow ^ expected)
 
 
 def test_the_index_points_at_verdict_cells_that_exist():

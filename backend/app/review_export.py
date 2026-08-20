@@ -51,7 +51,8 @@ from app.db import AsyncSessionLocal
 # deliberately in one place and deliberately short — a long dropdown is a
 # free-text field with extra steps.
 CLAIM_VERDICTS = ["Supports claim", "Partially supports claim",
-                  "Does not support claim"]
+                  "Does not support claim", "Wrong source",
+                  "Missing citation", "Not a legal claim"]
 REQUIRED_SOURCE = ["Yes", "No", "Partially", "Unknown"]
 SOURCE_VERDICTS = ["Relevant", "Not relevant", "Duplicate",
                    "Missing important source"]
@@ -60,6 +61,9 @@ COMPLETED = ["Not started", "In review", "Review completed", "Needs follow-up"]
 
 HEAD = PatternFill("solid", fgColor="EFEAE2")
 SECTION = PatternFill("solid", fgColor="DCE5DC")
+# Every cell the reviewer fills in is this colour and nothing else is, so
+# "what is mine to do" is answerable by looking rather than by reading.
+INPUT = PatternFill("solid", fgColor="FFF2CC")
 BOLD = Font(bold=True)
 WRAP = Alignment(vertical="top", wrap_text=True)
 TOP = Alignment(vertical="top")
@@ -154,7 +158,7 @@ def _dv(ws, options: list[str], cells: str) -> None:
 
 def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
     ws = wb.create_sheet(_tab(entry.get("id", "0")))
-    widths = [10, 46, 34, 24, 40, 34, 16, 16, 22, 40, 14]
+    widths = [10, 46, 44, 26, 52, 24, 34, 16, 22, 40, 14]
     for i, w in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(i)].width = w
 
@@ -199,6 +203,46 @@ def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
                "Outcome", run["status"]])
     ws.cell(ws.max_row, 1).font = BOLD
 
+    # Reference numbers, so a citation can be found in the ranked list
+    # below without searching for a filename. The number IS the rank.
+    rank_of = {d["filename"]: d["rank"] for d in data["docs"]}
+
+    def ref(fn: str) -> str:
+        r = rank_of.get(fn)
+        return f"[{r}] {fn}" if r else fn
+
+    # ── claim by claim ───────────────────────────────────────────────────
+    # Claims come before the retrieval set: the answer is what a reviewer
+    # reads first, and the ranked list runs to a hundred rows.
+    ws.append([])
+    section("Claim-by-claim review")
+    ws.append(["Claim ID", "Claim from answer", "Reasoning behind the claim",
+               "Cited source", "Cited passage", "Expert verdict",
+               "Required fix / comment"])
+    hdr = ws.max_row
+    for c in range(1, 8):
+        ws.cell(hdr, c).font = BOLD
+        ws.cell(hdr, c).fill = HEAD
+    for c in data["claims"]:
+        rows = by_claim.get(c["id"], [])
+        docs_ = "\n".join(sorted({ref(e["filename"]) for e in rows}))
+        passages = "\n\n".join(
+            f"{ref(e['filename'])} l.{(e['span'] or {}).get('line_from')}-"
+            f"{(e['span'] or {}).get('line_to')}\n"
+            f"{_passage(e['content_md'], e['span'])}" for e in rows)
+        if c["claim_type"] == "abstention":
+            docs_ = docs_ or "(no source — the answer states this is not established)"
+        ws.append([c["sequence"], c["claim_text"], c["rationale"] or "",
+                   docs_, passages, "", ""])
+        for col in (2, 3, 4, 5, 7):
+            ws.cell(ws.max_row, col).alignment = WRAP
+        for col in (6, 7):
+            ws.cell(ws.max_row, col).fill = INPUT
+        ws.row_dimensions[ws.max_row].height = 96
+    first, last = hdr + 1, ws.max_row
+    if last >= first:
+        _dv(ws, CLAIM_VERDICTS, f"F{first}:F{last}")
+
     # ── retrieval set ────────────────────────────────────────────────────
     ws.append([])
     section("Retrieval set (full ranked list)")
@@ -213,38 +257,12 @@ def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
         ws.append([d["rank"], d["title"] or d["filename"], d["filename"],
                    d["class_name"] or "",
                    "YES" if d["filename"] in cited else "", "", "", ""])
+        for col in (6, 7, 8):
+            ws.cell(ws.max_row, col).fill = INPUT
     first, last = hdr + 1, ws.max_row
     if last >= first:
         _dv(ws, REQUIRED_SOURCE, f"F{first}:F{last}")
         _dv(ws, SOURCE_VERDICTS, f"G{first}:G{last}")
-
-    # ── claim by claim ───────────────────────────────────────────────────
-    ws.append([])
-    section("Claim-by-claim review")
-    ws.append(["Claim ID", "Claim from answer", "Cited document",
-               "Expert verdict", "Cited passage", "Why this source",
-               "Required fix / comment"])
-    hdr = ws.max_row
-    for c in range(1, 8):
-        ws.cell(hdr, c).font = BOLD
-        ws.cell(hdr, c).fill = HEAD
-    for c in data["claims"]:
-        rows = by_claim.get(c["id"], [])
-        docs_ = "\n".join(sorted({f"{e['filename']}" for e in rows}))
-        passages = "\n\n".join(
-            f"[{e['filename']} l.{(e['span'] or {}).get('line_from')}-"
-            f"{(e['span'] or {}).get('line_to')}]\n"
-            f"{_passage(e['content_md'], e['span'])}" for e in rows)
-        if c["claim_type"] == "abstention":
-            docs_ = docs_ or "(no source — the answer states this is not established)"
-        ws.append([c["sequence"], c["claim_text"], docs_, "", passages,
-                   c["rationale"] or "", ""])
-        for col in (2, 3, 5, 6, 7):
-            ws.cell(ws.max_row, col).alignment = WRAP
-        ws.row_dimensions[ws.max_row].height = 84
-    first, last = hdr + 1, ws.max_row
-    if last >= first:
-        _dv(ws, CLAIM_VERDICTS, f"D{first}:D{last}")
 
     # ── verdict ──────────────────────────────────────────────────────────
     ws.append([])
@@ -257,6 +275,8 @@ def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
     completed_row = ws.max_row
     for r in range(acceptable_row - 1, completed_row + 1):
         ws.cell(r, 1).font = BOLD
+        ws.cell(r, 2).fill = INPUT
+    ws.cell(acceptable_row + 1, 2).alignment = WRAP
     _dv(ws, ACCEPTABLE, f"B{acceptable_row}")
     _dv(ws, COMPLETED, f"B{completed_row}")
     ws.freeze_panes = "A2"
@@ -303,18 +323,24 @@ def _write_readme(wb: Workbook, title: str) -> None:
         ("What this is", "One tab per question. Each tab holds the answer that "
                          "was generated, the documents retrieved for it, and "
                          "the answer broken into individual claims."),
-        ("How to review", "Work down the claim-by-claim table. For each claim, "
-                          "read the cited passage — it is the exact text the "
-                          "claim rests on — and set the expert verdict."),
-        ("Why this source", "The column next to the passage is the system's own "
-                            "reasoning: which part of the question the claim "
-                            "answers, why it cites that source, and where it "
-                            "chose one source over another. It is reasoning, "
-                            "not evidence: judge the claim against the passage, "
-                            "and use this column to see how the choice was made."),
+        ("How to review", "Work down the claim-by-claim table, which comes "
+                          "first. For each claim, read the cited passage — it "
+                          "is the exact text the claim rests on — and set the "
+                          "expert verdict."),
+        ("Reasoning", "Each claim carries the reasoning behind it: which part "
+                      "of the question the claim answers, why it cites the "
+                      "source it does, and where it chose one source over "
+                      "another. It is reasoning, not evidence — judge the claim "
+                      "against the cited passage, and use this column to see "
+                      "how the claim was arrived at."),
+        ("Yellow cells", "Everything shaded yellow is yours to fill in. "
+                         "Nothing else in the workbook is yellow."),
+        ("Reference numbers", "A cited source is written [4] filename. The "
+                              "number is its rank in the retrieval set below, "
+                              "so you can find it without searching."),
         ("Comments", "Add a comment only where something needs to change. A "
                      "verdict with no comment reads as 'correct as written'."),
-        ("Retrieval set", "The ranked list above the claims is every document "
+        ("Retrieval set", "The ranked list below the claims is every document "
                           "retrieved, whether or not the answer used it. Mark "
                           "anything that should have been used and was not."),
         ("Verdict", "Finish each tab with the block at the bottom. The review "

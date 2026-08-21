@@ -508,12 +508,18 @@ async def _stage_discovery(run_id: uuid.UUID, sinas: _Sinas) -> None:
     await _tele(run_id, "discovery", fired=_iso(), chat_id=chat)
 
 
-async def _doc_manifest(parent_id: uuid.UUID) -> str:
-    """One line per result document, in rank order, plus whatever the domain
-    config derives about each one: annotation values (e.g. issuing body and
-    authority tier in a legal deployment — Grove only renders what the config
-    declares) and, for documents in the result's stored briefing, properties
-    and TOC. Entity-id values are resolved to canonical names."""
+async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
+    """Per result document, in rank order: what the deployment's config
+    derives about it — class, annotation values (issuing body, authority
+    tier in a legal deployment; Grove only renders what the config
+    declares), retrieval reason, summary. One structure for every surface
+    that judges or chooses among documents, so the gate and the reviser see
+    the same document the planner saw. Grounding surfaces (drafter,
+    extractor, validator spans) never consume this: they get raw text.
+
+    The gate had been judging "is a plainly more authoritative source
+    unused?" from a filename and 220 characters of summary — the authority
+    annotations existed and reached only the planner."""
     from app.models import AnnotationDefinition
     from app.services.annotations import annotations_for_documents
 
@@ -561,17 +567,32 @@ async def _doc_manifest(parent_id: uuid.UUID) -> str:
             return " ".join(f"{k}={_fmt(v)}" for k, v in value.items())
         return str(value)
 
-    lines = []
+    out = []
     for did, fn, cls, reason, summary in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
         )
-        lines.append(
-            f"- {fn} | {cls or '-'} | {ann or '-'} | "
-            f"{(reason or '')[:120]} | {(summary or '')[:200]}"
-        )
-        brief = briefing_by_doc.get(str(did))
+        out.append({
+            "document_id": did, "filename": fn, "class": cls or "",
+            "annotations": ann, "reason": (reason or ""),
+            "summary": (summary or ""),
+            "briefing": briefing_by_doc.get(str(did)),
+        })
+    return out
+
+
+def _manifest_line(r: dict) -> str:
+    return (f"- {r['filename']} | {r['class'] or '-'} | "
+            f"{r['annotations'] or '-'} | {r['reason'][:120]} | "
+            f"{r['summary'][:200]}")
+
+
+async def _doc_manifest(parent_id: uuid.UUID) -> str:
+    lines = []
+    for r in await _manifest_rows(parent_id):
+        lines.append(_manifest_line(r))
+        brief = r.get("briefing")
         if brief:
             props = brief.get("properties")
             if props:
@@ -682,7 +703,7 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) ->
     return want[:200] in have
 
 
-def _relevant_docs(point: str, corpus_rows: list[tuple], take: int = 4) -> list[str]:
+def _relevant_docs(point: str, corpus_rows: list[dict], take: int = 4) -> list[str]:
     """Documents whose own text most specifically matches this point.
 
     Rank orders the whole result for the question; it does not order
@@ -695,11 +716,17 @@ def _relevant_docs(point: str, corpus_rows: list[tuple], take: int = 4) -> list[
     terms = {w.lower().strip(".,;:()'\"") for w in (point or "").split() if len(w) > 4}
     if not terms:
         return []
-    hay = {fn: (fn + " " + (summary or "")).lower()
-           for fn, summary in corpus_rows if fn}
+    # Class and annotations are matchable text too: "the Court of Justice
+    # judgment on X" should pull the document whose issuing body IS the
+    # Court of Justice, not only one whose summary happens to say so.
+    hay = {r["filename"]: " ".join(
+               (r["filename"], r.get("summary") or "", r.get("class") or "",
+                r.get("annotations") or "")).lower()
+           for r in corpus_rows if r.get("filename")}
     df = {t: sum(1 for h in hay.values() if t in h) for t in terms}
     scored = []
-    for pos, (fn, _s) in enumerate(corpus_rows):
+    for pos, r in enumerate(corpus_rows):
+        fn = r.get("filename")
         if not fn:
             continue
         score = sum(1.0 / df[t] for t in terms if df.get(t) and t in hay[fn])
@@ -1029,12 +1056,7 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # matches it. The planner picks from summaries and tops out at the few it
     # names, so an authority that is retrieved but not summarised in those
     # terms is never opened.
-    async with AsyncSessionLocal() as session:
-        corpus_rows = (await session.execute(
-            select(Document.filename, Document.summary)
-            .join(ResultDocument, ResultDocument.document_id == Document.id)
-            .where(ResultDocument.result_id == parent_id)
-            .order_by(ResultDocument.rank).limit(60))).all()
+    corpus_rows = (await _manifest_rows(parent_id))[:60]
     for c in plan_claims:
         named = [str(a) for a in (c.get("anchors") or [])]
         extra = [d for d in _relevant_docs(str(c.get("establishes") or ""),
@@ -1103,21 +1125,18 @@ async def _gate_answer(
                 select(QueryRun.parent_result_id).where(QueryRun.answer_id == answer_id)
             )
         ).scalar_one_or_none()
-        sources: list[tuple[str, str]] = []
-        if parent_result_id:
-            sources = [
-                (fn, (summ or "").replace("\n", " ")[:220])
-                for fn, summ in (
-                    await session.execute(
-                        select(Document.filename, Document.summary)
-                        .join(ResultDocument, ResultDocument.document_id == Document.id)
-                        .where(ResultDocument.result_id == parent_result_id)
-                    )
-                ).all()
-            ]
+    # The gate judges which sources the answer should have used, which is
+    # planning-shaped work: it gets the planner's manifest line — class and
+    # declared annotations included — not a bare filename and summary. It
+    # cannot call a judgment "plainly more authoritative" than a bulletin
+    # article without being shown which document is which.
+    mrows = await _manifest_rows(parent_result_id) if parent_result_id else []
     claims = "\n".join(f"{seq}. {text}" for seq, text in rows)
     source_lines = "\n".join(
-        f"- [{'CITED' if fn in cited else 'uncited'}] {fn}: {summ}" for fn, summ in sources
+        f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
+        f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
+        f"{r['summary'].replace(chr(10), ' ')[:200]}"
+        for r in mrows
     ) or "(working set unavailable)"
     reply = await sinas.invoke(
         "grove/answer-gate-agent",
@@ -1383,12 +1402,8 @@ async def _revise_answer(
             .where(AnswerClaim.answer_id == answer_id)
             .order_by(AnswerClaim.sequence)
         )).all()
-        corpus_rows = (await session.execute(
-            select(Document.filename, Document.summary)
-            .join(ResultDocument, ResultDocument.document_id == Document.id)
-            .where(ResultDocument.result_id == parent_id)
-            .order_by(ResultDocument.rank).limit(60))).all()
-        corpus = [fn for fn, _ in corpus_rows if fn]
+    corpus_rows = (await _manifest_rows(parent_id))[:60]
+    corpus = [r["filename"] for r in corpus_rows if r.get("filename")]
 
     # current claims, each with the passages already bound to it. A claim the
     # patch does not name keeps its row, its spans and its verdicts — it is

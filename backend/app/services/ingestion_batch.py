@@ -265,6 +265,70 @@ async def batch_relationship_pass(
     return results
 
 
+async def batch_grounding_pass(
+    run_id: uuid.UUID | None, doc_ids: list[uuid.UUID]
+) -> dict[uuid.UUID, dict[str, Any]]:
+    """Run the grounding gate over `doc_ids` through provider batches.
+
+    Grounding was the one LLM stage left in the per-document middle loop, so
+    in batch mode it alone cost one rate-limited call per document — one to
+    two days of wall-clock at a 100k-document load. Same wave mechanics as
+    the other passes, but through grounding's collect/apply split so no
+    database transaction is held open across the batch wait: collect builds
+    the judge prompt and closes its session, the wave settles, apply writes
+    verdicts in a fresh short session.
+    """
+    from app.db import AsyncSessionLocal
+    from app.services.grounding_gate import (
+        GROUNDING_AGENT,
+        ground_apply,
+        ground_collect,
+    )
+
+    results: dict[uuid.UUID, dict[str, Any]] = {}
+    for i in range(0, len(doc_ids), SLICE):
+        chunk = doc_ids[i : i + SLICE]
+        client = BatchWaveClient(run_id)
+
+        async def drive_chunk(chunk: list[uuid.UUID] = chunk,
+                              client: "BatchWaveClient" = client) -> None:
+            collected: list[tuple[uuid.UUID, dict[str, Any]]] = []
+            for did in chunk:
+                try:
+                    async with AsyncSessionLocal() as session:
+                        c = await ground_collect(session, did)
+                except Exception as exc:  # noqa: BLE001 — per-doc isolation
+                    results[did] = {"document": str(did),
+                                    "error": str(exc)[:300]}
+                    continue
+                if not c.get("prompt"):
+                    results[did] = {"document": str(did), "kept": 0,
+                                    "rejected": 0, "judged": 0}
+                else:
+                    collected.append((did, c))
+
+            async def one(did: uuid.UUID, c: dict[str, Any]) -> None:
+                try:
+                    reply = await client.invoke(GROUNDING_AGENT, c["prompt"])
+                except Exception as exc:  # noqa: BLE001
+                    results[did] = {"document": str(did),
+                                    "error": str(exc)[:300]}
+                    return
+                async with AsyncSessionLocal() as session:
+                    rep = await ground_apply(
+                        session, c["mention_ids"],
+                        c.get("surfaces") or [], reply)
+                results[did] = {"document": str(did),
+                                "judged": len(c["mention_ids"]), **rep}
+
+            await asyncio.gather(*(one(d, c) for d, c in collected))
+
+        task = asyncio.ensure_future(drive_chunk())
+        await client.drive([task])
+        await task
+    return results
+
+
 async def batch_oneshot_ingest(
     run_id: uuid.UUID | None, doc_ids: list[uuid.UUID]
 ) -> list[dict[str, Any]]:

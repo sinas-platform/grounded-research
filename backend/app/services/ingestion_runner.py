@@ -186,6 +186,22 @@ async def _run_pipeline_inprocess(
                 extract_errors[did] = str(rep["error"])[:500]
         parts = tuple(p for p in parts if p != "extract")
 
+    # In batch mode, grounding also leaves the per-document loop. It was
+    # the last LLM stage running one rate-limited call per document — alone
+    # worth one to two days of wall-clock at a 100k load. It must still
+    # complete before resolution (hallucinated names must not reach the
+    # resolver), so it runs here, between the extract batch and the middle
+    # loop, not after it.
+    if batch and "ground" in parts:
+        from app.services.ingestion_batch import batch_grounding_pass
+
+        greps = await batch_grounding_pass(
+            run_id, [d for d in doc_ids if d not in extract_errors])
+        for did, rep in greps.items():
+            if rep.get("error"):
+                extract_errors[did] = f"grounding: {rep['error']}"[:500]
+        parts = tuple(p for p in parts if p != "ground")
+
     # In batch mode, relationships leave the per-document loop and run as
     # their own provider-batched pass after grounding/resolution: the
     # sequential loop's sync relationship calls were both the wall-clock

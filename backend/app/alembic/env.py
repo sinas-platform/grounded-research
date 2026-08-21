@@ -17,7 +17,7 @@ from app import models  # noqa: F401  (registers all tables on Base.metadata)
 config = context.config
 
 # Pull URL from settings unless overridden by env var
-db_url = os.environ.get("GROVE_DATABASE_URL") or get_settings().grove_database_url
+db_url = os.environ.get("SGR_DATABASE_URL") or get_settings().sgr_database_url
 config.set_main_option("sqlalchemy.url", db_url)
 
 if config.config_file_name is not None:

@@ -108,7 +108,7 @@ export default function PackagesPage({ embedded = false }: { embedded?: boolean 
       {!embedded && (
         <PageHeader
           title="Packages"
-          description="Import a Grove configuration YAML (document classes, entities, relationships, dossiers, playbooks) or export the current deployment."
+          description="Import a SGR configuration YAML (document classes, entities, relationships, dossiers, playbooks) or export the current deployment."
         />
       )}
 
@@ -137,7 +137,7 @@ export default function PackagesPage({ embedded = false }: { embedded?: boolean 
           value={yamlText}
           onChange={(e) => setYamlText(e.target.value)}
           rows={20}
-          placeholder="Paste GrovePackage YAML here, or use the file picker above."
+          placeholder="Paste SgrPackage YAML here, or use the file picker above."
           className="w-full border border-stone-300 rounded px-3 py-2 text-xs font-mono"
         />
         <div className="flex gap-2">
@@ -215,7 +215,7 @@ export default function PackagesPage({ embedded = false }: { embedded?: boolean 
             <input
               value={exportName}
               onChange={(e) => setExportName(e.target.value)}
-              placeholder="e.g. myapp-grove-config"
+              placeholder="e.g. myapp-sgr-config"
               className="border border-stone-300 rounded px-2 py-1 text-sm font-mono w-72"
             />
           </label>

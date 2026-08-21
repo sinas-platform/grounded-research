@@ -21,7 +21,7 @@ from app.auth import CallerIdentity, get_caller
 from app.db import AsyncSessionLocal, get_session
 
 router = APIRouter(prefix="/maintenance", tags=["maintenance"])
-_log = logging.getLogger("grove.maintenance")
+_log = logging.getLogger("sgr.maintenance")
 
 _dedup_jobs: dict[str, dict] = {}
 

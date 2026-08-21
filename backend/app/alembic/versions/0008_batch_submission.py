@@ -1,6 +1,6 @@
 """switch run workers to Sinas batch submission
 
-Previously, Grove's discovery and ingestion workers invoked Sinas agents one
+Previously, SGR's discovery and ingestion workers invoked Sinas agents one
 unit at a time using `get_admin_client()` (which requires SINAS_API_KEY). The
 new pattern (Sinas 0.2.0+ batch endpoints):
 
@@ -9,7 +9,7 @@ new pattern (Sinas 0.2.0+ batch endpoints):
     user.
   - The worker submits one batch per stage (ingestion) or per kind (discovery)
     via `client.agents.submit_batch(...)` instead of N per-unit invocations.
-  - Sinas owns dispatch and mints per-execution tokens; Grove just tracks
+  - Sinas owns dispatch and mints per-execution tokens; SGR just tracks
     `batch_id`s and polls aggregate status (or receives callbacks).
 
 Two columns per run table:

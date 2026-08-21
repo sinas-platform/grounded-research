@@ -65,7 +65,7 @@ export default function DocumentClassesPage({ embedded = false }: { embedded?: b
       {!embedded && (
         <PageHeader
           title="Document classes"
-          description="Define the kinds of documents Grove indexes. Each class has its own properties and entity-extraction rules."
+          description="Define the kinds of documents SGR indexes. Each class has its own properties and entity-extraction rules."
           actions={
             <PrimaryButton
               onClick={() => {

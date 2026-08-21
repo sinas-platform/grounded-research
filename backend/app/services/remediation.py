@@ -34,7 +34,7 @@ from app.models.runtime import DocumentVersion
 from app.models.query import QueryRun
 from app.services.query_runner import _gate_answer, _runner_caller, _Sinas, _tele
 
-REMEDIATION_AGENT = "grove/remediation-agent"
+REMEDIATION_AGENT = "sgr/remediation-agent"
 _MAX_DOCS = 6
 _MAX_DOC_CHARS = 40_000
 

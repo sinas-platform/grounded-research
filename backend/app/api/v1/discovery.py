@@ -61,7 +61,7 @@ router = APIRouter(prefix="/discovery", tags=["discovery"])
     "/runs",
     response_model=DiscoveryRunCreateOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_discovery_run(
     payload: DiscoveryRunCreateIn,
@@ -125,7 +125,7 @@ _FRONT_MATTER_KINDS: frozenset[str] = frozenset(
     "/suggest",
     response_model=SuggestOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def suggest(
     payload: SuggestIn,
@@ -216,7 +216,7 @@ async def suggest(
     "/front-matter-suggest",
     response_model=FrontMatterSuggestOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def front_matter_suggest(
     payload: FrontMatterSuggestIn,
@@ -347,11 +347,11 @@ async def list_run_candidates(
     ]
 
 
-# ─────────────────────── candidate write (agent → grove) ───────────────────────
+# ─────────────────────── candidate write (agent → sgr) ───────────────────────
 @router.post(
     "/candidates",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def submit_discovery_candidate(
     payload: DiscoveryCandidateIn,
@@ -374,11 +374,11 @@ async def submit_discovery_candidate(
     return {"id": cand.id}
 
 
-# ─────────────────────── consolidated proposal write (consolidator → grove) ───────────────────────
+# ─────────────────────── consolidated proposal write (consolidator → sgr) ───────────────────────
 @router.post(
     "/proposals",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def submit_consolidated_proposal(
     payload: ConsolidatedProposalIn,
@@ -457,7 +457,7 @@ async def get_proposal_candidates(
 @router.patch(
     "/proposals/{proposal_id}",
     response_model=ConfigProposalOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def edit_proposal(
     proposal_id: uuid.UUID,
@@ -478,7 +478,7 @@ async def edit_proposal(
 @router.post(
     "/proposals/{proposal_id}/approve",
     response_model=ConfigProposalOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def approve_proposal(
     proposal_id: uuid.UUID,
@@ -508,7 +508,7 @@ async def approve_proposal(
 @router.post(
     "/proposals/{proposal_id}/reject",
     response_model=ConfigProposalOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def reject_proposal(
     proposal_id: uuid.UUID,
@@ -531,7 +531,7 @@ async def reject_proposal(
 @router.post(
     "/proposals/{proposal_id}/merge",
     response_model=ConfigProposalOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def merge_proposal(
     proposal_id: uuid.UUID,

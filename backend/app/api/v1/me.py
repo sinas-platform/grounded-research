@@ -27,5 +27,5 @@ async def me(caller: CallerIdentity = Depends(get_caller)) -> MeOut:
         user_id=caller.user_id,
         roles=caller.roles,
         is_admin=caller.is_admin,
-        auth_mode=get_settings().grove_auth_mode,
+        auth_mode=get_settings().sgr_auth_mode,
     )

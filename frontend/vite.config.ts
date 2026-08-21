@@ -13,7 +13,7 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: process.env.GROVE_PROXY_TARGET ?? 'http://localhost:8080',
+        target: process.env.SGR_PROXY_TARGET ?? 'http://localhost:8080',
         changeOrigin: true,
       },
     },

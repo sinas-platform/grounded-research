@@ -18,7 +18,7 @@ class DocumentClass(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     # Immutable slug — used as a stable handle in permission strings
-    # (`grove.documents/<slug>.read:own`). Constrained to [a-z0-9_], max 64.
+    # (`sgr.documents/<slug>.read:own`). Constrained to [a-z0-9_], max 64.
     slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -162,7 +162,7 @@ class DossierClass(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     # Immutable slug — used as a stable handle in permission strings
-    # (`grove.dossiers/<slug>.read:own`). Constrained to [a-z0-9_], max 64.
+    # (`sgr.dossiers/<slug>.read:own`). Constrained to [a-z0-9_], max 64.
     slug: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
@@ -215,11 +215,11 @@ class DossierClassDocumentClass(Base):
 
 
 # ─────────────────────────────────────────────────────────────
-# Playbooks (content + scope, both Grove-side)
+# Playbooks (content + scope, both SGR-side)
 # ─────────────────────────────────────────────────────────────
 class Playbook(Base, TimestampMixin):
     """Markdown playbook the deep-search / synthesis agents fetch via the
-    Grove connector. `kind` is `retrieval` or `synthesis`."""
+    SGR connector. `kind` is `retrieval` or `synthesis`."""
 
     __tablename__ = "playbook"
     __table_args__ = (UniqueConstraint("kind", "name", name="uq_playbook_kind_name"),)

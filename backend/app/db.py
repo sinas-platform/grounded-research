@@ -22,7 +22,7 @@ _settings = get_settings()
 # the oneshot pipeline) is ticketed for the cloud deployment, where connection
 # budgets are tighter.
 engine = create_async_engine(
-    _settings.grove_database_url,
+    _settings.sgr_database_url,
     pool_pre_ping=True,
     pool_size=40,
     max_overflow=60,

@@ -130,7 +130,7 @@ class OrderKeyIn(BaseModel):
 class OrderIn(BaseModel):
     """Generic, deterministic ordering over annotation values. Any domain
     rule (e.g. which jurisdiction ranks first for this question) lives in
-    the caller's `precedence` list — Grove only sorts."""
+    the caller's `precedence` list — SGR only sorts."""
 
     subject_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
     group_by: str | None = Field(

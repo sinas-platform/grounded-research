@@ -1,9 +1,9 @@
 import { SinasClient } from '@sinas/sdk';
 
-export const API_BASE = import.meta.env.VITE_GROVE_API ?? '/api/v1';
+export const API_BASE = import.meta.env.VITE_SGR_API ?? '/api/v1';
 
-const ACCESS_KEY = 'grove_access_token';
-const REFRESH_KEY = 'grove_refresh_token';
+const ACCESS_KEY = 'sgr_access_token';
+const REFRESH_KEY = 'sgr_refresh_token';
 
 export const tokens = {
   get access(): string | null {
@@ -32,9 +32,9 @@ export function setUnauthenticatedHandler(fn: () => void): void {
 }
 
 /**
- * SinasClient configured against grove's /api/v1. Used for:
+ * SinasClient configured against sgr's /api/v1. Used for:
  *   - auth (client.auth.login / verifyOTP / refresh / logout / getInfo)
- *   - all grove-side data calls (via the `api<T>` helper below)
+ *   - all sgr-side data calls (via the `api<T>` helper below)
  *
  * Tokens are read fresh on every request so the client itself never
  * goes stale across re-renders or refresh-token rotation.
@@ -51,7 +51,7 @@ export const client = new SinasClient({
 });
 
 /**
- * Thin helper for grove's own /api/v1/* endpoints. Reuses the SinasClient
+ * Thin helper for sgr's own /api/v1/* endpoints. Reuses the SinasClient
  * for headers + refresh-on-401, so 401s automatically trigger one refresh
  * attempt before the request fails.
  */

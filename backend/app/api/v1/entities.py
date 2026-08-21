@@ -78,7 +78,7 @@ async def list_documents_by_entity(
     from app.models import Document, EntityMention
     from app.services.visibility import visible_clause
 
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     stmt = (
         select(
             Document.id,
@@ -130,7 +130,7 @@ class EntityProposalDecision(BaseModel):
 
 @router.post(
     "/proposals/{proposal_id}/decision",
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def decide_entity_proposal(
     proposal_id: uuid.UUID,
@@ -225,7 +225,7 @@ class MatchToExistingBody(BaseModel):
 
 @router.post(
     "/unresolved/{mention_id}/match",
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def match_unresolved_to_entity(
     mention_id: uuid.UUID,
@@ -343,7 +343,7 @@ async def match_unresolved_to_entity(
 
 @router.post(
     "/unresolved/{mention_id}/promote",
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def promote_unresolved_to_entity(
     mention_id: uuid.UUID,
@@ -383,7 +383,7 @@ async def promote_unresolved_to_entity(
 
 @router.post(
     "/unresolved/{mention_id}/dismiss",
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def dismiss_unresolved(
     mention_id: uuid.UUID,

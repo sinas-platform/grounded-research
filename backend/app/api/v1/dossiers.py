@@ -23,7 +23,7 @@ async def list_dossiers(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    read_all = await caller.has_permission("grove.dossiers.read:all")
+    read_all = await caller.has_permission("sgr.dossiers.read:all")
     stmt = select(Dossier).where(visible_clause(Dossier, caller, read_all=read_all))
     if dossier_class_id is not None:
         stmt = stmt.where(Dossier.dossier_class_id == dossier_class_id)
@@ -34,7 +34,7 @@ async def list_dossiers(
     "",
     response_model=DossierOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.dossiers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.dossiers.write:own"))],
 )
 async def create_dossier(
     payload: DossierIn,
@@ -56,7 +56,7 @@ async def get_dossier(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    read_all = await caller.has_permission("grove.dossiers.read:all")
+    read_all = await caller.has_permission("sgr.dossiers.read:all")
     stmt = (
         select(Dossier)
         .where(Dossier.id == dossier_id)
@@ -72,7 +72,7 @@ async def get_dossier(
     "/{dossier_id}/documents",
     response_model=DossierDocumentOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.dossiers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.dossiers.write:own"))],
 )
 async def assign_dossier_document(
     dossier_id: uuid.UUID,

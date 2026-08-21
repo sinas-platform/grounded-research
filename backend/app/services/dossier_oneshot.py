@@ -29,7 +29,7 @@ from app.services.query_runner import _Sinas
 
 log = logging.getLogger(__name__)
 
-DOSSIER_AGENT = "grove/dossier-oneshot-agent"
+DOSSIER_AGENT = "sgr/dossier-oneshot-agent"
 _MAX_CANDIDATES = 100
 
 _PROMPT = """Assign one document to the dossiers it belongs to. Reply with ONLY a JSON object, no prose.

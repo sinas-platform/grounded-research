@@ -4,7 +4,7 @@ The agent loop runs against a draft Result whose filter is persisted in
 `result.filter`. Each mutation here:
   - validates `filter_version` (optimistic concurrency)
   - applies the change atomically
-  - server-writes a `result_trace` row attributed to `"grove"` with the
+  - server-writes a `result_trace` row attributed to `"sgr"` with the
     before/after filter and candidate-count delta
   - returns the new version, full filter, count, and trace sequence
 
@@ -45,7 +45,7 @@ from app.services import result_filter as svc
 router = APIRouter(
     prefix="/retrieval/results/{result_id}",
     tags=["retrieval-results"],
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 
 

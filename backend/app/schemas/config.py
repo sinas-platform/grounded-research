@@ -155,7 +155,7 @@ class DossierClassPropertyOut(TimestampedOut, DossierClassPropertyIn):
 
 
 # ─────────────────────────────────────────────────────────────
-# Playbooks (content + scope, both Grove-side)
+# Playbooks (content + scope, both SGR-side)
 # ─────────────────────────────────────────────────────────────
 PlaybookKindLit = Literal["retrieval", "synthesis"]
 

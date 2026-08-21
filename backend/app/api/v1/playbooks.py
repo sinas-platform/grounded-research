@@ -1,7 +1,7 @@
 """Playbooks — markdown guidance for retrieval and synthesis agents.
 
-Lives entirely in Grove. The deep-search and synthesis agents fetch
-applicable playbooks via the Grove connector (`list_applicable_playbooks`
+Lives entirely in SGR. The deep-search and synthesis agents fetch
+applicable playbooks via the SGR connector (`list_applicable_playbooks`
 + `get_playbook`) at runtime; nothing is stored in Sinas.
 
 A playbook's `kind` is `retrieval` or `synthesis`. Scope rows attach a
@@ -60,7 +60,7 @@ async def get_playbook(
 @router.put(
     "/{kind}/{name}",
     response_model=PlaybookOut,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def upsert_playbook(
     kind: PlaybookKind,
@@ -94,7 +94,7 @@ async def upsert_playbook(
 @router.delete(
     "/{kind}/{name}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_playbook(
     kind: PlaybookKind, name: str, session: AsyncSession = Depends(get_session)
@@ -134,7 +134,7 @@ async def get_playbook_scope(
     "/{kind}/{name}/scope",
     response_model=PlaybookScopeOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def add_playbook_scope(
     kind: PlaybookKind,
@@ -166,7 +166,7 @@ async def add_playbook_scope(
 @router.delete(
     "/scope/{scope_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def delete_playbook_scope(
     scope_id: uuid.UUID, session: AsyncSession = Depends(get_session)

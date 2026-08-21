@@ -4,9 +4,9 @@ All filter mutations route through `_mutate_filter`, which:
   1. Loads the Result and verifies it's a draft (published results are frozen).
   2. Checks the caller-supplied `filter_version` against the row (409 on
      mismatch — optimistic concurrency).
-  3. Applies the caller-supplied transform to a `GroveFilter`.
+  3. Applies the caller-supplied transform to a `SgrFilter`.
   4. Computes before/after candidate counts (visibility-scoped).
-  5. Writes a `ResultTrace` row attributed to `"grove"` with mechanical
+  5. Writes a `ResultTrace` row attributed to `"sgr"` with mechanical
      outcome (filter before/after, candidate count delta).
   6. Persists the new filter + bumped version.
   7. Returns `FilterMutationOut`.
@@ -38,7 +38,7 @@ from app.schemas.result_filter import FilterMutationOut
 from app.schemas.runtime import (
     EntityFilter,
     FieldFilter,
-    GroveFilter,
+    SgrFilter,
     IntrospectOut,
     RegexFilter,
 )
@@ -47,9 +47,9 @@ from app.services.visibility import visible_clause
 
 
 # Author attribution for server-written trace rows. Agents writing narrative
-# entries via append_trace use their own namespace/name; "grove" here is the
+# entries via append_trace use their own namespace/name; "sgr" here is the
 # bright-line marker for "the server did this in response to a mutation op."
-AUTO_TRACE_AGENT = "grove"
+AUTO_TRACE_AGENT = "sgr"
 
 
 # ───────────────────────────── core helpers ─────────────────────────────
@@ -68,7 +68,7 @@ async def load_visible_result(
     `read:own` permission gate stays at the route layer; this enforces the
     "own" part the gate alone cannot."""
     lift = await caller.has_permission(
-        "grove.results.write:all" if for_write else "grove.results.read:all"
+        "sgr.results.write:all" if for_write else "sgr.results.read:all"
     )
     row = (
         await session.execute(
@@ -116,7 +116,7 @@ async def _mutate_filter(
     expected_version: int,
     action: str,
     parameters: dict[str, Any],
-    transform: Callable[[GroveFilter], GroveFilter],
+    transform: Callable[[SgrFilter], SgrFilter],
 ) -> FilterMutationOut:
     result = await _load_draft_result(session, caller, result_id)
     if result.filter_version != expected_version:
@@ -126,7 +126,7 @@ async def _mutate_filter(
             f"caller sent {expected_version}",
         )
 
-    before_filter = GroveFilter(**(result.filter or {}))
+    before_filter = SgrFilter(**(result.filter or {}))
     before_count = await count_candidates(session, caller, before_filter)
 
     after_filter = transform(before_filter)
@@ -191,7 +191,7 @@ def _validate_field_filter_op_values(
 async def set_document_class_filter(
     session, caller, result_id, expected_version, document_class_id
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"document_class_id": document_class_id})
 
     return await _mutate_filter(
@@ -205,7 +205,7 @@ async def set_document_class_filter(
 async def clear_document_class_filter(
     session, caller, result_id, expected_version
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"document_class_id": None})
 
     return await _mutate_filter(
@@ -219,7 +219,7 @@ async def clear_document_class_filter(
 async def set_dossier_filter(
     session, caller, result_id, expected_version, dossier_id
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"dossier_id": dossier_id})
 
     return await _mutate_filter(
@@ -233,7 +233,7 @@ async def set_dossier_filter(
 async def set_dossier_class_filter(
     session, caller, result_id, expected_version, dossier_class_id
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"dossier_class_id": dossier_class_id})
 
     return await _mutate_filter(
@@ -247,7 +247,7 @@ async def set_dossier_class_filter(
 async def clear_dossier_filters(
     session, caller, result_id, expected_version
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"dossier_id": None, "dossier_class_id": None})
 
     return await _mutate_filter(
@@ -275,7 +275,7 @@ async def set_field_filter(
 ) -> FilterMutationOut:
     _validate_field_filter_op_values(op, values, value)
 
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         new_ff = FieldFilter(field=field, op=op, values=values, value=value, join=join)
         updated = _without_field(f.field_filters, field) + [new_ff]
         return f.model_copy(update={"field_filters": updated})
@@ -291,7 +291,7 @@ async def set_field_filter(
 async def extend_field_filter_values(
     session, caller, result_id, expected_version, field: str, values: list[Any]
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         existing = _find_field(f.field_filters, field)
         if existing is None:
             # auto-create with op="in"
@@ -321,7 +321,7 @@ async def extend_field_filter_values(
 async def shrink_field_filter_values(
     session, caller, result_id, expected_version, field: str, values: list[Any]
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         existing = _find_field(f.field_filters, field)
         if existing is None:
             # No-op: shrinking a non-existent filter is harmless.
@@ -348,7 +348,7 @@ async def shrink_field_filter_values(
 async def remove_field_filter(
     session, caller, result_id, expected_version, field: str
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"field_filters": _without_field(f.field_filters, field)})
 
     return await _mutate_filter(
@@ -378,7 +378,7 @@ async def set_entity_filter(
     session, caller, result_id, expected_version,
     entity_type_id: uuid.UUID | None, entity_ids: list[uuid.UUID],
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         new_ef = EntityFilter(entity_type_id=entity_type_id, entity_ids=entity_ids)
         updated = _without_entity_slot(f.entity_filters, entity_type_id) + [new_ef]
         return f.model_copy(update={"entity_filters": updated})
@@ -398,7 +398,7 @@ async def extend_entity_filter(
     session, caller, result_id, expected_version,
     entity_type_id: uuid.UUID | None, entity_ids: list[uuid.UUID],
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         existing = _find_entity_slot(f.entity_filters, entity_type_id)
         if existing is None:
             new_ef = EntityFilter(entity_type_id=entity_type_id, entity_ids=list(entity_ids))
@@ -425,7 +425,7 @@ async def shrink_entity_filter(
     session, caller, result_id, expected_version,
     entity_type_id: uuid.UUID | None, entity_ids: list[uuid.UUID],
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         existing = _find_entity_slot(f.entity_filters, entity_type_id)
         if existing is None:
             return f
@@ -450,7 +450,7 @@ async def remove_entity_filter(
     session, caller, result_id, expected_version,
     entity_type_id: uuid.UUID | None,
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(
             update={"entity_filters": _without_entity_slot(f.entity_filters, entity_type_id)}
         )
@@ -473,7 +473,7 @@ def _without_regex_field(filters: list[RegexFilter], field: str) -> list[RegexFi
 async def set_regex_filter(
     session, caller, result_id, expected_version, field: str, pattern: str
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         updated = _without_regex_field(f.regex_filters, field) + [
             RegexFilter(field=field, pattern=pattern)
         ]
@@ -490,7 +490,7 @@ async def set_regex_filter(
 async def remove_regex_filter(
     session, caller, result_id, expected_version, field: str
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(
             update={"regex_filters": _without_regex_field(f.regex_filters, field)}
         )
@@ -509,7 +509,7 @@ async def remove_regex_filter(
 async def set_text_search(
     session, caller, result_id, expected_version, query: str
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"text_search": query})
 
     return await _mutate_filter(
@@ -523,7 +523,7 @@ async def set_text_search(
 async def clear_text_search(
     session, caller, result_id, expected_version
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"text_search": None})
 
     return await _mutate_filter(
@@ -550,7 +550,7 @@ def _dedup_extend(existing: list[uuid.UUID], add: list[uuid.UUID]) -> list[uuid.
 async def add_explicit_includes(
     session, caller, result_id, expected_version, document_ids: list[uuid.UUID]
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         merged = _dedup_extend(list(f.explicit_includes), list(document_ids))
         return f.model_copy(update={"explicit_includes": merged})
 
@@ -565,7 +565,7 @@ async def add_explicit_includes(
 async def remove_explicit_includes(
     session, caller, result_id, expected_version, document_ids: list[uuid.UUID]
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         remaining = [d for d in f.explicit_includes if d not in document_ids]
         return f.model_copy(update={"explicit_includes": remaining})
 
@@ -580,7 +580,7 @@ async def remove_explicit_includes(
 async def clear_explicit_includes(
     session, caller, result_id, expected_version
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"explicit_includes": []})
 
     return await _mutate_filter(
@@ -594,7 +594,7 @@ async def clear_explicit_includes(
 async def add_explicit_excludes(
     session, caller, result_id, expected_version, document_ids: list[uuid.UUID]
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         merged = _dedup_extend(list(f.explicit_excludes), list(document_ids))
         return f.model_copy(update={"explicit_excludes": merged})
 
@@ -609,7 +609,7 @@ async def add_explicit_excludes(
 async def remove_explicit_excludes(
     session, caller, result_id, expected_version, document_ids: list[uuid.UUID]
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         remaining = [d for d in f.explicit_excludes if d not in document_ids]
         return f.model_copy(update={"explicit_excludes": remaining})
 
@@ -624,7 +624,7 @@ async def remove_explicit_excludes(
 async def clear_explicit_excludes(
     session, caller, result_id, expected_version
 ) -> FilterMutationOut:
-    def t(f: GroveFilter) -> GroveFilter:
+    def t(f: SgrFilter) -> SgrFilter:
         return f.model_copy(update={"explicit_excludes": []})
 
     return await _mutate_filter(
@@ -641,8 +641,8 @@ async def clear_explicit_excludes(
 async def clear_filter(
     session, caller, result_id, expected_version
 ) -> FilterMutationOut:
-    def t(_: GroveFilter) -> GroveFilter:
-        return GroveFilter()
+    def t(_: SgrFilter) -> SgrFilter:
+        return SgrFilter()
 
     return await _mutate_filter(
         session, caller, result_id, expected_version,
@@ -653,9 +653,9 @@ async def clear_filter(
 
 
 async def replace_filter(
-    session, caller, result_id, expected_version, new_filter: GroveFilter
+    session, caller, result_id, expected_version, new_filter: SgrFilter
 ) -> FilterMutationOut:
-    def t(_: GroveFilter) -> GroveFilter:
+    def t(_: SgrFilter) -> SgrFilter:
         return new_filter
 
     return await _mutate_filter(
@@ -770,7 +770,7 @@ async def expand_result_graph(
     to the caller, not yet attached) are attached with per-origin provenance,
     and the walk is recorded in one enforced trace.
 
-    Grove supplies the mechanics only. WHICH edges mean what — citation,
+    SGR supplies the mechanics only. WHICH edges mean what — citation,
     full-text, appeal chains — is domain knowledge: the calling agent reads
     the available definitions (get_relationship_definitions) and its playbook,
     and declares the path. Replaces per-hop agentic traversal (measured at
@@ -844,7 +844,7 @@ async def expand_result_graph(
         if not frontier:
             break
 
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     reachable_docs = set(
         (
             await session.execute(
@@ -874,7 +874,7 @@ async def expand_result_graph(
                 result_id=result_id,
                 document_id=doc_id,
                 reason=f"graph expansion [{path_str}] from {filenames.get(org, org)}",
-                added_by_agent="grove/expand-result-graph",
+                added_by_agent="sgr/expand-result-graph",
             )
         )
         added += 1
@@ -987,7 +987,7 @@ async def list_candidates_by_result(
     result_id: uuid.UUID,
     limit: int,
     offset: int,
-    overlay: GroveFilter | None,
+    overlay: SgrFilter | None,
     order_by: str = "filename",
     direction: str = "asc",
     include_toc: bool = False,
@@ -996,7 +996,7 @@ async def list_candidates_by_result(
 
     Enumerates what's actually in the candidate set so the agent can inspect
     individual rows before deciding to `add_files_to_result`. Visibility-scoped
-    via the same `apply_grove_filter` machinery introspect uses.
+    via the same `apply_sgr_filter` machinery introspect uses.
 
     Sort options for `order_by`:
       - "filename" | "created_at" | "updated_at" | "classification_confidence"
@@ -1012,14 +1012,14 @@ async def list_candidates_by_result(
     """
     from sqlalchemy import asc as sa_asc, desc as sa_desc
     from app.models import Document, DocumentClassProperty, PropertyValue
-    from app.services.introspect import apply_grove_filter
+    from app.services.introspect import apply_sgr_filter
     from app.services.visibility import visible_clause
 
     result = await load_visible_result(session, caller, result_id, for_write=False)
 
-    stored = GroveFilter(**(result.filter or {}))
+    stored = SgrFilter(**(result.filter or {}))
     effective = stored if overlay is None else _merge_overlay(stored, overlay)
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     cols: list[Any] = [
         Document.id,
         Document.filename,
@@ -1030,7 +1030,7 @@ async def list_candidates_by_result(
     if include_toc:
         cols.append(Document.toc)
     stmt = select(*cols).where(visible_clause(Document, caller, read_all=read_all))
-    stmt = apply_grove_filter(stmt, effective)
+    stmt = apply_sgr_filter(stmt, effective)
 
     dir_fn = sa_desc if direction.lower() == "desc" else sa_asc
     if order_by.startswith("property:"):
@@ -1093,7 +1093,7 @@ async def introspect_by_result(
     result_id: uuid.UUID,
     fields: list[str] | None,
     top_k: int,
-    overlay: GroveFilter | None,
+    overlay: SgrFilter | None,
 ) -> IntrospectOut:
     """Read the persisted filter (optionally with an overlay merged on top
     for preview semantics) and return introspect distributions. Read-only —
@@ -1106,12 +1106,12 @@ async def introspect_by_result(
     """
     result = await load_visible_result(session, caller, result_id, for_write=False)
 
-    stored = GroveFilter(**(result.filter or {}))
+    stored = SgrFilter(**(result.filter or {}))
     effective = stored if overlay is None else _merge_overlay(stored, overlay)
     return await introspect_with_filter(session, caller, effective, fields, top_k)
 
 
-def _merge_overlay(base: GroveFilter, overlay: GroveFilter) -> GroveFilter:
+def _merge_overlay(base: SgrFilter, overlay: SgrFilter) -> SgrFilter:
     """Overlay extends base. Scalars on overlay replace; lists extend."""
     merged_field_filters = list(base.field_filters)
     for ff in overlay.field_filters:
@@ -1119,7 +1119,7 @@ def _merge_overlay(base: GroveFilter, overlay: GroveFilter) -> GroveFilter:
     merged_regex_filters = list(base.regex_filters)
     for rf in overlay.regex_filters:
         merged_regex_filters = _without_regex_field(merged_regex_filters, rf.field) + [rf]
-    return GroveFilter(
+    return SgrFilter(
         document_class_id=overlay.document_class_id or base.document_class_id,
         field_filters=merged_field_filters,
         regex_filters=merged_regex_filters,

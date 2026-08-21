@@ -1,12 +1,12 @@
-"""GrovePackage import/export endpoints.
+"""SgrPackage import/export endpoints.
 
-A GrovePackage is a single YAML file describing the full Grove-side domain
+A SgrPackage is a single YAML file describing the full SGR-side domain
 config (document classes, entity types, relationship definitions, dossier
 classes, playbooks). Teams keep the file in their own repo and apply it
-idempotently against a Grove deployment.
+idempotently against a SGR deployment.
 
-Playbook content is Grove-owned (see migration 0014); package operations
-are pure Grove writes — no Sinas token required.
+Playbook content is SGR-owned (see migration 0014); package operations
+are pure SGR writes — no Sinas token required.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ async def validate_package(yaml_text: str = Body(..., media_type="application/x-
 @router.post(
     "/import",
     response_model=PackageImportResult,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def import_package(
     yaml_text: str = Body(..., media_type="application/x-yaml"),
@@ -48,7 +48,7 @@ async def import_package(
 
 @router.get(
     "/{name}/export",
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def export_package(
     name: str,

@@ -152,7 +152,7 @@ async def test_get_answer_claims_filters_by_owner_without_read_all():
 @pytest.mark.asyncio
 async def test_get_answer_claims_skips_owner_filter_with_read_all():
     session = _FakeSession([_ExecResult(scalar=_answer()), _ExecResult(rows=[])])
-    caller = _FakeCaller(permissions={"grove.answers.read:all"})
+    caller = _FakeCaller(permissions={"sgr.answers.read:all"})
     await get_answer_claims(uuid.uuid4(), session=session, caller=caller)
     assert "owner_id" not in str(session.statements[0].whereclause)
 
@@ -295,7 +295,7 @@ async def test_draft_claim_inserts_when_answer_visible():
 @pytest.mark.asyncio
 async def test_draft_claim_skips_owner_filter_with_write_all():
     session = _FakeSession([_ExecResult(scalar=_answer()), _ExecResult(scalar=None)])
-    caller = _FakeCaller(permissions={"grove.answers.write:all"})
+    caller = _FakeCaller(permissions={"sgr.answers.write:all"})
     await draft_claim(
         uuid.uuid4(), DraftClaimIn(sequence=1, claim_text="c"), session=session, caller=caller
     )

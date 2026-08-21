@@ -1,6 +1,6 @@
-"""GrovePackage — single-YAML domain config for a Grove deployment.
+"""SgrPackage — single-YAML domain config for a SGR deployment.
 
-A package declares all Grove-side configuration (document classes + their
+A package declares all SGR-side configuration (document classes + their
 properties + attached entity types, entity types, relationship definitions
 + states, dossier classes + their properties + linked document classes,
 playbook scope + playbook skill content) so a team can keep the file in
@@ -178,9 +178,12 @@ class PackageInfo(_Strict):
     url: str | None = None
 
 
-class GrovePackage(_Strict):
-    apiVersion: Literal["grove.sinas.co/v1"] = "grove.sinas.co/v1"
-    kind: Literal["GrovePackage"] = "GrovePackage"
+class SgrPackage(_Strict):
+    # The pre-rename spelling is still accepted: deployment manifests live in
+    # client repos and must keep installing across the rename. New exports emit
+    # the sgr form.
+    apiVersion: Literal["sgr.sinas.co/v1", "grove.sinas.co/v1"] = "sgr.sinas.co/v1"
+    kind: Literal["SgrPackage", "GrovePackage"] = "SgrPackage"
     metadata: PackageMetadata
     package: PackageInfo
     spec: PackageSpec = Field(default_factory=PackageSpec)

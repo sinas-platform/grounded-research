@@ -43,7 +43,7 @@ def get_admin_client() -> SinasClient:
         settings = get_settings()
         if not settings.sinas_api_key:
             raise RuntimeError(
-                "GROVE_AUTH_MODE=simplified requires SINAS_API_KEY to be set"
+                "SGR_AUTH_MODE=simplified requires SINAS_API_KEY to be set"
             )
         _admin_client = SinasClient(
             base_url=settings.sinas_url, api_key=settings.sinas_api_key

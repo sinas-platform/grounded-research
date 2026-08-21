@@ -2,7 +2,7 @@
 
 A QueryRun is the query-side sibling of IngestionRun: one row per question,
 driven end-to-end by `services/query_runner.py` with the choreography in
-Grove and only judgment delegated to agents. Sub-search chats, the parent
+SGR and only judgment delegated to agents. Sub-search chats, the parent
 result, the answer, and per-stage timings all hang off this row, so a run is
 resumable and auditable from the database alone.
 """

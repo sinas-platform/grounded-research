@@ -1,22 +1,22 @@
 apiVersion: sinas.co/v1
 kind: SinasPackage
 metadata:
-  name: sinas-grove
+  name: sinas-grounded-research
   description: >
-    Multi-agent document indexing and retrieval. Installs the Grove connector,
-    document ingestion collection, post-upload function, and the 13 Grove
+    Multi-agent document indexing and retrieval. Installs the SGR connector,
+    document ingestion collection, post-upload function, and the 13 SGR
     agents (ingestion, retrieval, synthesis).
 
 package:
-  name: sinas-grove
+  name: sinas-grounded-research
   version: "0.1.41"
   description: >
-    Sinas Grove — stateful, multi-agent document indexing and retrieval. The
+    Sinas Grounded Research — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
-    entity/relationship types, dossiers, playbooks) is configured in the Grove
+    entity/relationship types, dossiers, playbooks) is configured in the SGR
     backend and discovered by agents at runtime via the connector.
-  author: Sinas Grove contributors
-  url: https://github.com/sinas-platform/sinas-grove
+  author: Sinas Grounded Research contributors
+  url: https://github.com/sinas-platform/sinas-grounded-research
 
 spec:
   # ─────────────────────────────────────────────
@@ -34,13 +34,13 @@ spec:
   # Install-time variables — prompted for by the package installer
   # ─────────────────────────────────────────────
   variables:
-    - name: GROVE_URL
+    - name: SGR_URL
       type: text
       description: >
-        Base URL where Grove's HTTP API is reachable from inside the Sinas
+        Base URL where SGR's HTTP API is reachable from inside the Sinas
         containers. For local docker-compose this is http://host.docker.internal:8080.
-        For deployed environments, the public/internal URL of the Grove service.
-      example: https://grove.example.com
+        For deployed environments, the public/internal URL of the SGR service.
+      example: https://sgr.example.com
       required: true
 
     - name: SEARCH_LLM
@@ -107,9 +107,9 @@ spec:
   # Collection — uploads here trigger ingestion
   # ─────────────────────────────────────────────
   collections:
-    - namespace: grove
+    - namespace: sgr
       name: documents
-      description: Documents indexed by Grove. Upload here to trigger ingestion.
+      description: Documents indexed by SGR. Upload here to trigger ingestion.
       metadataSchema:
         type: object
         properties:
@@ -125,20 +125,20 @@ spec:
         additionalProperties: true
       maxFileSizeMb: 50
       maxTotalSizeGb: 50
-      postUploadFunction: grove/post_upload
+      postUploadFunction: sgr/post_upload
 
   # ─────────────────────────────────────────────
-  # Connector — wraps the Grove HTTP API
+  # Connector — wraps the SGR HTTP API
   # ─────────────────────────────────────────────
   connectors:
-    - namespace: grove
+    - namespace: sgr
       name: api
       description: >
-        HTTP API of the Sinas Grove backend. Agents call these operations to
+        HTTP API of the Sinas Grounded Research backend. Agents call these operations to
         introspect the domain model, read document content, and write
         ingestion / retrieval / synthesis artifacts.
-      baseUrl: ${{ vars.GROVE_URL }}
-      # `sinas_token` forwards the calling user's Sinas token. Grove validates
+      baseUrl: ${{ vars.SGR_URL }}
+      # `sinas_token` forwards the calling user's Sinas token. SGR validates
       # it via Sinas's /auth/me endpoint to resolve the user's identity and
       # roles for owner/roles enforcement. No shared API key is needed.
       auth:
@@ -180,7 +180,7 @@ spec:
           path: /api/v1/config/relationship-definitions
           description: All relationship definitions.
 
-        # ── playbooks (Grove-owned) ──
+        # ── playbooks (SGR-owned) ──
         - name: list_applicable_playbooks
           method: GET
           path: /api/v1/playbooks/{{ kind }}/applicable/list
@@ -1412,14 +1412,14 @@ spec:
             required: [claim_id]
 
   # ─────────────────────────────────────────────
-  # Function — post-upload hook on grove/documents
+  # Function — post-upload hook on sgr/documents
   # ─────────────────────────────────────────────
   functions:
-    - namespace: grove
+    - namespace: sgr
       name: post_upload
       description: >
-        Invoked by Sinas after a file is uploaded to the grove/documents
-        collection. Registers the document with Grove and submits an
+        Invoked by Sinas after a file is uploaded to the sgr/documents
+        collection. Registers the document with SGR and submits an
         ingestion run (the in-process pipeline).
       sharedPool: true
       timeout: 120
@@ -1444,7 +1444,7 @@ spec:
         from markitdown import MarkItDown
 
         SINAS_URL = os.environ.get("SINAS_URL", "http://host.docker.internal:8000")
-        GROVE_URL = os.environ.get("GROVE_URL", "http://host.docker.internal:8080")
+        SGR_URL = os.environ.get("SGR_URL", "http://host.docker.internal:8080")
 
         def handler(input_data, context):
             token = context["access_token"]
@@ -1465,7 +1465,7 @@ spec:
 
             # 2. Convert to markdown — MarkItDown handles docx, pdf, html,
             #    xlsx, pptx, csv, and many more. Falls back to None on any
-            #    failure; Grove still registers the document, and a later
+            #    failure; SGR still registers the document, and a later
             #    extraction agent can retry.
             content_md = None
             extraction_error = None
@@ -1484,28 +1484,28 @@ spec:
                         pass
             except Exception as exc:
                 extraction_error = f"{type(exc).__name__}: {exc}"
-                print(f"[grove/post_upload] markitdown failed for {filename}: {extraction_error}")
+                print(f"[sgr/post_upload] markitdown failed for {filename}: {extraction_error}")
                 content_md = None
             else:
                 if not content_md:
                     print(
-                        f"[grove/post_upload] markitdown produced empty content for {filename}"
+                        f"[sgr/post_upload] markitdown produced empty content for {filename}"
                     )
 
-            # 3. Register the document with Grove (idempotent on collection_file_id).
+            # 3. Register the document with SGR (idempotent on collection_file_id).
             # If the upload metadata carries `staged: true`, the document is
-            # parked: Grove still indexes the text but the auto-pipeline
+            # parked: SGR still indexes the text but the auto-pipeline
             # (classifier + extractors) doesn't fire. The user runs an
             # IngestionRun later to promote staged docs once their schema is
             # ready. Used by the discovery upload flow.
             upload_metadata = input_data.get("metadata") or {}
             staged = bool(upload_metadata.get("staged", False))
-            grove_headers = {
+            sgr_headers = {
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             }
             register = requests.post(
-                f"{GROVE_URL}/api/v1/ingest/post-upload",
+                f"{SGR_URL}/api/v1/ingest/post-upload",
                 json={
                     "collection_file_id": input_data["file_id"],
                     "filename": filename,
@@ -1513,7 +1513,7 @@ spec:
                     "metadata": upload_metadata,
                     "staged": staged,
                 },
-                headers=grove_headers,
+                headers=sgr_headers,
                 timeout=60,
             )
             register.raise_for_status()
@@ -1532,14 +1532,14 @@ spec:
                     "agent_reply": "skipped — staged document",
                 }
 
-            # 4. Kick the Grove pipeline: one ingestion run over this
+            # 4. Kick the SGR pipeline: one ingestion run over this
             #    document (all parts — extract, ground, resolve,
             #    relationships, dossiers). The run executes in-process in
-            #    Grove; this call returns as soon as it is submitted.
+            #    SGR; this call returns as soon as it is submitted.
             run = requests.post(
-                f"{GROVE_URL}/api/v1/ingestion/runs",
+                f"{SGR_URL}/api/v1/ingestion/runs",
                 json={"filter": {"document_ids": [registered["document_id"]]}},
-                headers=grove_headers,
+                headers=sgr_headers,
                 timeout=60,
             )
             run.raise_for_status()
@@ -1554,17 +1554,17 @@ spec:
                 "ingestion_run_id": run_result.get("run_id"),
             }
 
-  # Playbooks are Grove-owned (since v0.1.13). They are no longer Sinas
+  # Playbooks are SGR-owned (since v0.1.13). They are no longer Sinas
   # skills; the agents fetch them at runtime via `list_applicable_playbooks`
   # and `get_playbook` connector ops below. Deployments author playbooks in
-  # the Grove admin UI or via a GrovePackage YAML.
+  # the SGR admin UI or via a SgrPackage YAML.
 
   # ─────────────────────────────────────────────
   # Agents
   # ─────────────────────────────────────────────
   agents:
     # ───────── ingestion ─────────
-    - namespace: grove
+    - namespace: sgr
       name: search-orchestrator
       description: Decomposes queries; runs deep_search, merges results.
       llmProviderName: ${{ vars.SEARCH_LLM }}
@@ -1605,7 +1605,7 @@ spec:
         Single-shot queries don't need decomposition — invoke
         `deep-search-agent` once and publish its result directly.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - create_draft_result
             - merge_results
@@ -1614,9 +1614,9 @@ spec:
             - get_result
             - list_results
       enabledAgents:
-        - grove/deep-search-agent
+        - sgr/deep-search-agent
 
-    - namespace: grove
+    - namespace: sgr
       name: deep-search-agent
       description: Runs the introspect-filter-check loop; produces a draft result.
       llmProviderName: ${{ vars.SEARCH_LLM }}
@@ -1807,7 +1807,7 @@ spec:
 
         Domain knowledge is in playbooks — never hardcode strategy.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             # config discovery
             - get_document_classes
@@ -1874,15 +1874,15 @@ spec:
             - clear_explicit_excludes
             - clear_filter
             - replace_filter
-            # playbooks (Grove-owned)
+            # playbooks (SGR-owned)
             - list_applicable_playbooks
             - get_playbook
       enabledAgents:
-        - grove/process-validation-agent
-        - grove/relationship-discovery-agent
-        - grove/deep-search-agent  # recursion for nested narrowing
+        - sgr/process-validation-agent
+        - sgr/relationship-discovery-agent
+        - sgr/deep-search-agent  # recursion for nested narrowing
 
-    - namespace: grove
+    - namespace: sgr
       name: process-validation-agent
       description: Checks a draft result against playbook criteria.
       llmProviderName: ${{ vars.VALIDATION_LLM }}
@@ -1923,7 +1923,7 @@ spec:
         Do not modify the result yourself — your only output is the
         verdict.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - get_result
             - get_result_documents
@@ -1933,7 +1933,7 @@ spec:
             - list_applicable_playbooks
             - get_playbook
 
-    - namespace: grove
+    - namespace: sgr
       name: relationship-discovery-agent
       description: Proposes new relationships based on research context.
       llmProviderName: ${{ vars.SEARCH_LLM }}
@@ -1958,7 +1958,7 @@ spec:
         review or auto-approval based on the deployment's confidence
         threshold.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - get_relationship_definitions
             - get_result
@@ -1970,7 +1970,7 @@ spec:
             - propose_relationship
 
     # ───────── synthesis ─────────
-    - namespace: grove
+    - namespace: sgr
       name: synthesis-agent
       description: Drafts an answer with claim-bound evidence.
       llmProviderName: ${{ vars.SYNTHESIS_LLM }}
@@ -2051,7 +2051,7 @@ spec:
         Scope: your synthesis playbook sets the claim-count target;
         honor it — every claim you draft buys a validation cost.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - start_answer
             - order_documents
@@ -2071,7 +2071,7 @@ spec:
             - get_playbook
 
     # ───────── discovery (config auto-suggestion) ─────────
-    - namespace: grove
+    - namespace: sgr
       name: discovery-agent
       description: Per-document config suggester. One parameterized agent across all kinds (document_class, entity_type, relationship_definition, dossier_class, document_class_property).
       llmProviderName: ${{ vars.SEARCH_LLM }}
@@ -2175,7 +2175,7 @@ spec:
         - Do not read or modify already-extracted data (property values,
           entity mentions). Discovery only inspects the document text.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - get_document
             - read_document_content
@@ -2187,7 +2187,7 @@ spec:
             - get_dossier_classes
             - submit_discovery_candidate
 
-    - namespace: grove
+    - namespace: sgr
       name: discovery-consolidator-agent
       description: Reads raw discovery candidates for a run, clusters semantic duplicates, and emits deduplicated config_proposal rows.
       llmProviderName: ${{ vars.SEARCH_LLM }}
@@ -2245,14 +2245,14 @@ spec:
           payloads should always be the same within one run (it was passed
           as `parent_class_id`). Keep it on the consolidated payload.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - list_run_candidates
             - submit_consolidated_proposal
 
-    - namespace: grove
+    - namespace: sgr
       name: answer-gate-agent
-      description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by Grove's query runner before publishing.
+      description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by SGR's query runner before publishing.
       llmProviderName: ${{ vars.VALIDATION_LLM }}
       temperature: 0.0
       systemPrompt: |
@@ -2284,9 +2284,9 @@ spec:
         Report only findings you are confident in — an empty finding beats
         a speculative one. Reply with ONLY the requested JSON object.
 
-    - namespace: grove
+    - namespace: sgr
       name: remediation-agent
-      description: Stateless remediation drafter — turns answer-gate findings into explicit claim actions with line-numbered evidence. Invoked by Grove's query runner after the gate flags issues.
+      description: Stateless remediation drafter — turns answer-gate findings into explicit claim actions with line-numbered evidence. Invoked by SGR's query runner after the gate flags issues.
       llmProviderName: ${{ vars.SEARCH_LLM }}
       model: ${{ vars.SEARCH_MODEL }}
       temperature: 0.0
@@ -2306,9 +2306,9 @@ spec:
         conflicting claims must cite the evidence of both positions, not
         opinion. Reply with ONLY the requested JSON object.
 
-    - namespace: grove
+    - namespace: sgr
       name: entity-resolution-agent
-      description: Stateless mention adjudicator — links ambiguous entity mentions to candidates using document context. Invoked per document by Grove's entity resolver.
+      description: Stateless mention adjudicator — links ambiguous entity mentions to candidates using document context. Invoked per document by SGR's entity resolver.
       llmProviderName: ${{ vars.INGESTION_LLM }}
       providerOverrides:
         prompt_caching: false
@@ -2325,9 +2325,9 @@ spec:
         Prefer null over a doubtful match — a wrong link is worse than no
         link. Reply with ONLY the requested JSON object.
 
-    - namespace: grove
+    - namespace: sgr
       name: grounding-agent
-      description: Stateless grounding judge - decides whether a document actually refers to each extracted name. Invoked per document by Grove's grounding gate.
+      description: Stateless grounding judge - decides whether a document actually refers to each extracted name. Invoked per document by SGR's grounding gate.
       llmProviderName: ${{ vars.INGESTION_LLM }}
       providerOverrides:
         prompt_caching: false
@@ -2345,9 +2345,9 @@ spec:
         name is worse than keeping a doubtful one. Reply with ONLY the
         requested JSON object.
 
-    - namespace: grove
+    - namespace: sgr
       name: dossier-oneshot-agent
-      description: Stateless one-shot dossier matcher - reads a document's identity plus the candidate dossiers and returns assignments as JSON. Invoked per document by Grove's pipeline when dossier classes are configured.
+      description: Stateless one-shot dossier matcher - reads a document's identity plus the candidate dossiers and returns assignments as JSON. Invoked per document by SGR's pipeline when dossier classes are configured.
       llmProviderName: ${{ vars.INGESTION_LLM }}
       providerOverrides:
         prompt_caching: false
@@ -2363,9 +2363,9 @@ spec:
         names exactly as given; never invent a dossier. No clear match
         means an empty list. Reply with ONLY the requested JSON object.
 
-    - namespace: grove
+    - namespace: sgr
       name: relationship-oneshot-agent
-      description: Stateless one-shot relationship extractor - reads a document plus its recorded entities and the relationship definitions, returns explicitly stated edges as JSON. Invoked per document by Grove's one-shot ingestion path.
+      description: Stateless one-shot relationship extractor - reads a document plus its recorded entities and the relationship definitions, returns explicitly stated edges as JSON. Invoked per document by SGR's one-shot ingestion path.
       llmProviderName: ${{ vars.INGESTION_LLM }}
       providerOverrides:
         prompt_caching: false
@@ -2384,9 +2384,9 @@ spec:
         edge carries a short verbatim quote as evidence. Reply with ONLY
         the requested JSON object.
 
-    - namespace: grove
+    - namespace: sgr
       name: doc-metadata-agent
-      description: Stateless one-shot document-metadata extractor (class, summary, properties, entities) invoked per document by Grove's one-shot ingestion path.
+      description: Stateless one-shot document-metadata extractor (class, summary, properties, entities) invoked per document by SGR's one-shot ingestion path.
       llmProviderName: ${{ vars.EXTRACTION_LLM }}
       providerOverrides:
         prompt_caching: false
@@ -2403,9 +2403,9 @@ spec:
         Entity names must appear in the document. Never repeat an entity
         from the already-recorded list.
 
-    - namespace: grove
+    - namespace: sgr
       name: evidence-check-agent
-      description: Stateless single-span verdict judge, invoked per evidence row by Grove's validate endpoint.
+      description: Stateless single-span verdict judge, invoked per evidence row by SGR's validate endpoint.
       llmProviderName: ${{ vars.VALIDATION_LLM }}
       temperature: 0.0
       systemPrompt: |
@@ -2422,7 +2422,7 @@ spec:
         SPAN 1: PASS — <one short clause>
         SPAN 2: FAIL — <one short clause>
 
-    - namespace: grove
+    - namespace: sgr
       name: faithfulness-validator-agent
       description: Re-reads cited spans, verifies support, blocks bad publishes.
       # Cheap tier: span-vs-text verification is mechanical; strictness comes
@@ -2466,7 +2466,7 @@ spec:
         send the synthesis_agent back for a revision than to publish a
         weak citation.
       enabledConnectors:
-        - connector: grove/api
+        - connector: sgr/api
           operations:
             - get_answer_evidence
             - read_document_content

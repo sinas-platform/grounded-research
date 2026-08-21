@@ -92,7 +92,7 @@ async def _create_and_submit(
     "/runs",
     response_model=RunCreateOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def create_run(
     payload: RunCreateIn,
@@ -183,7 +183,7 @@ class ReprocessOneIn(BaseModel):
     "/documents/{doc_id}/reprocess",
     response_model=RunCreateOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def reprocess_document(
     doc_id: uuid.UUID,

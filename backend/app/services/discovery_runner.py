@@ -48,14 +48,14 @@ log = logging.getLogger(__name__)
 
 # Per-kind agent assignment.
 KIND_TO_AGENT = {
-    "document_class": ("grove", "discovery-agent"),
-    "entity_type": ("grove", "discovery-agent"),
-    "relationship_definition": ("grove", "discovery-agent"),
-    "dossier_class": ("grove", "discovery-agent"),
-    "document_class_property": ("grove", "discovery-agent"),
+    "document_class": ("sgr", "discovery-agent"),
+    "entity_type": ("sgr", "discovery-agent"),
+    "relationship_definition": ("sgr", "discovery-agent"),
+    "dossier_class": ("sgr", "discovery-agent"),
+    "document_class_property": ("sgr", "discovery-agent"),
 }
 
-CONSOLIDATOR_AGENT = ("grove", "discovery-consolidator-agent")
+CONSOLIDATOR_AGENT = ("sgr", "discovery-consolidator-agent")
 
 
 _TERMINAL_BATCH_STATUSES = {"completed", "partial", "failed", "cancelled"}
@@ -199,7 +199,7 @@ async def submit_scan(
         namespace=namespace,
         name=agent_name,
         inputs=inputs,
-        trigger_id_prefix=f"grove:discovery:{run.id}",
+        trigger_id_prefix=f"sgr:discovery:{run.id}",
     )
 
     batch_id = result["batch_id"]
@@ -301,7 +301,7 @@ async def _submit_consolidator(
                 ),
             }
         ],
-        trigger_id_prefix=f"grove:discovery:{run_id}:consolidate",
+        trigger_id_prefix=f"sgr:discovery:{run_id}:consolidate",
     )
     batch_id = result["batch_id"]
     async with AsyncSessionLocal() as session:

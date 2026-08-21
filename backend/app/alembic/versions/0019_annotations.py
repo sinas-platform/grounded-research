@@ -1,7 +1,7 @@
 """Annotation framework: definitions + materialized values.
 
 annotation_definition holds config-declared derived fields (relationship
-path + reducer + materialize flag), imported from the GrovePackage and
+path + reducer + materialize flag), imported from the SgrPackage and
 validated loudly at import. annotation_value holds materialized results,
 one row per (definition, subject).
 

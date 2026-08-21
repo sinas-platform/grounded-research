@@ -1,13 +1,13 @@
 # Contributing
 
-Sinas Grove is in alpha. The architecture is settling, the schema migrations
+Sinas Grounded Research is in alpha. The architecture is settling, the schema migrations
 will collapse before 1.0, and the package contract with Sinas is still moving.
 That said, feedback while it's in motion is more useful than feedback after.
 
 ## Filing issues
 
-- **Bugs**: include the Grove version (`git rev-parse HEAD`), the Sinas
-  version, the relevant section of `docker logs sinas-grove-grove-1`, and what
+- **Bugs**: include the SGR version (`git rev-parse HEAD`), the Sinas
+  version, the relevant section of `docker logs sinas-grounded-research-sgr-1`, and what
   you expected to happen.
 - **Behavioral questions** ("should this work like X?"): open an issue —
   decisions taken in chats won't make it into the repo.

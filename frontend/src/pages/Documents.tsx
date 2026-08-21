@@ -105,7 +105,7 @@ export default function DocumentsPage() {
     <div>
       <PageHeader
         title="Documents"
-        description="Drop files to ingest. Uploads land in the Sinas grove/documents collection and trigger ingestion automatically — unless staged."
+        description="Drop files to ingest. Uploads land in the Sinas sgr/documents collection and trigger ingestion automatically — unless staged."
         actions={
           <button
             onClick={() => fileRef.current?.click()}

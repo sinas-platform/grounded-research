@@ -2,39 +2,39 @@ services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: grove
-      POSTGRES_PASSWORD: grove
-      POSTGRES_DB: grove
+      POSTGRES_USER: sgr
+      POSTGRES_PASSWORD: sgr
+      POSTGRES_DB: sgr
     ports:
-      # Sinas's own Postgres uses 5433 — Grove uses 5434 to avoid the clash.
+      # Sinas's own Postgres uses 5433 — SGR uses 5434 to avoid the clash.
       - "5434:5432"
     volumes:
-      - grove_pgdata:/var/lib/postgresql/data
+      - sgr_pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U grove"]
+      test: ["CMD-SHELL", "pg_isready -U sgr"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  grove:
+  sgr:
     build:
       context: .
     depends_on:
       postgres:
         condition: service_healthy
     environment:
-      GROVE_DATABASE_URL: postgresql+asyncpg://grove:grove@postgres:5432/grove
-      GROVE_PORT: "8080"
-      GROVE_LOG_LEVEL: INFO
-      GROVE_AUTH_MODE: ${GROVE_AUTH_MODE:-simplified}
-      GROVE_CORS_ORIGINS: http://localhost:5173
-      # Use Grove-scoped names so a generic `SINAS_URL` exported in your shell
+      SGR_DATABASE_URL: postgresql+asyncpg://sgr:sgr@postgres:5432/sgr
+      SGR_PORT: "8080"
+      SGR_LOG_LEVEL: INFO
+      SGR_AUTH_MODE: ${SGR_AUTH_MODE:-simplified}
+      SGR_CORS_ORIGINS: http://localhost:5173
+      # Use SGR-scoped names so a generic `SINAS_URL` exported in your shell
       # (e.g. for SDK use against your host) doesn't leak into the container,
       # where `localhost` resolves to the container itself, not the host.
-      SINAS_URL: ${GROVE_SINAS_URL:-http://host.docker.internal:8000}
-      SINAS_API_KEY: ${GROVE_SINAS_API_KEY:-}
+      SINAS_URL: ${SGR_SINAS_URL:-http://host.docker.internal:8000}
+      SINAS_API_KEY: ${SGR_SINAS_API_KEY:-}
     ports:
       - "8080:8080"
 
 volumes:
-  grove_pgdata:
+  sgr_pgdata:

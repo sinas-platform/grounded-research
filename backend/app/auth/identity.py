@@ -20,7 +20,7 @@ class CallerIdentity:
     user_id: uuid.UUID
     roles: list[str] = field(default_factory=list)
     is_admin: bool = False
-    # Bearer token Grove uses to call back to Sinas as this caller.
+    # Bearer token SGR uses to call back to Sinas as this caller.
     # In `sinas` mode → the user's session JWT.
     # In `simplified` mode → the configured SINAS_API_KEY.
     sinas_token: str | None = None
@@ -65,7 +65,7 @@ async def _resolve_simplified_identity() -> CallerIdentity:
         if not settings.sinas_api_key:
             raise HTTPException(
                 status.HTTP_500_INTERNAL_SERVER_ERROR,
-                "GROVE_AUTH_MODE=simplified requires SINAS_API_KEY",
+                "SGR_AUTH_MODE=simplified requires SINAS_API_KEY",
             )
         try:
             me = await asyncio.to_thread(get_admin_client().auth.get_me)
@@ -99,7 +99,7 @@ async def get_caller(
     authorization: Annotated[str | None, Header()] = None,
 ) -> CallerIdentity:
     settings = get_settings()
-    if settings.grove_auth_mode == "simplified":
+    if settings.sgr_auth_mode == "simplified":
         # Simplified mode maps every caller to the admin identity, but a
         # PRESENTED bearer must still be real: the configured api key, or a
         # token Sinas recognises. Accepting arbitrary tokens hides client
@@ -154,7 +154,7 @@ async def get_caller(
 
 
 def require_permission(permission: str):
-    """FastAPI dependency: ensures the caller holds the given Grove permission."""
+    """FastAPI dependency: ensures the caller holds the given SGR permission."""
 
     async def _checker(
         caller: CallerIdentity = Depends(get_caller),

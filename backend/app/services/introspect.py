@@ -1,7 +1,7 @@
 """Shared introspect implementation.
 
 The same distributions math is invoked from two places:
-  - `POST /retrieval/introspect` — stateless, caller passes a GroveFilter
+  - `POST /retrieval/introspect` — stateless, caller passes a SgrFilter
   - `POST /retrieval/results/{id}/introspect` — uses Result.filter
 Both call `introspect_with_filter` so the math has one home.
 
@@ -30,7 +30,7 @@ from app.models import (
 from app.schemas.runtime import (
     EntityFilter,
     FieldFilter,
-    GroveFilter,
+    SgrFilter,
     IntrospectFieldDistribution,
     IntrospectOut,
 )
@@ -117,8 +117,8 @@ def _field_filter_exists_clause(ff: FieldFilter, document_class_id):
     )
 
 
-def apply_grove_filter(
-    stmt, f: GroveFilter, *, skip_field: str | None = None
+def apply_sgr_filter(
+    stmt, f: SgrFilter, *, skip_field: str | None = None
 ):
     """Narrow a Document-selecting statement by the supported clauses.
 
@@ -184,11 +184,11 @@ def apply_grove_filter(
 
 
 async def count_candidates(
-    session: AsyncSession, caller: CallerIdentity, f: GroveFilter
+    session: AsyncSession, caller: CallerIdentity, f: SgrFilter
 ) -> int:
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     base = select(Document.id).where(visible_clause(Document, caller, read_all=read_all))
-    base = apply_grove_filter(base, f)
+    base = apply_sgr_filter(base, f)
     total = (
         await session.execute(select(func.count()).select_from(base.subquery()))
     ).scalar_one()
@@ -203,12 +203,12 @@ SUMMARY_PREVIEW_CHARS = 240
 
 
 async def matching_document_summaries(
-    session: AsyncSession, caller: CallerIdentity, f: GroveFilter, limit: int
+    session: AsyncSession, caller: CallerIdentity, f: SgrFilter, limit: int
 ):
     """Enumerate the documents matching the filter (instead of a count).
 
     Same selection logic as `count_candidates` — visibility scope plus
-    `apply_grove_filter` — but returns, per match, the fields a caller needs
+    `apply_sgr_filter` — but returns, per match, the fields a caller needs
     to identify each document without a per-id get_document call: filename,
     class (id and name), and a summary preview. The class name comes from a
     left join to `document_class` (nullable FK — an inner join would drop
@@ -222,7 +222,7 @@ async def matching_document_summaries(
     matched, and an inner join on `current_version_id` (nullable) would drop
     matched documents outright.
     """
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     cols = (
         Document.id,
         Document.filename,
@@ -235,9 +235,9 @@ async def matching_document_summaries(
         .where(visible_clause(Document, caller, read_all=read_all))
         .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
     )
-    stmt = apply_grove_filter(stmt, f)
+    stmt = apply_sgr_filter(stmt, f)
     if f.text_search:
-        # 'simple' pinned to match the index build — see apply_grove_filter.
+        # 'simple' pinned to match the index build — see apply_sgr_filter.
         # literal_column keeps it an unquoted-literal regconfig rather than a
         # text bind param, which asyncpg would fail to resolve to a regconfig.
         tsquery = func.websearch_to_tsquery(
@@ -265,13 +265,13 @@ async def matching_document_summaries(
 async def introspect_with_filter(
     session: AsyncSession,
     caller: CallerIdentity,
-    f: GroveFilter,
+    f: SgrFilter,
     fields: list[str] | None,
     top_k: int,
 ) -> IntrospectOut:
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     base = select(Document.id).where(visible_clause(Document, caller, read_all=read_all))
-    base = apply_grove_filter(base, f)
+    base = apply_sgr_filter(base, f)
     total = (
         await session.execute(select(func.count()).select_from(base.subquery()))
     ).scalar_one()
@@ -325,7 +325,7 @@ async def introspect_with_filter(
             field_base = select(Document.id).where(
                 visible_clause(Document, caller, read_all=read_all)
             )
-            field_base = apply_grove_filter(field_base, f, skip_field=prop.name)
+            field_base = apply_sgr_filter(field_base, f, skip_field=prop.name)
             field_total = (
                 await session.execute(
                     select(func.count()).select_from(field_base.subquery())

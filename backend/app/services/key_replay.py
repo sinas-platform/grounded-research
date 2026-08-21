@@ -39,7 +39,7 @@ from app.models import (
 )
 from app.services.entity_keys import KeyIndex, learn_aliases
 
-_log = logging.getLogger("grove.key_replay")
+_log = logging.getLogger("sgr.key_replay")
 
 
 async def replay_unresolved(

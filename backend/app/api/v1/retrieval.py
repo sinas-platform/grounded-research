@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
 from app.schemas.runtime import (
-    GroveFilter,
+    SgrFilter,
     IntrospectIn,
     IntrospectOut,
     MatchingDocumentOut,
@@ -42,7 +42,7 @@ async def introspect(
     """Stateless introspect — pass a filter inline. Kept for ad-hoc/UI use.
     The agent loop should prefer `/results/{id}/introspect`, which uses the
     persisted filter and avoids re-emitting it on every iteration."""
-    f = payload.filter or GroveFilter()
+    f = payload.filter or SgrFilter()
     return await introspect_with_filter(session, caller, f, payload.fields, payload.top_k)
 
 
@@ -59,7 +59,7 @@ async def matching_documents(
     to a Result. Each match carries its filename, class, and a summary preview,
     so the caller can tell what a document is without a follow-up get_document.
     Same filter body and query logic, capped by `limit` (default 50, max 200)."""
-    f = payload.filter or GroveFilter()
+    f = payload.filter or SgrFilter()
     rows = await matching_document_summaries(session, caller, f, payload.limit)
     documents = [
         MatchingDocumentOut(
@@ -101,7 +101,7 @@ class TraceIn(BaseModel):
 @router.post(
     "/results",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def create_draft_result(
     payload: CreateResultIn,
@@ -125,7 +125,7 @@ async def create_draft_result(
 
 @router.post(
     "/results/{result_id}/files",
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def add_files_to_result(
     result_id: uuid.UUID,
@@ -185,7 +185,7 @@ class ExpandResultGraphIn(BaseModel):
 
 @router.post(
     "/results/{result_id}/expand",
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def expand_result_graph(
     result_id: uuid.UUID,
@@ -209,7 +209,7 @@ class MergeResultsIn(BaseModel):
 
 @router.post(
     "/results/{result_id}/merge",
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def merge_results(
     result_id: uuid.UUID,
@@ -227,7 +227,7 @@ async def merge_results(
 
 @router.post(
     "/results/{result_id}/trace",
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def append_trace(
     result_id: uuid.UUID,
@@ -258,7 +258,7 @@ async def append_trace(
 
 @router.post(
     "/results/{result_id}/publish",
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def publish_result(
     result_id: uuid.UUID,
@@ -270,8 +270,8 @@ async def publish_result(
     from sqlalchemy import select as sa_select
 
     from app.models import Document, ResultDocument, ResultTrace
-    from app.schemas.runtime import GroveFilter
-    from app.services.introspect import apply_grove_filter
+    from app.schemas.runtime import SgrFilter
+    from app.services.introspect import apply_sgr_filter
     from app.services.result_filter import (
         AUTO_TRACE_AGENT,
         _next_trace_sequence,
@@ -297,12 +297,12 @@ async def publish_result(
     )
     coverage: float | None = None
     if attached:
-        f = GroveFilter(**(result.filter or {}))
-        read_all = await caller.has_permission("grove.documents.read:all")
+        f = SgrFilter(**(result.filter or {}))
+        read_all = await caller.has_permission("sgr.documents.read:all")
         stmt = sa_select(Document.id).where(
             visible_clause(Document, caller, read_all=read_all)
         )
-        stmt = apply_grove_filter(stmt, f)
+        stmt = apply_sgr_filter(stmt, f)
         selected = set((await session.execute(stmt)).scalars())
         coverage = round(len(attached & selected) / len(attached), 3)
 

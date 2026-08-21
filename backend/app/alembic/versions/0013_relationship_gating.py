@@ -6,7 +6,7 @@ calls POST /ingest/relationships:
   - review  : insert as a RelationshipProposal regardless of which endpoint
               the agent called
   - closed  : reject (HTTP 409). Curated edges only — populated via the
-              GrovePackage YAML or the admin UI; runtime extraction blocked.
+              SgrPackage YAML or the admin UI; runtime extraction blocked.
 
 Mirrors entity_type.creation_mode added in 0012.
 

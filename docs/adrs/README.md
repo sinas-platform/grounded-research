@@ -1,6 +1,6 @@
 # Architecture Decision Records
 
-This directory records architecturally significant decisions about Grove. ADRs are append-only: when a decision is superseded, write a new ADR that supersedes the old one rather than editing the original.
+This directory records architecturally significant decisions about SGR. ADRs are append-only: when a decision is superseded, write a new ADR that supersedes the old one rather than editing the original.
 
 ## When to write an ADR
 

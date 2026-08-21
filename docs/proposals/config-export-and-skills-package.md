@@ -1,18 +1,18 @@
-# Proposal — Grove config export + Sinas Skills Package install
+# Proposal — SGR config export + Sinas Skills Package install
 
 Quick notes parked from a design conversation. Not an ADR yet. Pick up when batch refactor is done.
 
 ## Context
 
-Domain config in Grove today (DocumentClass, properties, EntityType, RelationshipDefinition, DossierClass, playbooks/skills) is created via REST endpoints + admin UI. There's no declarative apply path.
+Domain config in SGR today (DocumentClass, properties, EntityType, RelationshipDefinition, DossierClass, playbooks/skills) is created via REST endpoints + admin UI. There's no declarative apply path.
 
-Initially considered a Sinas-style YAML `grove apply` CLI. **Rejected as the primary surface** because Grove operators deploy on a VPS and don't access the codebase. Editing a YAML file isn't their workflow — the admin UI is. YAML stays useful as an **interchange format**, not an editing surface.
+Initially considered a Sinas-style YAML `sgr apply` CLI. **Rejected as the primary surface** because SGR operators deploy on a VPS and don't access the codebase. Editing a YAML file isn't their workflow — the admin UI is. YAML stays useful as an **interchange format**, not an editing surface.
 
 ## Sketch
 
 ### 1. Export from the UI
 
-A "Export config" button in the Grove admin UI that produces a YAML manifest of the current domain config:
+A "Export config" button in the SGR admin UI that produces a YAML manifest of the current domain config:
 - Document classes + properties + entity-type bindings
 - Entity types
 - Relationship definitions + states
@@ -33,18 +33,18 @@ The UI gets an "Import config" button that uploads a YAML file to this endpoint.
 
 ### 3. Skills Package — round-trip to Sinas
 
-Playbooks (skills) live in Sinas, not Grove. Today they're in `package/sinas-grove.yaml` and installed via `sinas package install`. With this proposal, the admin UI can also:
+Playbooks (skills) live in Sinas, not SGR. Today they're in `package/sinas-grounded-research.yaml` and installed via `sinas package install`. With this proposal, the admin UI can also:
 
-- **Export skills as a standalone Sinas package** (`grove-skills-{deployment}.yaml`) containing just the `skills:` section of a Sinas package manifest. Bundle the deployment's authored playbooks.
-- **Install button**: if the Grove operator has Sinas admin / package-install permissions, a button in Grove's UI POSTs the generated package to Sinas's `/api/v1/packages/install` endpoint. One click to push the playbooks live.
+- **Export skills as a standalone Sinas package** (`sgr-skills-{deployment}.yaml`) containing just the `skills:` section of a Sinas package manifest. Bundle the deployment's authored playbooks.
+- **Install button**: if the SGR operator has Sinas admin / package-install permissions, a button in SGR's UI POSTs the generated package to Sinas's `/api/v1/packages/install` endpoint. One click to push the playbooks live.
 
 **Permissions matter here.** The user installing must have `sinas.packages.install` (or equivalent). The UI surfaces the requirement clearly — if the operator's Sinas token lacks the permission, the button is disabled with an explanation.
 
 ## Manifest shape (proposed)
 
 ```yaml
-apiVersion: grove.sinas.dev/v1
-kind: GroveConfig
+apiVersion: sgr.sinas.dev/v1
+kind: SgrConfig
 spec:
   entityTypes:
     - name: institution
@@ -73,7 +73,7 @@ spec:
       name: ...
       properties: [...]
   skills:
-    - namespace: grove_retrieval_playbooks
+    - namespace: sgr_retrieval_playbooks
       name: antitrust_default
       content: |
         ...
@@ -85,10 +85,10 @@ Skills Package export (separate file) shape:
 apiVersion: sinas.sinas.dev/v1
 kind: Package
 metadata:
-  name: grove-skills-{deployment_slug}
+  name: sgr-skills-{deployment_slug}
 spec:
   skills:
-    - namespace: grove_retrieval_playbooks
+    - namespace: sgr_retrieval_playbooks
       name: antitrust_default
       content: ...
 ```
@@ -125,8 +125,8 @@ spec:
 - **Drift detection**: should the apply service warn if the live config diverges from a previously-imported manifest? Maybe just show a diff at import time and let the user decide.
 - **Deletes**: should apply *remove* resources not present in the manifest, or only add/update? Probably opt-in via `prune: true` flag. Default behavior: never delete.
 - **Conflict resolution**: if two operators import overlapping configs back-to-back, last-write-wins. Probably fine for v1.
-- **Skills round-trip integrity**: if a skill is edited in Sinas after install, re-installing from Grove overwrites. That's expected, but worth surfacing in the UI.
-- **Manifest versioning**: `apiVersion` should be `grove.sinas.dev/v1`. Future breaking changes get `v2`; the apply service supports multiple versions or errors clearly on unknown versions.
+- **Skills round-trip integrity**: if a skill is edited in Sinas after install, re-installing from SGR overwrites. That's expected, but worth surfacing in the UI.
+- **Manifest versioning**: `apiVersion` should be `sgr.sinas.dev/v1`. Future breaking changes get `v2`; the apply service supports multiple versions or errors clearly on unknown versions.
 
 ## Effort estimate
 

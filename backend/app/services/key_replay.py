@@ -28,7 +28,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
@@ -102,6 +102,112 @@ async def replay_unresolved(
         key_index.learn(hit, row.target_key)
         report["touched_entities"].add(hit)
 
+    if write:
+        await session.commit()
+    report["touched_entities"] = list(report["touched_entities"])
+    return report
+
+
+async def backfill_full_text_entities(
+    session: AsyncSession, *, write: bool = True,
+    key_index: KeyIndex | None = None,
+) -> dict[str, Any]:
+    """Mint the case entity a document embodies, from the document itself.
+
+    For an unresolved is_full_text_of* row the target is not some other
+    entity the corpus may or may not mention — it is the case THIS document
+    is the full text of. The document is the authority on what that case is:
+    its extracted title names it, the parked key identifies it. So the
+    entity can be created deterministically — no model call, no guessing —
+    with the title as its name and the key as natural key and alias.
+
+    Collisions are outcomes, not errors: if the title normalizes onto an
+    entity that already exists, the edge links to that entity instead, which
+    is exactly what resolution was trying to do all along.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import Entity
+    from app.services.entity_resolver import normalize
+
+    if key_index is None:
+        key_index = await KeyIndex.load(session)
+
+    rows = list((await session.execute(
+        select(UnresolvedRelationship, RelationshipDefinition)
+        .join(RelationshipDefinition,
+              RelationshipDefinition.id ==
+              UnresolvedRelationship.relationship_definition_id)
+        .where(UnresolvedRelationship.status == "unresolved")
+        .where(RelationshipDefinition.name.like("is_full_text_of%"))
+    )).all())
+
+    report = {"queued": len(rows), "created": 0, "linked_existing": 0,
+              "no_title": 0, "resolved_by_key": 0,
+              "touched_entities": set()}
+    for row, d in rows:
+        if d.target_ref_type != "entity_type":
+            continue
+        # a key an earlier creation in this same pass may already have taught
+        hit = key_index.resolve(row.target_key, d.target_ref_id)
+        if hit is None:
+            title = (await session.execute(text("""
+                SELECT coalesce(pv.value->>'_', pv.value #>> '{}')
+                FROM property_value pv
+                JOIN document_class_property p ON p.id = pv.property_id
+                WHERE pv.document_id = :doc AND p.name = 'title' LIMIT 1"""),
+                {"doc": row.evidence_document_id})).scalar_one_or_none()
+            if not title or not title.strip():
+                report["no_title"] += 1
+                continue
+            title = title.strip()[:500]
+            from app.services.entity_keys import key_norm
+
+            ent = Entity(entity_type_id=d.target_ref_id,
+                         canonical_form=title,
+                         natural_key=key_norm(row.target_key)[:300] or None,
+                         normalized_form=normalize(title)[:500] or None)
+            if write:
+                try:
+                    async with session.begin_nested():
+                        session.add(ent)
+                        await session.flush()
+                    hit = ent.id
+                    report["created"] += 1
+                except IntegrityError:
+                    # the title (or key) already names an entity — link it
+                    hit = (await session.execute(
+                        select(Entity.id)
+                        .where(Entity.normalized_form == normalize(title)[:500])
+                        .where(Entity.merged_into_id.is_(None))
+                        .limit(1))).scalar_one_or_none()
+                    if hit is None:
+                        report["no_title"] += 1
+                        continue
+                    report["linked_existing"] += 1
+            else:
+                report["created"] += 1
+                continue
+            key_index.names.append((key_norm(title), hit, d.target_ref_id))
+            key_index._blob = None
+        else:
+            report["resolved_by_key"] += 1
+        if write and hit is not None:
+            rel = Relationship(
+                relationship_definition_id=row.relationship_definition_id,
+                source_id=row.source_id, target_id=hit,
+                evidence_document_id=row.evidence_document_id,
+                evidence_span=row.evidence_span, confidence=row.confidence,
+                notes=f"entity minted from own document for key '{row.target_key}'",
+            )
+            session.add(rel)
+            await session.flush()
+            row.status = "resolved"
+            row.resolved_relationship_id = rel.id
+            row.resolved_at = datetime.now(timezone.utc)
+            await learn_aliases(session, hit, [row.target_key])
+            key_index.learn(hit, row.target_key)
+            report["touched_entities"].add(hit)
     if write:
         await session.commit()
     report["touched_entities"] = list(report["touched_entities"])

@@ -38,6 +38,11 @@ SETTLE_SECONDS = 10.0  # wide enough to bridge CPU-serialized parking gaps (15 A
 POLL_SECONDS = 30.0   # provider batch progress poll cadence
 
 
+# One upload at a time to the provider's Files API, across every wave and
+# run in this process — the quota is per key, not per wave.
+_SUBMIT_GATE = asyncio.Semaphore(1)
+
+
 class BatchWaveClient:
     """Drop-in for the runner's Sinas client: same async invoke() shape,
     but calls are parked and executed in provider batches per wave."""
@@ -121,22 +126,27 @@ class BatchWaveClient:
     async def _submit_and_resolve(
         self, agent: str, items: list[tuple[str, asyncio.Future[str]]]
     ) -> None:
-        # One retry with backoff: Sinas has dropped submit connections cold
-        # under load (16 Aug — mechanism still undiagnosed). A transient
-        # drop must cost one retry, not a whole wave of banked failures.
+        # Submissions are SERIALIZED per process and 429s get a real backoff.
+        # Each submission uploads a JSONL to the provider's Files API, and
+        # thirteen concurrent waves exhausted Google's upload quota on the
+        # first Gate 3 rehearsal (22 Aug): every submit 429'd, the flat 30s
+        # single retry lost anyway, and 26k documents went nowhere for an
+        # hour. Sub-batch POLLING stays concurrent — only the upload window
+        # is scarce.
         last_exc: Exception | None = None
-        for attempt in (1, 2):
+        for attempt in range(1, 7):
             try:
-                async with httpx.AsyncClient(timeout=180.0) as c:
-                    r = await c.post(
-                        f"{self.base}/agents/{agent}/chats/batch",
-                        headers=self.headers,
-                        json={
-                            "inputs": [{"message": m} for m, _ in items],
-                            "execution_mode": "provider",
-                            "trigger_id_prefix": f"sgr-ingest-{self.run_id or 'adhoc'}",
-                        },
-                    )
+                async with _SUBMIT_GATE:
+                    async with httpx.AsyncClient(timeout=300.0) as c:
+                        r = await c.post(
+                            f"{self.base}/agents/{agent}/chats/batch",
+                            headers=self.headers,
+                            json={
+                                "inputs": [{"message": m} for m, _ in items],
+                                "execution_mode": "provider",
+                                "trigger_id_prefix": f"sgr-ingest-{self.run_id or 'adhoc'}",
+                            },
+                        )
                 if r.is_error:
                     # Surface the server's stated reason — a bare
                     # raise_for_status cost three diagnostic round-trips 15 Aug.
@@ -146,11 +156,13 @@ class BatchWaveClient:
                 break
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
-                if attempt == 2:
+                throttled = "429" in str(exc)
+                if attempt == 6 or not (throttled or attempt == 1):
                     raise
-                log.warning("batch submit attempt 1 failed (%s); retrying in 30s",
-                            str(exc)[:200])
-                await asyncio.sleep(30)
+                delay = min(30 * (2 ** (attempt - 1)), 480) if throttled else 30
+                log.warning("batch submit attempt %d failed (%s); retrying in %ds",
+                            attempt, str(exc)[:200], delay)
+                await asyncio.sleep(delay)
         sub = r.json()
         batch_id, chat_ids = sub["batch_id"], sub["chat_ids"]
         log.info("provider batch %s submitted: %d inputs (%s)",

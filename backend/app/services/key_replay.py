@@ -214,6 +214,117 @@ async def backfill_full_text_entities(
     return report
 
 
+async def backfill_from_properties(
+    session: AsyncSession, *,
+    definitions: list[str],
+    key_properties: list[str],
+    name_property: str,
+    write: bool = True,
+) -> dict[str, Any]:
+    """Link every source-class document to the entity it embodies, from its
+    own extracted properties — for documents the extractor never proposed an
+    edge for, so there is no queue row to replay.
+
+    Domain knowledge arrives as parameters: the CALLER names the relationship
+    definitions and which properties carry the key and the name. The platform
+    only does what it always does — resolve a key, or mint the entity from
+    the document's own statement of what it is. A legal deployment passes
+    case_number/celex/title; a clinical one would pass its trial-id and
+    study-title properties.
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models import Entity
+    from app.services.entity_keys import key_norm
+    from app.services.entity_resolver import normalize
+
+    key_index = await KeyIndex.load(session)
+    report = {"scanned": 0, "created": 0, "linked_existing": 0,
+              "resolved_by_key": 0, "no_key_or_name": 0,
+              "touched_entities": set()}
+
+    for def_name in definitions:
+        d = (await session.execute(
+            select(RelationshipDefinition)
+            .where(RelationshipDefinition.name == def_name))).scalar_one_or_none()
+        if d is None or d.target_ref_type != "entity_type":
+            continue
+        rows = (await session.execute(text("""
+            SELECT doc.id,
+              (SELECT coalesce(pv.value->>'_', pv.value #>> '{}')
+               FROM property_value pv
+               JOIN document_class_property p ON p.id=pv.property_id
+               WHERE pv.document_id=doc.id AND p.name=:name_prop LIMIT 1),
+              ARRAY(SELECT coalesce(pv.value->>'_', pv.value #>> '{}')
+               FROM property_value pv
+               JOIN document_class_property p ON p.id=pv.property_id
+               WHERE pv.document_id=doc.id AND p.name = ANY(:key_props))
+            FROM document doc
+            WHERE doc.document_class_id = :cls
+              AND NOT EXISTS (
+                SELECT 1 FROM relationship r WHERE r.source_id=doc.id
+                  AND r.relationship_definition_id=:def_id)"""),
+            {"name_prop": name_property, "key_props": key_properties,
+             "cls": d.source_ref_id, "def_id": d.id})).all()
+
+        for doc_id, title, keys in rows:
+            report["scanned"] += 1
+            keys = [k for k in (keys or []) if k and k.strip()]
+            title = (title or "").strip()[:500]
+            hit = None
+            for k in keys:
+                hit = key_index.resolve(k, d.target_ref_id)
+                if hit is not None:
+                    report["resolved_by_key"] += 1
+                    break
+            if hit is None:
+                if not title and not keys:
+                    report["no_key_or_name"] += 1
+                    continue
+                name = title or keys[0][:500]
+                nk = key_norm(keys[0])[:300] if keys else None
+                ent = Entity(entity_type_id=d.target_ref_id,
+                             canonical_form=name,
+                             natural_key=nk or None,
+                             normalized_form=normalize(name)[:500] or None)
+                if not write:
+                    report["created"] += 1
+                    continue
+                try:
+                    async with session.begin_nested():
+                        session.add(ent)
+                        await session.flush()
+                    hit = ent.id
+                    report["created"] += 1
+                except IntegrityError:
+                    hit = (await session.execute(
+                        select(Entity.id)
+                        .where(Entity.normalized_form == normalize(name)[:500])
+                        .where(Entity.merged_into_id.is_(None))
+                        .limit(1))).scalar_one_or_none()
+                    if hit is None:
+                        report["no_key_or_name"] += 1
+                        continue
+                    report["linked_existing"] += 1
+                key_index.names.append((key_norm(name), hit, d.target_ref_id))
+                key_index._blob = None
+            if write and hit is not None:
+                session.add(Relationship(
+                    relationship_definition_id=d.id,
+                    source_id=doc_id, target_id=hit,
+                    evidence_document_id=doc_id,
+                    notes="linked from own document properties",
+                ))
+                await learn_aliases(session, hit, keys)
+                for k in keys:
+                    key_index.learn(hit, k)
+                report["touched_entities"].add(hit)
+        if write:
+            await session.commit()
+    report["touched_entities"] = list(report["touched_entities"])
+    return report
+
+
 async def rematerialize(session: AsyncSession,
                         entity_ids: list[uuid.UUID]) -> int:
     """Recompute materialized annotations for these entities."""

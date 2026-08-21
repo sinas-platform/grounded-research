@@ -255,7 +255,7 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 SELECT m.document_id, d.filename, m.entity_id, count(*)
                 FROM entity_mention m JOIN document d ON d.id = m.document_id
                 WHERE m.entity_id = ANY(CAST(:eids AS uuid[]))
-                  AND m.status = 'active'
+                  AND m.status = 'active' AND d.staged IS NOT TRUE
                 GROUP BY 1, 2, 3"""),
                 {"eids": list(frontier)})).all()
             for did, fn, eid, hits in rows:
@@ -271,8 +271,9 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 SELECT r.evidence_document_id, d.filename, count(*)
                 FROM relationship r
                 JOIN document d ON d.id = r.evidence_document_id
-                WHERE r.source_id = ANY(CAST(:eids AS uuid[]))
-                   OR r.target_id = ANY(CAST(:eids AS uuid[]))
+                WHERE (r.source_id = ANY(CAST(:eids AS uuid[]))
+                   OR r.target_id = ANY(CAST(:eids AS uuid[])))
+                  AND d.staged IS NOT TRUE
                 GROUP BY 1, 2"""), {"eids": list(frontier)})).all()
             for did, fn, hits in rows:
                 did = str(did)
@@ -302,6 +303,7 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 FROM document d
                 JOIN document_version dv ON dv.id = d.current_version_id
                 WHERE dv.content_tsvector @@ websearch_to_tsquery('simple', :q)
+                  AND d.staged IS NOT TRUE
                 ORDER BY r DESC LIMIT 60"""), {"q": q})).all()
             for did, fn, r in rows:
                 did = str(did)
@@ -320,7 +322,8 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
             pat = "%" + "%".join(toks[:3]) + "%"
             rows = (await s.execute(text("""
                 SELECT id, filename FROM document
-                WHERE filename ILIKE :pat LIMIT 10"""),
+                WHERE filename ILIKE :pat AND staged IS NOT TRUE
+                LIMIT 10"""),
                 {"pat": pat})).all()
             for did, fn in rows:
                 did = str(did)

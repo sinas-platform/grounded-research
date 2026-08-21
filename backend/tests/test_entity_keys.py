@@ -106,3 +106,32 @@ def test_validator_prompt_carries_document_identity():
     rendered = _PROMPT.format(claim="c", n=1, spans_block="s",
                               doc_heads="[m11936.md]\nCase M.11936")
     assert "Case M.11936" in rendered
+
+
+def test_per_document_callers_share_one_index():
+    """Building the index reads every entity; per-document ingestion built it
+    789 times and turned a small run into a projected 22 hours. The shared
+    accessor must serve one instance within its TTL."""
+    import asyncio
+
+    from app.services import entity_keys as ek
+
+    calls = {"n": 0}
+
+    async def fake_load(_session):
+        calls["n"] += 1
+        return ek.KeyIndex()
+
+    orig, ek.KeyIndex.load = ek.KeyIndex.load, classmethod(
+        lambda cls, s: fake_load(s))
+    ek._shared["index"], ek._shared["at"] = None, 0.0
+    try:
+        async def go():
+            a = await ek.shared_index(None)
+            b = await ek.shared_index(None)
+            return a is b
+        assert asyncio.run(go()) is True
+        assert calls["n"] == 1
+    finally:
+        ek.KeyIndex.load = orig
+        ek._shared["index"] = None

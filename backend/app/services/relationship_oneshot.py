@@ -654,11 +654,12 @@ async def extract_relationships(
     sinas = _Sinas()
     async with AsyncSessionLocal() as session:
         definitions = await load_definitions(session)
-        # One key index for the whole batch: keys learned from an early
-        # document resolve references in the later ones, within this run.
-        from app.services.entity_keys import KeyIndex
+        # The process-shared key index: keys learned from an early document
+        # resolve references in later ones, and per-document callers (the
+        # ingestion runner) do not pay a 446k-entity rebuild per call.
+        from app.services.entity_keys import shared_index
 
-        key_index = await KeyIndex.load(session)
+        key_index = await shared_index(session)
         if document_ids is None:
             document_ids = list(
                 (

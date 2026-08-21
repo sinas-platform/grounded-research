@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import bisect
 import re
+import time
 import uuid
 
 from sqlalchemy import select
@@ -147,6 +148,29 @@ class KeyIndex:
         nk = key_norm(key)
         if nk:
             self.by_key.setdefault(nk, set()).add(entity_id)
+
+
+_shared: dict = {"index": None, "at": 0.0}
+_SHARED_TTL = 600.0
+
+
+async def shared_index(session: AsyncSession) -> "KeyIndex":
+    """One KeyIndex per process, rebuilt at most every ten minutes.
+
+    Loading the index reads every entity and alias — built once per replay
+    batch, that is fine. The ingestion runner, though, resolves per document,
+    and building it per document turned a 789-document run into a projected
+    22 hours and starved the API: twelve workers each re-scanning 446k
+    entities continuously. Freshness is not correctness here — learn() keeps
+    this process's copy current for everything it resolves itself, and keys
+    minted elsewhere are picked up by the next rebuild or by the replay that
+    runs at ingestion completion.
+    """
+    now = time.monotonic()
+    if _shared["index"] is None or now - _shared["at"] > _SHARED_TTL:
+        _shared["index"] = await KeyIndex.load(session)
+        _shared["at"] = now
+    return _shared["index"]
 
 
 async def learn_aliases(session: AsyncSession, entity_id: uuid.UUID,

@@ -1148,7 +1148,12 @@ async def _gate_answer(
         + '\n\nFirst split the QUESTION into the distinct things it asks — '
         'a question asking what the conditions are, whether a regulation '
         'applies, and whether a step is mandatory asks three things, not one. '
-        'Judge each separately against the claims.'
+        'Judge each separately against the claims. A part is COVERED when '
+        'the claims answer it either way: claims that rebut the premise of '
+        'the question with grounds — the question asks about liability '
+        'without fault, the claims establish fault is always required — '
+        'ANSWER that part; do not demand a claim affirming a premise the '
+        'sources reject.'
         '\n\nReply ONLY JSON: {"publishable": true|false,'
         ' "parts": [{"asks": "<one thing the question asks>", "covered": '
         'true|false, "gap": "<what is missing, if not covered>"}],'
@@ -1647,7 +1652,18 @@ async def _stage_validate_publish(
                     tele = {"quality_issues": issues} if issues else {}
                     await _publish_answer(run_id, answer_id, **tele)
                     return
+                key = _gate_key(missing, correctness)
                 if gate_cycles <= 0 and (not ok or correctness):
+                    if await _gate_point_is_new(run_id, key):
+                        await _tele(run_id, "validate", gate_redraft=missing,
+                                    gate_issues=issues, bonus_cycle=True)
+                        await _record_fed(run_id, key, bonus=True)
+                        await _revise_answer(
+                            sinas, run_id, answer_id, question,
+                            correctness + issues,
+                            points or ([missing] if missing else []),
+                            last_attempt=True)
+                        return await _stage_validate_publish(run_id, sinas, 0)
                     raise PartialOutcome(
                         "coverage",
                         (f"the validated claims no longer answer the question — {missing}")
@@ -1655,6 +1671,7 @@ async def _stage_validate_publish(
                         ("the answer could not be made internally consistent — "
                          + " ".join(correctness)[:600]))
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
+                await _record_fed(run_id, key)
                 await _revise_answer(
                     sinas, run_id, answer_id, question,
                     correctness + issues,
@@ -1726,7 +1743,17 @@ async def _stage_validate_publish(
             run_id, answer_id, dropped_claims=len(failing_ids), **tele
         )
         return
+    key = _gate_key(missing, correctness)
     if gate_cycles <= 0 and (not ok or correctness):
+        if await _gate_point_is_new(run_id, key):
+            await _tele(run_id, "validate", gate_redraft=missing,
+                        gate_issues=issues, bonus_cycle=True)
+            await _record_fed(run_id, key, bonus=True)
+            await _revise_answer(sinas, run_id, answer_id, question,
+                                 correctness + issues,
+                                 points or ([missing] if missing else []),
+                                 last_attempt=True)
+            return await _stage_validate_publish(run_id, sinas, 0)
         raise PartialOutcome(
             "coverage",
             ("validation exhausted and the surviving claims do not answer the "
@@ -1737,11 +1764,45 @@ async def _stage_validate_publish(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
+    await _record_fed(run_id, key)
     await _revise_answer(sinas, run_id, answer_id, question,
                          correctness + issues,
                          points or ([missing] if missing else []),
                          last_attempt=gate_cycles <= 1)
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
+
+
+async def _gate_point_is_new(run_id: uuid.UUID, key: str) -> bool:
+    """May this objection earn a bonus revision cycle?
+
+    Each gate pass can raise findings the previous passes did not, but the
+    cycle budget never asked whether a finding was ever shown to the
+    reviser. A run died partial on an objection that surfaced only at the
+    final check: zero revisions, zero chance to soften or abstain. An
+    objection the reviser has never seen gets one attempt even with the
+    budget spent; the same objection twice, or a third novel one, does not
+    — the budget still bounds the run.
+    """
+    async with AsyncSessionLocal() as session:
+        v = ((await session.get(QueryRun, run_id)).telemetry or {}).get("validate") or {}
+    return key not in (v.get("fed_points") or []) and int(v.get("bonus_cycles") or 0) < 2
+
+
+async def _record_fed(run_id: uuid.UUID, key: str, bonus: bool = False) -> None:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        t = dict(run.telemetry or {})
+        v = dict(t.get("validate") or {})
+        v["fed_points"] = ((v.get("fed_points") or []) + [key])[-12:]
+        if bonus:
+            v["bonus_cycles"] = int(v.get("bonus_cycles") or 0) + 1
+        t["validate"] = v
+        run.telemetry = t
+        await session.commit()
+
+
+def _gate_key(missing: str, correctness: list[str]) -> str:
+    return ((missing or "")[:200] + "||" + " ".join(correctness)[:300]).strip()
 
 
 async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> None:

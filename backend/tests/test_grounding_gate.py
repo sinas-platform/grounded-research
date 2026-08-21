@@ -327,7 +327,9 @@ def test_abstention_is_offered_only_on_the_final_gate_cycle():
     calls = [l for l in src.splitlines() if "last_attempt=" in l]
     assert len(calls) >= 2, "every gate-driven revision must state its cycle"
     for line in calls:
-        assert "gate_cycles <= 1" in line, line
+        # budgeted cycles compute the flag; a bonus cycle for an objection
+        # the reviser has never seen IS the final chance, so it passes True
+        assert "gate_cycles <= 1" in line or "last_attempt=True" in line, line
 
 
 def test_drafting_input_carries_no_interpretation():

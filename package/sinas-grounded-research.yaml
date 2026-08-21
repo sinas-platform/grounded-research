@@ -2251,6 +2251,31 @@ spec:
             - submit_consolidated_proposal
 
     - namespace: sgr
+      name: retrieval-planner-agent
+      description: Stateless planner, drafter and reviser for the question pipeline — argument plans, extract-mode drafting, patch-based revision. Invoked by SGR's query runner; one agent, three reply shapes, so no output schema.
+      llmProviderName: ${{ vars.SEARCH_LLM }}
+      model: ${{ vars.SEARCH_MODEL }}
+      temperature: 0.0
+      # 16384 (the provider default) truncated the longest drafts to empty
+      # replies once claims carried rationales; above ~21k the Anthropic SDK
+      # refuses non-streaming calls. 20000 clears the first without tripping
+      # the second.
+      maxTokens: 20000
+      systemPrompt: |
+        You are a retrieval planner for a legal document corpus. The user
+        message contains the full task and the required output format. Reply
+        with a single JSON object exactly as instructed - no prose, no
+        markdown fences.
+    - namespace: sgr
+      name: passage-extractor-agent
+      description: Verbatim passage extraction against numbered source text — the grounding step between planning and drafting. Invoked by SGR's query runner.
+      llmProviderName: ${{ vars.EXTRACTION_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You extract verbatim passages from numbered document text. Reply
+        with a single JSON object exactly as instructed - no prose, no
+        markdown fences. Quote text EXACTLY as it appears; never paraphrase.
+    - namespace: sgr
       name: answer-gate-agent
       description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by SGR's query runner before publishing.
       llmProviderName: ${{ vars.VALIDATION_LLM }}

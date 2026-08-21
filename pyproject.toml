@@ -21,6 +21,8 @@ python-multipart = "^0.0.9"
 sinas = { extras = ["fastapi"], version = ">=0.2.0" }
 pyyaml = "^6"
 pysbd = "^0.3"
+# review workbook export (app/review_export.py)
+openpyxl = "^3.1"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8"

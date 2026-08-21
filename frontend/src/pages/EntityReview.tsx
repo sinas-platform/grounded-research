@@ -27,6 +27,8 @@ interface UnresolvedMention {
   entity_type_id: string;
   mention_text: string;
   document_id: string;
+  filename: string | null;
+  context: string | null;
   span: Record<string, unknown>;
   confidence: number | null;
   proposing_agent: string | null;
@@ -304,12 +306,19 @@ function UnresolvedRow({
   onDismiss: () => void;
 }) {
   const [picking, setPicking] = useState(false);
+  // Highlight the surface form inside its sentence — the reviewer is deciding
+  // what this occurrence refers to, and the surrounding text is the evidence.
+  const context = mention.context ?? null;
+  const idx = context ? context.indexOf(mention.mention_text) : -1;
   return (
     <div className="border border-stone-200 rounded p-3 bg-white">
       <div className="flex items-center justify-between gap-3 mb-1">
-        <div>
+        <div className="min-w-0">
           <span className="text-xs text-stone-500 mr-2">{typeName}</span>
           <span className="font-medium">{mention.mention_text}</span>
+          {mention.filename && (
+            <span className="ml-2 text-[11px] text-stone-400 font-mono">{mention.filename}</span>
+          )}
         </div>
         <div className="flex gap-2">
           <button
@@ -334,6 +343,23 @@ function UnresolvedRow({
           </button>
         </div>
       </div>
+      {context && (
+        <div className="mt-1.5 text-[13px] leading-relaxed text-stone-700 bg-stone-50 border border-stone-200 rounded px-2.5 py-2">
+          <span className="text-stone-400">…</span>
+          {idx >= 0 ? (
+            <>
+              {context.slice(0, idx)}
+              <mark className="bg-amber-100 text-stone-900 font-medium px-0.5 rounded">
+                {mention.mention_text}
+              </mark>
+              {context.slice(idx + mention.mention_text.length)}
+            </>
+          ) : (
+            context
+          )}
+          <span className="text-stone-400">…</span>
+        </div>
+      )}
       {mention.reasoning && (
         <div className="text-xs text-stone-600 mt-1">{mention.reasoning}</div>
       )}

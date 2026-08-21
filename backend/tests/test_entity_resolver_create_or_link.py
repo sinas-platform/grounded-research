@@ -140,3 +140,68 @@ async def test_unkeyed_creation_path_unchanged():
     )
     assert report["created"] == 1
     assert m.link_method == "created"
+
+
+# ── name identity: the case natural keys never covered ──────────────────────
+# 98.9% of entities have no natural key, so these paths had no database
+# constraint behind them and no test in front of them.
+
+
+class _NamedType(dict):
+    pass
+
+
+def _named_type(type_id):
+    return {type_id: SimpleNamespace(id=type_id, name="Competition Authority",
+                                     creation_mode="open")}
+
+
+@pytest.mark.asyncio
+async def test_name_twin_in_one_document_creates_once():
+    """Two spellings of one authority in a document must not become two
+    entities. Neither derives a natural key, so only normalized_form can
+    catch it."""
+    tid = uuid.uuid4()
+    m1 = _mention("Competition and Markets Authority", tid)
+    m2 = _mention("Competition and Markets  Authority", tid)  # doubled space
+    session = _FakeSession([m1, m2])
+    index = _EntityIndex([])
+    report = await resolve_document(
+        session, _NoJudgeSinas(), index, _named_type(tid), uuid.uuid4()
+    )
+    assert report["created"] == 1
+    assert len([a for a in session.added if hasattr(a, "canonical_form")]) == 1
+    assert m2.entity_id == m1.entity_id
+
+
+@pytest.mark.asyncio
+async def test_name_collision_across_sessions_links_not_duplicates():
+    """An entity created concurrently is invisible to our index; the
+    pre-insert lookup must find it and link rather than insert a twin."""
+    tid = uuid.uuid4()
+    owner = SimpleNamespace(
+        id=uuid.uuid4(), entity_type_id=tid, canonical_form="Autorite de la concurrence",
+        natural_key=None, normalized_form="autorite de la concurrence",
+        merged_into_id=None)
+    m = _mention("Autorité de la Concurrence", tid)   # accented spelling
+    session = _FakeSession([m], owner_rows=[owner])
+    index = _EntityIndex([])
+    report = await resolve_document(
+        session, _NoJudgeSinas(), index, _named_type(tid), uuid.uuid4()
+    )
+    assert report["created"] == 0, "must not create a twin"
+    assert m.entity_id == owner.id
+    assert not [a for a in session.added if hasattr(a, "canonical_form")]
+
+
+def test_one_identity_function_shared_by_resolver_and_dedup():
+    """Two normalizations meant two sets of duplicates: dedup stripped
+    accented characters where the resolver folds them, so 'Autorité' and
+    'Autorite' could never be recognised as the same name."""
+    from app.entity_dedup import _norm
+    from app.services.entity_resolver import normalize
+
+    for s in ("Autorité de la Concurrence", "U.S. Department of Justice",
+              "Anti-Trust  Division", "Bundeskartellamt"):
+        assert _norm(s) == normalize(s)
+    assert normalize("Autorité") == normalize("Autorite")

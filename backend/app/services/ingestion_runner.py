@@ -186,6 +186,22 @@ async def _run_pipeline_inprocess(
                 extract_errors[did] = str(rep["error"])[:500]
         parts = tuple(p for p in parts if p != "extract")
 
+    # In batch mode, grounding also leaves the per-document loop. It was
+    # the last LLM stage running one rate-limited call per document — alone
+    # worth one to two days of wall-clock at a 100k load. It must still
+    # complete before resolution (hallucinated names must not reach the
+    # resolver), so it runs here, between the extract batch and the middle
+    # loop, not after it.
+    if batch and "ground" in parts:
+        from app.services.ingestion_batch import batch_grounding_pass
+
+        greps = await batch_grounding_pass(
+            run_id, [d for d in doc_ids if d not in extract_errors])
+        for did, rep in greps.items():
+            if rep.get("error"):
+                extract_errors[did] = f"grounding: {rep['error']}"[:500]
+        parts = tuple(p for p in parts if p != "ground")
+
     # In batch mode, relationships leave the per-document loop and run as
     # their own provider-batched pass after grounding/resolution: the
     # sequential loop's sync relationship calls were both the wall-clock
@@ -359,6 +375,20 @@ async def _mark_run_terminal_if_done(run_id: uuid.UUID) -> None:
             run.status = "completed"
             run.completed_at = datetime.now(timezone.utc)
             await session.commit()
+            # Replay the unresolved-relationship queue now that this run has
+            # taught the resolver new names and aliases. Cites parked early
+            # in the run — "M.11936" seen before any document named the case
+            # — resolve against what the rest of the run created, and the
+            # touched entities get their annotations rematerialized, so the
+            # planning manifest is right when the first question arrives
+            # rather than after a manual repair. LLM-free and idempotent.
+            try:
+                from app.services.key_replay import run as replay_run
+
+                report = await replay_run(write=True)
+                log.info("post-run key replay: %s", report)
+            except Exception:  # noqa: BLE001
+                log.exception("post-run key replay failed (run %s)", run_id)
 
 
 async def progress_snapshot(run: IngestionRun) -> dict[str, Any]:

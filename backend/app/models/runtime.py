@@ -109,6 +109,12 @@ class Entity(Base, TimestampMixin):
     # package-declared identity (e.g. a case number, an act+year signature);
     # unique per type among live (unmerged) entities
     natural_key: Mapped[str | None] = mapped_column(String(300))
+    # Name identity: entity_resolver.normalize(canonical_form). Unique per
+    # type among live entities, so a second "CMA" cannot be created at all —
+    # 98.9% of entities carry no natural_key, which left name-identified
+    # entities with no constraint whatsoever and made duplicates a matter of
+    # timing rather than correctness.
+    normalized_form: Mapped[str | None] = mapped_column(String(500))
     # merge tombstone: set when this entity was merged into another
     merged_into_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("entity.id", ondelete="SET NULL")
@@ -445,6 +451,12 @@ class AnswerClaim(Base, TimestampMixin):
     sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     claim_text: Mapped[str] = mapped_column(Text, nullable=False)
     claim_type: Mapped[str | None] = mapped_column(String(100))
+    # Why this claim rests on the source it cites, in the drafter's own
+    # words. Everything else stored about a claim looks backwards — the
+    # passage, and the validator's account of whether it carries the
+    # sentence. This is the forward argument, and it is also where a
+    # deliberate choice between two sources gets recorded.
+    rationale: Mapped[str | None] = mapped_column(Text)
 
 
 class ClaimEvidence(Base, TimestampMixin):

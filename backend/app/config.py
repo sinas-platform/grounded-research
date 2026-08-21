@@ -42,11 +42,17 @@ class Settings(BaseSettings):
     )
 
     # ── question runs (see docs/operations-bulk-and-runs.md) ──
-    # How answers are drafted. "extract" is chatless: an argument plan, then
-    # verbatim passage extraction verified against the source text, then one
-    # drafting call. "chat" is the older agent-chat drafting loop.
-    grove_draft_mode: Literal["extract", "chat"] = Field(
-        default="chat", validation_alias="GROVE_DRAFT_MODE"
+    # How answers are drafted: an argument plan, verbatim passage extraction
+    # verified against the source text, then one drafting call.
+    #
+    # The older agent-chat drafting loop can no longer be selected. It handed
+    # the drafter the document manifest — summaries, classes, annotations —
+    # which are interpretation generated at ingestion and verified against
+    # nothing, so a claim could assert what a summary said with no passage
+    # behind it. Grounding is on raw source text only. The loop's code is
+    # still present and is now unreachable; it should be deleted.
+    grove_draft_mode: Literal["extract"] = Field(
+        default="extract", validation_alias="GROVE_DRAFT_MODE"
     )
     # Hard per-run spend ceiling in USD, summed over the run's LLM usage and
     # checked at every supervision poll. A run that crosses it ends "partial"

@@ -61,6 +61,9 @@ interface ClaimWithEvidence {
   sequence: number;
   claim_text: string;
   claim_type: string | null;
+  // why the claim rests on the source it cites. The evidence rows carry the
+  // opposite: whether the passage carries the sentence.
+  rationale: string | null;
   evidence: Evidence[];
 }
 
@@ -1027,6 +1030,7 @@ function Inspector({
   } else if (inspected === 'answer') {
     const isPartial = run.status === 'partial';
     title = isPartial ? 'Partial outcome' : 'Answer';
+    const abstentions = (claims ?? []).filter((c) => c.claim_type === 'abstention');
     const verified = (claims ?? []).filter((c) => c.evidence.length > 0 && c.evidence.every((e) => e.validated));
     body = (
       <>
@@ -1034,11 +1038,29 @@ function Inspector({
         <Label>
           {isPartial
             ? `Claims kept · ${claims?.length ?? 0} drafted · ${verified.length} fully verified`
-            : `The complete answer · ${claims?.length ?? 0} claims · ${verified.length} fully verified`}
+            : `The complete answer · ${claims?.length ?? 0} claims · ${verified.length} fully verified`
+              + (abstentions.length ? ` · ${abstentions.length} not established` : '')}
         </Label>
         <div className="space-y-3">
           {(claims ?? []).map((c) => {
             const ok = c.evidence.length > 0 && c.evidence.every((e) => e.validated);
+            // An abstention states what the sources do NOT settle. It carries
+            // no evidence by nature, so it must not read as an unsupported
+            // claim — it is a finding in its own right.
+            const abstained = c.claim_type === 'abstention';
+            if (abstained) {
+              return (
+                <div
+                  key={c.id}
+                  className="text-[13px] leading-relaxed text-stone-700 border-l-2 border-amber-400 bg-amber-50/60 pl-2.5 py-1.5 rounded-r"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-amber-700 mr-2">
+                    not established
+                  </span>
+                  {c.claim_text}
+                </div>
+              );
+            }
             return (
               <div key={c.id} className="text-[13px] leading-relaxed text-stone-800">
                 {c.claim_text}
@@ -1059,6 +1081,11 @@ function Inspector({
                   ))}
                   {ok && <span className="text-[9.5px] text-forest-600 font-semibold">verified</span>}
                 </span>
+                {c.rationale && (
+                  <div className="mt-1 text-[11.5px] leading-relaxed text-stone-500 border-l-2 border-stone-200 pl-2">
+                    {c.rationale}
+                  </div>
+                )}
               </div>
             );
           })}

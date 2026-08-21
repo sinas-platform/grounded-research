@@ -107,6 +107,9 @@ class DraftClaimIn(BaseModel):
     sequence: int
     claim_text: str
     claim_type: str | None = None
+    # Why the claim rests on the source it cites — including, where the
+    # choice was deliberate, what was passed over and why.
+    rationale: str | None = None
     # Evidence bound in the same call — one round-trip per claim instead of
     # draft_claim + one bind_evidence call per span. bind_evidence stays for
     # adding evidence to an already-drafted claim.
@@ -145,6 +148,7 @@ async def draft_claim(
         )
         existing.claim_text = payload.claim_text
         existing.claim_type = payload.claim_type
+        existing.rationale = payload.rationale
         row = existing
     else:
         row = AnswerClaim(
@@ -205,6 +209,7 @@ async def bind_evidence(
 class UpdateClaimIn(BaseModel):
     claim_text: str
     claim_type: str | None = None
+    rationale: str | None = None
 
 
 @router.patch(
@@ -225,6 +230,8 @@ async def update_claim(
     row.claim_text = payload.claim_text
     if payload.claim_type is not None:
         row.claim_type = payload.claim_type
+    if payload.rationale is not None:
+        row.rationale = payload.rationale
     from sqlalchemy import update as sa_update
 
     await session.execute(

@@ -66,6 +66,19 @@ class DedupApplyIn(BaseModel):
     types: list[str] | None = None
 
 
+@router.post("/resolve-replay")
+async def resolve_replay(
+    dry_run: bool = False,
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """Replay the unresolved-relationship queue against learned keys, then
+    rematerialize annotations for the entities that gained edges. Idempotent
+    and LLM-free; also runs automatically when an ingestion run completes."""
+    from app.services.key_replay import run as replay_run
+
+    return await replay_run(write=not dry_run)
+
+
 @router.post("/dedup/report")
 async def dedup_report(caller: CallerIdentity = Depends(get_caller)):
     """Candidate counts + samples; changes nothing. Loads every active

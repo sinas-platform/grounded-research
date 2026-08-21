@@ -9,7 +9,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -165,13 +165,28 @@ async def decide_entity_proposal(
     return {"status": proposal.status, "promoted_entity_id": promoted_id}
 
 
-@router.get("/unresolved", response_model=list[UnresolvedEntityMentionOut])
+class UnresolvedRow(UnresolvedEntityMentionOut):
+    """The row plus what a reviewer needs to actually decide: the sentence the
+    mention sits in, and which document it came from. Deciding what "the
+    Commission" refers to is impossible from a surface form and a UUID — the
+    adjudicator gets this context, and so should the person."""
+
+    filename: str | None = None
+    context: str | None = None
+
+
+@router.get("/unresolved", response_model=list[UnresolvedRow])
 async def list_unresolved_entity_mentions(
     status_filter: str = "unresolved",
     entity_type_id: uuid.UUID | None = None,
     document_id: uuid.UUID | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
     session: AsyncSession = Depends(get_session),
 ):
+    from app.models import Document, DocumentVersion
+    from app.services.entity_resolver import _slice
+
     stmt = select(UnresolvedEntityMention).where(
         UnresolvedEntityMention.status == status_filter
     )
@@ -180,7 +195,27 @@ async def list_unresolved_entity_mentions(
     if document_id is not None:
         stmt = stmt.where(UnresolvedEntityMention.document_id == document_id)
     stmt = stmt.order_by(UnresolvedEntityMention.created_at.desc())
-    return (await session.execute(stmt)).scalars().all()
+    rows = (await session.execute(stmt.limit(limit).offset(offset))).scalars().all()
+
+    # one content fetch per distinct document, not per mention
+    doc_ids = {r.document_id for r in rows}
+    docs: dict[uuid.UUID, tuple[str | None, str]] = {}
+    if doc_ids:
+        for did, fn, content in (await session.execute(
+            select(Document.id, Document.filename, DocumentVersion.content_md)
+            .join(DocumentVersion, DocumentVersion.id == Document.current_version_id)
+            .where(Document.id.in_(doc_ids))
+        )).all():
+            docs[did] = (fn, content or "")
+
+    out = []
+    for r in rows:
+        fn, content = docs.get(r.document_id, (None, ""))
+        item = UnresolvedRow.model_validate(r, from_attributes=True)
+        item.filename = fn
+        item.context = _slice(content, r.span) if content else None
+        out.append(item)
+    return out
 
 
 class MatchToExistingBody(BaseModel):
@@ -210,16 +245,33 @@ async def match_unresolved_to_entity(
             "target entity not found or has a different entity type",
         )
 
-    # Materialize a real mention and (optionally) record the surface form as an alias.
-    session.add(
-        EntityMention(
-            document_id=row.document_id,
-            document_version_id=row.document_version_id,
-            entity_id=entity.id,
-            span=row.span,
-            confidence=row.confidence,
+    # Mentions arrive before resolution, so the mention this row describes
+    # already exists with a null entity — link THAT one. Creating a fresh row
+    # here would leave two mentions on one span, one of them orphaned.
+    existing_mention = (
+        await session.execute(
+            select(EntityMention).where(
+                EntityMention.document_id == row.document_id,
+                EntityMention.span == row.span,
+                EntityMention.entity_id.is_(None),
+            ).limit(1)
         )
-    )
+    ).scalars().first()
+    if existing_mention is not None:
+        existing_mention.entity_id = entity.id
+        existing_mention.link_method = "manual"
+        existing_mention.link_confidence = 1.0
+        existing_mention.link_evidence = {"resolved_by_review": True}
+    else:
+        session.add(
+            EntityMention(
+                document_id=row.document_id,
+                document_version_id=row.document_version_id,
+                entity_id=entity.id,
+                span=row.span,
+                confidence=row.confidence,
+            )
+        )
     if payload.add_alias and row.mention_text != entity.canonical_form:
         from app.models import EntityAlias
 
@@ -239,7 +291,35 @@ async def match_unresolved_to_entity(
     row.resolved_by = caller.user_id
     row.resolved_entity_id = entity.id
 
-    # Also resolve any other open mentions of the same surface form in this type.
+    # Also resolve any other open mentions of the same surface form in this
+    # type — and link THEIR mentions as well. Flipping status alone would
+    # report hundreds resolved while the mentions stayed unlinked.
+    siblings = (
+        await session.execute(
+            select(UnresolvedEntityMention).where(
+                UnresolvedEntityMention.entity_type_id == row.entity_type_id,
+                UnresolvedEntityMention.mention_text == row.mention_text,
+                UnresolvedEntityMention.status == "unresolved",
+                UnresolvedEntityMention.id != row.id,
+            )
+        )
+    ).scalars().all()
+    for sib in siblings:
+        sib_mention = (
+            await session.execute(
+                select(EntityMention).where(
+                    EntityMention.document_id == sib.document_id,
+                    EntityMention.span == sib.span,
+                    EntityMention.entity_id.is_(None),
+                ).limit(1)
+            )
+        ).scalars().first()
+        if sib_mention is not None:
+            sib_mention.entity_id = entity.id
+            sib_mention.link_method = "manual"
+            sib_mention.link_confidence = 1.0
+            sib_mention.link_evidence = {"resolved_by_review": True,
+                                         "via": str(row.id)}
     await session.execute(
         update(UnresolvedEntityMention)
         .where(
@@ -257,7 +337,8 @@ async def match_unresolved_to_entity(
     )
 
     await session.commit()
-    return {"status": "resolved", "entity_id": entity.id}
+    return {"status": "resolved", "entity_id": entity.id,
+            "also_resolved": len(siblings)}
 
 
 @router.post(

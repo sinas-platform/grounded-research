@@ -260,3 +260,165 @@ async def test_judge_echoing_name_strings_still_parses(monkeypatch):
     assert report["rejected"] == 1
     assert m1.status == STATUS_ACTIVE
     assert m2.status == STATUS_REJECTED
+
+
+# ── a revision reply is claims or it is nothing ─────────────────────────────
+# The reviser returns the corrected claim set as JSON. Anything that is not a
+# claim object cannot become a claim — refusals, questions and verdicts on the
+# evidence fail structurally, not because their wording was recognised.
+
+
+def test_only_patch_operations_survive_parsing():
+    from app.services.query_runner import _parse_patch
+
+    good = (
+        '{"revise": [{"seq": 4, "text": "Regulation (EU) 2018/1725, not the '
+        'GDPR, governs the Commission\'s processing of personal data during '
+        'an inspection.", "evidence": [{"filename": "32018R1725.md", '
+        '"line_from": 40, "line_to": 52}]}], "drop": [9], "add": []}'
+    )
+    patch = _parse_patch(good)
+    assert patch and len(patch["revise"]) == 1 and patch["drop"] == [9]
+
+    for not_a_claim in [
+        "I need to see the evidence/spans you're referring to in order to rewrite.",
+        "The passage provided is only a cover/header from the judgment and does "
+        "not contain the substantive holdings needed to support the claim.",
+        "Could you please provide the working document set?",
+        "",
+        "{}",
+        '{"revise": [], "drop": [], "add": []}',
+        # shaped like an operation but carries no citable span
+        '{"revise": [{"seq": 2, "text": "The Commission must protect personal '
+        'data during an inspection under the regime.", "evidence": []}]}',
+        # span without a document
+        '{"add": [{"text": "The Commission must protect personal data during an '
+        'inspection.", "evidence": [{"line_from": 4, "line_to": 9}]}]}',
+    ]:
+        assert _parse_patch(not_a_claim) is None, not_a_claim[:60]
+
+
+def test_revision_only_touches_the_claims_the_patch_names():
+    """Re-judging claims the revision did not change was the loop's cost. A
+    patch names what to revise, drop and add; everything else keeps its row,
+    its spans and its verdicts, because it is never rebuilt."""
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._revise_answer)
+    # operations are applied by name, not by rebuilding the answer
+    for op in ('patch["drop"]', 'patch["revise"]', 'patch["add"]'):
+        assert op in src, op
+    # the whole-answer replacement is gone
+    assert "AnswerClaim.id.in_(old_ids)" not in src
+    # only revised claims lose their evidence (it is re-bound)
+    revise_block = src[src.index('for item in patch["revise"]'):
+                       src.index('if patch["add"]')]
+    assert "ClaimEvidence.__table__.delete()" in revise_block
+
+
+def test_abstention_is_offered_only_on_the_final_gate_cycle():
+    """The flag exists inside the reviser; it has to be PASSED, or abstention
+    can never fire. It shipped once without a caller supplying it."""
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._stage_validate_publish)
+    calls = [l for l in src.splitlines() if "last_attempt=" in l]
+    assert len(calls) >= 2, "every gate-driven revision must state its cycle"
+    for line in calls:
+        # budgeted cycles compute the flag; a bonus cycle for an objection
+        # the reviser has never seen IS the final chance, so it passes True
+        assert "gate_cycles <= 1" in line or "last_attempt=True" in line, line
+
+
+def test_drafting_input_carries_no_interpretation():
+    """Grounding is on raw source text only.
+
+    The manifest — summaries, classes, annotations — is interpretation
+    produced at ingestion and checked against nothing. It may decide what to
+    READ; it may never be what a claim asserts. One answer attributed an
+    Opinion to the right Advocate General on the strength of a summary, with
+    no passage behind it: true, and uncheckable.
+    """
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._draft_from_extracts)
+    # the plan's prose target must not be interpolated into the draft prompt
+    assert 'e.get("establishes")' not in src and "e['establishes']" not in src
+    assert "PASSAGE GROUP" in src
+    assert "ONLY thing you know" in src
+
+    # the manifest may steer reading, but must never reach a drafting prompt
+    synth = inspect.getsource(qr._stage_synthesize)
+    assert "_doc_manifest" in synth, "the manifest still guides the plan"
+    assert "+ manifest" not in synth, "manifest text reaches a drafting prompt"
+
+    # the chat drafting loop, which sent the manifest to the drafter, is gone
+    assert not hasattr(qr, "_dead_chat_diagnosis") or "synthesis-agent" not in synth
+    from app.config import Settings
+    import pytest as _pytest
+    with _pytest.raises(Exception):
+        Settings(GROVE_DRAFT_MODE="chat")
+
+
+def test_a_keep_records_a_reason_and_cannot_smuggle_in_a_claim():
+    """The gate names a stronger source; keeping the original citation is
+    often right, and was previously indistinguishable from ignoring the
+    finding — the reviser had no way to say "I read it, mine is better".
+
+    A keep carries a sequence number and a reason and nothing else: no text,
+    no spans. So it can never introduce or alter a claim, and the claim it
+    names keeps its verdicts because it is not rebuilt.
+    """
+    from app.services.query_runner import _parse_patch
+
+    patch = _parse_patch(
+        '{"keep": [{"seq": 3, "rationale": "32025M11936.md restates the '
+        'operative paragraph; m11936.md carries the Commission\'s own '
+        'reasoning on the point."}]}'
+    )
+    assert patch and patch["keep"] == [
+        {"seq": 3, "rationale": "32025M11936.md restates the operative "
+                                "paragraph; m11936.md carries the "
+                                "Commission's own reasoning on the point."}
+    ]
+    assert patch["revise"] == [] and patch["add"] == [] and patch["drop"] == []
+
+    for not_a_keep in [
+        # no reason given: a bare refusal to act is not a decision
+        '{"keep": [{"seq": 3}]}',
+        '{"keep": [{"seq": 3, "rationale": "no"}]}',
+        # no claim it applies to
+        '{"keep": [{"rationale": "the current citation is more direct here"}]}',
+    ]:
+        assert _parse_patch(not_a_keep) is None, not_a_keep
+
+
+def test_a_keep_alters_only_the_rationale():
+    import inspect
+
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._revise_answer)
+    block = src[src.index('for item in patch.get("keep")'):
+                src.index("await session.commit()",
+                          src.index('for item in patch.get("keep")'))]
+    assert "row.rationale = item" in block
+    for forbidden in ("claim_text", "_bind_spans", "ClaimEvidence"):
+        assert forbidden not in block, forbidden
+
+
+def test_a_revised_or_added_claim_carries_its_reasoning():
+    from app.services.query_runner import _parse_patch
+
+    patch = _parse_patch(
+        '{"revise": [{"seq": 4, "text": "Regulation (EU) 2018/1725, not the '
+        'GDPR, governs the processing of personal data during an inspection.",'
+        ' "rationale": "Answers the applicable-regime part of the question; '
+        '2018/1725 is the instrument addressed to the institutions.", '
+        '"evidence": [{"filename": "32018R1725.md", "line_from": 40, '
+        '"line_to": 52}]}]}'
+    )
+    assert patch["revise"][0]["rationale"].startswith("Answers the applicable")

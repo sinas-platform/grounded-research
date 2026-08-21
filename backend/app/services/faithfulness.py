@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity
 from app.config import get_settings
-from app.models import AnswerClaim, ClaimEvidence, DocumentVersion
+from app.models import AnswerClaim, ClaimEvidence, Document, DocumentVersion
 
 # Lines of context around the cited span; enough to judge support without
 # re-litigating the document.
@@ -49,10 +49,36 @@ A span FAILS if it is only tangentially related, contradicts the claim, or
 covers no part of it (e.g. the claim's precise figure appears in no span).
 A span PASSES if it substantively grounds a part of the claim, even if other
 parts are grounded by the other spans.
-Reply with exactly one line PER SPAN, in order, nothing else:
+
+Then judge the claim AS A WHOLE. Per-span verdicts say whether each span
+carries the part it covers; they cannot say whether anything is left over.
+Take every proposition the claim asserts — each figure, date, attribution,
+causal reason, and any generalisation across jurisdictions or authorities —
+and check it against the union of the passing spans. A case caption or party
+list establishes only that the case exists and which court decided it; it
+carries no holding.
+
+Attribution is itself a proposition. If the claim says WHERE its content
+comes from — "in case X", "the court held", "according to author Y" — that
+provenance must be carried by the passages or by the document's own
+identification below. A passage may discuss X while belonging to a
+different case entirely; if the document identifies itself as something
+other than what the claim attributes, COVERAGE is PARTIAL and the mismatch
+is what you name.
+
+DOCUMENT IDENTIFICATION (the opening of each cited document, verbatim):
+{doc_heads}
+
+COVERAGE is FULL only if every proposition is carried. Otherwise PARTIAL,
+and name what is missing.
+
+Reply with exactly one line PER SPAN, in order, then one COVERAGE line,
+nothing else:
 SPAN 1: PASS — <one short clause>
 SPAN 2: FAIL — <one short clause>
-..."""
+COVERAGE: FULL — <one short clause>
+or
+COVERAGE: PARTIAL — <the propositions no span establishes>"""
 
 _SPAN_TMPL = """SPAN {i} (stance: {stance}; lines {line_from}-{line_to}):
 ---
@@ -83,13 +109,21 @@ async def _judge_claim(
     settings,
     claim_text: str,
     rows: list[tuple[ClaimEvidence, str, int, int]],
+    claim_id: uuid.UUID | None = None,
+    sequence: int | None = None,
+    run_id: uuid.UUID | None = None,
+    doc_heads: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """One judging call for a claim and ALL its spans; per-span verdicts."""
     spans_block = "\n\n".join(
         _SPAN_TMPL.format(i=i + 1, stance=ev.stance, line_from=lf, line_to=lt, span_text=txt)
         for i, (ev, txt, lf, lt) in enumerate(rows)
     )
-    prompt = _PROMPT.format(claim=claim_text, n=len(rows), spans_block=spans_block)
+    heads = "\n".join(
+        f"[{fn}]\n{head}" for fn, head in sorted((doc_heads or {}).items())
+    ) or "(unavailable)"
+    prompt = _PROMPT.format(claim=claim_text, n=len(rows),
+                            spans_block=spans_block, doc_heads=heads)
     async with sem:
         try:
             resp = await client.post(
@@ -99,7 +133,13 @@ async def _judge_claim(
                 timeout=120.0,
             )
             resp.raise_for_status()
-            reply = (resp.json().get("reply") or "").strip()
+            payload = resp.json()
+            reply = (payload.get("reply") or "").strip()
+            if run_id is not None:
+                from app.services.query_runner import record_llm_call
+
+                await record_llm_call(run_id, payload.get("chat_id"),
+                                      _VALIDATOR_AGENT)
         except Exception as exc:
             return [{"evidence_id": ev.id, "error": f"invoke failed: {exc}"} for ev, *_ in rows]
 
@@ -123,6 +163,17 @@ async def _judge_claim(
             body.split("-", 1)[1].strip() if "-" in body else body
         )
         verdicts.append({"evidence_id": ev.id, "validated": ok, "reasoning": reason[:500]})
+
+    cov = next((l for l in lines if l.upper().startswith("COVERAGE:")), None)
+    if cov:
+        body = cov.split(":", 1)[1].strip()
+        full = body.upper().startswith("FULL")
+        why = body.split("—", 1)[1].strip() if "—" in body else body
+        verdicts.append({"claim_coverage": "full" if full else "partial",
+                         "claim_id": str(claim_id) if claim_id else None,
+                         "claim_sequence": sequence,
+                         "claim_text": claim_text,
+                         "uncovered": why[:500]})
     return verdicts
 
 
@@ -131,6 +182,7 @@ async def validate_answer_evidence(
     caller: CallerIdentity,
     answer_id: uuid.UUID,
     pending_only: bool = True,
+    run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Judge (pending) evidence rows of an answer as parallel stateless calls
     and record the verdicts. Returns a summary the synthesis agent can act on
@@ -147,6 +199,11 @@ async def validate_answer_evidence(
     rows = (await session.execute(stmt)).all()
     if not rows:
         return {"judged": 0, "passed": 0, "failed": [], "errors": []}
+
+    filenames = dict((await session.execute(
+        select(Document.id, Document.filename)
+        .where(Document.id.in_({r[0].document_id for r in rows}))
+    )).all())
 
     # Resolve span text per row (documents may repeat across rows — cache).
     version_cache: dict[uuid.UUID, str | None] = {}
@@ -180,11 +237,26 @@ async def validate_answer_evidence(
             errors.append({"evidence_id": ev.id, "error": "no extracted content"})
             continue
         span_text, lf, lt = _slice_span(content, ev.span or {})
-        entry = by_claim.setdefault(claim.id, {"claim_text": claim.claim_text, "rows": []})
+        entry = by_claim.setdefault(
+            claim.id,
+            {"claim_id": claim.id, "claim_text": claim.claim_text,
+             "sequence": claim.sequence, "rows": [], "doc_heads": {}},
+        )
         entry["rows"].append((ev, span_text, lf, lt))
+        # The document's own opening lines, so the judge can check that a
+        # claim's stated provenance matches what the document IS. Raw source
+        # text, not interpretation: one answer attributed a holding to
+        # Delivery Hero/Glovo citing the Naspers/Just Eat Takeaway decision,
+        # and per-span entailment could not see it — the passage really does
+        # discuss those facts, in a different case's decision.
+        fn = filenames.get(ev.document_id) or str(ev.document_id)
+        if fn not in entry["doc_heads"]:
+            entry["doc_heads"][fn] = "\n".join(
+                l for l in content.splitlines()[:15] if l.strip())[:800]
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
-            _judge_claim(client, sem, settings, e["claim_text"], e["rows"])
+            _judge_claim(client, sem, settings, e["claim_text"], e["rows"],
+                         e["claim_id"], e["sequence"], run_id, e["doc_heads"])
             for e in by_claim.values()
         ]) if by_claim else []
     verdicts = [v for group in grouped for v in group]
@@ -192,7 +264,12 @@ async def validate_answer_evidence(
     by_id = {ev.id: ev for ev, _ in rows}
     claims_by_ev = {ev.id: c for ev, c in rows}
     passed, failed = 0, []
+    overreaching: list[dict[str, Any]] = []
     for v in verdicts:
+        if v.get("claim_coverage"):
+            if v["claim_coverage"] != "full":
+                overreaching.append(v)
+            continue
         if "error" in v:
             errors.append(v)
             continue
@@ -215,6 +292,9 @@ async def validate_answer_evidence(
         "judged": passed + len(failed),
         "passed": passed,
         "failed": failed,
+        # claims whose spans each pass but which assert more than the spans
+        # carry — the defect per-span judging structurally cannot see
+        "overreaching": overreaching,
         "errors": [
             {**e, "evidence_id": str(e["evidence_id"])} if not isinstance(e.get("evidence_id"), str) else e
             for e in errors

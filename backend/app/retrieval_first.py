@@ -224,6 +224,26 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
     names: dict[str, str] = {}
 
     async with AsyncSessionLocal() as s:
+        # How common is each anchor? A mention of "Regulation (EU) 2018/1725"
+        # says almost nothing: every EU regulation carries a data-protection
+        # recital citing it, so an anchor on it pulls in the statute book —
+        # expert review found the AI Act, the Digital Markets Act, the Health
+        # Data Space, wine geographical indications and Ecodesign ranked into
+        # an answer about inspections, each on a single boilerplate mention.
+        # A mention of "E.ON Energie" says a great deal. Weight by inverse
+        # document frequency so aboutness beats boilerplate.
+        total_docs = (await s.execute(
+            text("SELECT count(*) FROM document"))).scalar() or 1
+        df_rows = (await s.execute(text("""
+            SELECT entity_id, count(DISTINCT document_id)
+            FROM entity_mention
+            WHERE entity_id = ANY(CAST(:eids AS uuid[])) AND status = 'active'
+            GROUP BY 1"""), {"eids": list(plan["anchors"])})).all()
+        import math
+        _ln_n = math.log(total_docs + 1)
+        idf = {str(eid): max(0.05, math.log((total_docs + 1) / (df + 1)) / _ln_n)
+               for eid, df in df_rows}
+
         frontier = set(plan["anchors"])
         seen_entities = set(frontier)
         for hop in range(depth):
@@ -235,12 +255,13 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 SELECT m.document_id, d.filename, m.entity_id, count(*)
                 FROM entity_mention m JOIN document d ON d.id = m.document_id
                 WHERE m.entity_id = ANY(CAST(:eids AS uuid[]))
-                  AND m.status = 'active'
+                  AND m.status = 'active' AND d.staged IS NOT TRUE
                 GROUP BY 1, 2, 3"""),
                 {"eids": list(frontier)})).all()
             for did, fn, eid, hits in rows:
                 did = str(did)
-                scores[did] += w_mention * min(hits, 10)
+                w = idf.get(str(eid), 1.0)
+                scores[did] += w_mention * min(hits, 10) * w
                 names[did] = fn
                 label = plan["anchor_names"].get(str(eid), str(eid)[:8])
                 reasons[did].append(
@@ -250,8 +271,9 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 SELECT r.evidence_document_id, d.filename, count(*)
                 FROM relationship r
                 JOIN document d ON d.id = r.evidence_document_id
-                WHERE r.source_id = ANY(CAST(:eids AS uuid[]))
-                   OR r.target_id = ANY(CAST(:eids AS uuid[]))
+                WHERE (r.source_id = ANY(CAST(:eids AS uuid[]))
+                   OR r.target_id = ANY(CAST(:eids AS uuid[])))
+                  AND d.staged IS NOT TRUE
                 GROUP BY 1, 2"""), {"eids": list(frontier)})).all()
             for did, fn, hits in rows:
                 did = str(did)
@@ -281,6 +303,7 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 FROM document d
                 JOIN document_version dv ON dv.id = d.current_version_id
                 WHERE dv.content_tsvector @@ websearch_to_tsquery('simple', :q)
+                  AND d.staged IS NOT TRUE
                 ORDER BY r DESC LIMIT 60"""), {"q": q})).all()
             for did, fn, r in rows:
                 did = str(did)
@@ -299,7 +322,8 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
             pat = "%" + "%".join(toks[:3]) + "%"
             rows = (await s.execute(text("""
                 SELECT id, filename FROM document
-                WHERE filename ILIKE :pat LIMIT 10"""),
+                WHERE filename ILIKE :pat AND staged IS NOT TRUE
+                LIMIT 10"""),
                 {"pat": pat})).all()
             for did, fn in rows:
                 did = str(did)

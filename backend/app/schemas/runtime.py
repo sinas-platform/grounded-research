@@ -244,6 +244,10 @@ class ClaimOut(TimestampedOut):
     display_number: int | None = None
     claim_text: str
     claim_type: str | None = None
+    # Why the claim rests on the source it cites. `validation_reasoning` on
+    # the evidence rows answers the opposite question — whether the passage
+    # carries the sentence — so a reader needs both to follow the argument.
+    rationale: str | None = None
 
 
 class ClaimEvidenceIn(BaseModel):

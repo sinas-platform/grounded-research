@@ -134,7 +134,11 @@ class BatchWaveClient:
         # hour. Sub-batch POLLING stays concurrent — only the upload window
         # is scarce.
         last_exc: Exception | None = None
-        for attempt in range(1, 7):
+        # Twelve attempts, backoff capped at 30 minutes: a provider quota
+        # window (hourly, or daily resetting midnight Pacific) must be
+        # outlasted, not out-retried. Six attempts exhausted in ~16 minutes
+        # and turned a wait-and-recover situation into a dead wave.
+        for attempt in range(1, 13):
             try:
                 async with _SUBMIT_GATE:
                     async with httpx.AsyncClient(timeout=300.0) as c:
@@ -157,9 +161,9 @@ class BatchWaveClient:
             except Exception as exc:  # noqa: BLE001
                 last_exc = exc
                 throttled = "429" in str(exc)
-                if attempt == 6 or not (throttled or attempt == 1):
+                if attempt == 12 or not (throttled or attempt == 1):
                     raise
-                delay = min(30 * (2 ** (attempt - 1)), 480) if throttled else 30
+                delay = min(30 * (2 ** (attempt - 1)), 1800) if throttled else 30
                 log.warning("batch submit attempt %d failed (%s); retrying in %ds",
                             attempt, str(exc)[:200], delay)
                 await asyncio.sleep(delay)

@@ -360,7 +360,7 @@ def test_drafting_input_carries_no_interpretation():
     from app.config import Settings
     import pytest as _pytest
     with _pytest.raises(Exception):
-        Settings(GROVE_DRAFT_MODE="chat")
+        Settings(SGR_DRAFT_MODE="chat")
 
 
 def test_a_keep_records_a_reason_and_cannot_smuggle_in_a_claim():

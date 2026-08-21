@@ -10,7 +10,7 @@ tests. Run from the backend directory:
 import uuid
 
 import pytest
-from app.schemas.package import GrovePackage
+from app.schemas.package import SgrPackage
 from app.services.annotations import (
     AnnotationConfigError,
     Step,
@@ -201,10 +201,10 @@ def test_reduce_tie_break_is_deterministic():
 # Package validation
 # ─────────────────────────────────────────────────────────────
 def _pkg(annotations):
-    return GrovePackage.model_validate(
+    return SgrPackage.model_validate(
         {
-            "apiVersion": "grove.sinas.co/v1",
-            "kind": "GrovePackage",
+            "apiVersion": "sgr.sinas.co/v1",
+            "kind": "SgrPackage",
             "metadata": {"name": "t"},
             "package": {"name": "t", "version": "0.0.1"},
             "spec": {

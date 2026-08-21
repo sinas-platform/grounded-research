@@ -4,7 +4,7 @@ Parked from a design conversation. Build when a concrete schema requires it; not
 
 ## Context
 
-GrovePackage currently supports `properties` on document classes and dossier classes but not on entity types. The first ask came from a legal schema wanting `court_level` on `Court` and `country` on `Jurisdiction` — but on inspection both were better modelled as relationships (`ranks_higher_than`/`appeals_to` for hierarchy; `Document ↔ Jurisdiction` edges for multi-valued country), so we declined the build at the time.
+SgrPackage currently supports `properties` on document classes and dossier classes but not on entity types. The first ask came from a legal schema wanting `court_level` on `Court` and `country` on `Jurisdiction` — but on inspection both were better modelled as relationships (`ranks_higher_than`/`appeals_to` for hierarchy; `Document ↔ Jurisdiction` edges for multi-valued country), so we declined the build at the time.
 
 The feature is still genuinely useful for **scalar, intrinsic, typed, queryable** attributes that don't relate to another entity:
 
@@ -40,7 +40,7 @@ Mirrors `DocumentClassProperty` / `PropertyValue` exactly. Separate tables, not 
 1. **Migration** — `entity_type_property` (one-to-many off `entity_type`) and `entity_property_value` (one-to-many off `entity`). Same column set as the document-class versions.
 2. **Models + Pydantic** — `EntityTypeProperty`, `EntityPropertyValue`; `EntityTypePropertyIn/Out`.
 3. **Config API** — `/config/entity-types/{id}/properties` CRUD (mirrors document-class properties).
-4. **GrovePackage schema** — `PackageEntityTypeEntry.properties: list[PackagePropertyEntry]` (reuse the existing entry type). Apply + export wire it through.
+4. **SgrPackage schema** — `PackageEntityTypeEntry.properties: list[PackagePropertyEntry]` (reuse the existing entry type). Apply + export wire it through.
 5. **Ingestion API** — `POST /ingest/entity-property-values` (mirrors `set_property_value`).
 6. **Review-mode handling** — `EntityProposal.pending_property_values` JSONB. Agent extracts values eagerly even when the entity is pending review; on approval, the proposal's pending values are promoted to real `EntityPropertyValue` rows. Without this, the typed values are lost between extraction and approval.
 7. **Closed-mode handling** — N/A; no new entities created, so no new property values to capture at extraction time. Manual or package-import only.

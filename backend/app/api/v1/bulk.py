@@ -32,7 +32,7 @@ from app.models import Document, DocumentVersion
 
 router = APIRouter(prefix="/bulk", tags=["bulk"])
 
-JOBS_ROOT = Path.home() / "grove-bulk-jobs"
+JOBS_ROOT = Path.home() / "sgr-bulk-jobs"
 
 
 def _spawn(job_id: str, doc_ids: list[str], stages: str) -> Path:

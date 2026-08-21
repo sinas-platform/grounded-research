@@ -43,7 +43,7 @@ from app.models.config import DocumentClassProperty, EntityType
 from app.models.runtime import PropertyValue
 from app.services.query_runner import _Sinas
 
-DOC_METADATA_AGENT = "grove/doc-metadata-agent"
+DOC_METADATA_AGENT = "sgr/doc-metadata-agent"
 GAZETTEER_MIN_ALIAS_LEN = 4
 RULE_WRITE_CONFIDENCE = 0.95  # rules at/above this write the class directly
 

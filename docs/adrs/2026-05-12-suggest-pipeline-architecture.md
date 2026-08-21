@@ -4,7 +4,7 @@
 
 ## Context
 
-Bootstrapping a Grove deployment against an unknown corpus requires designing a schema (document classes, properties, entity types, relationships) before the auto-pipeline can do anything useful. Running the LLM-driven discovery agent on a 30k-document corpus to "figure out the schema" is expensive and noisy, especially when many corpora already arrive with structured metadata (YAML front-matter, CMS exports) that declares most of the schema for free.
+Bootstrapping a SGR deployment against an unknown corpus requires designing a schema (document classes, properties, entity types, relationships) before the auto-pipeline can do anything useful. Running the LLM-driven discovery agent on a 30k-document corpus to "figure out the schema" is expensive and noisy, especially when many corpora already arrive with structured metadata (YAML front-matter, CMS exports) that declares most of the schema for free.
 
 We needed a way to:
 
@@ -16,7 +16,7 @@ We needed a way to:
 
 Two complementary inputs, one shared output queue:
 
-- **Front-matter scan** (`backend/app/services/front_matter*.py`) is pure-Python and synchronous. It parses leading YAML, classifies top-level keys (scalar → property, list-of-scalars → multi-value property, list-of-dicts → entity type, well-known `category`/`type`/`grove.class` keys → document class), and aggregates across the selected docs.
+- **Front-matter scan** (`backend/app/services/front_matter*.py`) is pure-Python and synchronous. It parses leading YAML, classifies top-level keys (scalar → property, list-of-scalars → multi-value property, list-of-dicts → entity type, well-known `category`/`type`/`sgr.class` keys → document class), and aggregates across the selected docs.
 - **LLM discovery** runs the existing `discovery-agent` + `discovery-consolidator-agent` chain as a background `DiscoveryRun`.
 - Both write to the same `DiscoveryRun → DiscoveryCandidate → ConfigProposal` tables that the existing review UI already understands.
 

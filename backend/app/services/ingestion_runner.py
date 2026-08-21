@@ -218,7 +218,7 @@ async def _run_pipeline_inprocess(
     # unbounded gathers caused all day on 15 Aug. Cancellation is honored
     # between chunks, matching the old between-documents check.
     middle_gate = asyncio.Semaphore(
-        int(os.environ.get("GROVE_MIDDLE_CONCURRENCY", "12"))
+        int(os.environ.get("SGR_MIDDLE_CONCURRENCY", "12"))
     )
 
     async def _middle_one(did: uuid.UUID) -> None:

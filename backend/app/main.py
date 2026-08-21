@@ -23,12 +23,12 @@ STATIC_DIR = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     settings = get_settings()
-    logging.basicConfig(level=settings.grove_log_level)
-    log.info("starting sinas-grove backend")
-    log.info("auth mode: %s", settings.grove_auth_mode)
-    if settings.grove_auth_mode == "simplified":
+    logging.basicConfig(level=settings.sgr_log_level)
+    log.info("starting sinas-grounded-research backend")
+    log.info("auth mode: %s", settings.sgr_auth_mode)
+    if settings.sgr_auth_mode == "simplified":
         log.warning(
-            "GROVE_AUTH_MODE=simplified — every request runs as the admin "
+            "SGR_AUTH_MODE=simplified — every request runs as the admin "
             "identity (a presented bearer must still match SINAS_API_KEY). "
             "Local development only; never expose this mode beyond localhost."
         )
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
-        title="Sinas Grove",
+        title="Sinas Grounded Research",
         version="0.1.0",
         lifespan=lifespan,
     )

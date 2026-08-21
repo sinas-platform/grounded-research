@@ -23,7 +23,7 @@ async function downloadBundledPackage() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'sinas-grove.yaml';
+  a.download = 'sinas-grounded-research.yaml';
   a.click();
   URL.revokeObjectURL(url);
 }
@@ -38,7 +38,7 @@ export default function SinasStatusPage() {
     <div>
       <PageHeader
         title="Sinas integration"
-        description="Status of the sinas-grove package on the Sinas instance Grove is talking to."
+        description="Status of the sinas-grounded-research package on the Sinas instance SGR is talking to."
         actions={
           <div className="flex gap-2">
             <button

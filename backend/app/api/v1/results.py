@@ -30,7 +30,7 @@ async def list_results(
     limit: int = 50,
     offset: int = 0,
 ):
-    read_all = await caller.has_permission("grove.results.read:all")
+    read_all = await caller.has_permission("sgr.results.read:all")
     stmt = (
         select(Result)
         .where(visible_clause(Result, caller, read_all=read_all))

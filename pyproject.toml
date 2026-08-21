@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "sinas-grove"
+name = "sinas-grounded-research"
 version = "0.1.0"
 description = "Stateful, multi-agent document indexing and retrieval on top of Sinas"
-authors = ["Sinas Grove contributors"]
+authors = ["Sinas Grounded Research contributors"]
 license = "AGPL-3.0-or-later"
 readme = "README.md"
 packages = [{ include = "app", from = "backend" }]

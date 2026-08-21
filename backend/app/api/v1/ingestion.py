@@ -1,4 +1,4 @@
-"""Ingestion writes — called by Grove agents during the ingestion pipeline.
+"""Ingestion writes — called by SGR agents during the ingestion pipeline.
 
 The post-upload function in the Sinas package POSTs to /ingest/post-upload to
 register a new document; from there agents call set_document_class,
@@ -182,7 +182,7 @@ class SetClassIn(BaseModel):
 
 @router.post(
     "/documents/{doc_id}/class",
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def set_document_class(
     doc_id: uuid.UUID,
@@ -211,7 +211,7 @@ class SetSummaryIn(BaseModel):
 
 @router.post(
     "/documents/{doc_id}/summary",
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def set_document_summary(
     doc_id: uuid.UUID,
@@ -232,7 +232,7 @@ async def set_document_summary(
     "/property-values",
     response_model=PropertyValueOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def set_property_value(
     payload: PropertyValueIn,
@@ -324,7 +324,7 @@ async def _alias_match(
     "/entities",
     response_model=EntityResolution,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def propose_new_entity(
     payload: EntityIn, session: AsyncSession = Depends(get_session)
@@ -421,7 +421,7 @@ class EntityMentionInWithBody(BaseModel):
 @router.post(
     "/entity-mentions",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def record_entity_mention(
     payload: EntityMentionInWithBody, session: AsyncSession = Depends(get_session)
@@ -448,7 +448,7 @@ class EntityMatch(BaseModel):
 @router.post(
     "/find-entity",
     response_model=list[EntityMatch],
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def find_entity_by_name(
     payload: FindEntityIn, session: AsyncSession = Depends(get_session)
@@ -520,7 +520,7 @@ class RelationshipResolution(BaseModel):
     "/relationships",
     response_model=RelationshipResolution,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def record_relationship(
     payload: RelationshipIn, session: AsyncSession = Depends(get_session)
@@ -560,7 +560,7 @@ async def record_relationship(
     "/relationship-proposals",
     response_model=RelationshipProposalOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def propose_relationship(
     payload: RelationshipProposalIn, session: AsyncSession = Depends(get_session)
@@ -577,7 +577,7 @@ async def propose_relationship(
     "/unresolved-relationships",
     response_model=UnresolvedRelationshipOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.ingestion.write:own"))],
+    dependencies=[Depends(require_permission("sgr.ingestion.write:own"))],
 )
 async def record_unresolved_relationship(
     payload: UnresolvedRelationshipIn, session: AsyncSession = Depends(get_session)

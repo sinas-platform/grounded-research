@@ -6,10 +6,10 @@
 
 Today the deep-search retrieval loop works like this:
 
-1. Agent constructs a `GroveFilter` object in its conversation context.
+1. Agent constructs a `SgrFilter` object in its conversation context.
 2. Agent calls `introspect(filter)` — passes the full filter on every iteration.
-3. Agent decides what to mutate, builds the next `GroveFilter`, repeats.
-4. Agent is *expected* to call `append_trace(...)` to log what changed and why, but nothing in Grove enforces it.
+3. Agent decides what to mutate, builds the next `SgrFilter`, repeats.
+4. Agent is *expected* to call `append_trace(...)` to log what changed and why, but nothing in SGR enforces it.
 
 Two problems:
 
@@ -33,7 +33,7 @@ ALTER TABLE result
   ADD COLUMN filter_version integer NOT NULL DEFAULT 0;
 ```
 
-- `filter` — the current `GroveFilter` value, kept in sync with each mutation
+- `filter` — the current `SgrFilter` value, kept in sync with each mutation
 - `filter_version` — optimistic concurrency token, incremented on every mutation; mutation requests carry the expected version and 409 on mismatch
 
 ### Mutation ops (the validated list)
@@ -146,7 +146,7 @@ This gives the agent everything it needs in one round-trip: new state, new versi
 
 ### What stays the same
 
-- `GroveFilter` schema — unchanged. We persist exactly that shape on the Result.
+- `SgrFilter` schema — unchanged. We persist exactly that shape on the Result.
 - `result_trace` model — unchanged. Auto-trace just writes rows the agent could have written manually.
 - `add_files_to_result`, `append_trace`, `publish_result`, `get_result`, `get_result_documents` — unchanged.
 - The Result-as-research-session story — strengthened. Result now durably holds in-flight filter + trace + draft docs.
@@ -159,7 +159,7 @@ This gives the agent everything it needs in one round-trip: new state, new versi
 
 **New `ResearchSession` table.** Considered (it was suggested in an early deployment brief). Rejected — `Result` already has the right shape (status, parent_result_id, owner, trace). Adding `filter` + `filter_version` columns is two columns; a new table would mean duplicating status/owner/audit/publish across two models. The Result *is* the session.
 
-**Store the filter in Sinas State (state stores).** Rejected — the in-package comment in `schemas/runtime.py:213` claims this is current behavior, but no code reads/writes it. Sinas State adds a cross-service dependency for data that conceptually belongs to a Grove entity (the Result). Keeping it on the Result keeps the data co-located with the trace and the documents.
+**Store the filter in Sinas State (state stores).** Rejected — the in-package comment in `schemas/runtime.py:213` claims this is current behavior, but no code reads/writes it. Sinas State adds a cross-service dependency for data that conceptually belongs to a SGR entity (the Result). Keeping it on the Result keeps the data co-located with the trace and the documents.
 
 **No version field for concurrency.** Two agents mutating the same draft is rare (single-user, single-session typical), but cheap to add now and saves debugging pain later. Servers reject mutations with a stale version → 409. Agent retries with the new version.
 
@@ -178,20 +178,20 @@ This gives the agent everything it needs in one round-trip: new state, new versi
 
 - 22 new connector ops to specify, implement, document, and prompt-engineer the agent around. Each is small; together they're a chunk of work.
 - The agent prompt for `deep-search-agent` needs rewriting — the loop changes from "build a filter, call introspect" to "call mutation ops, call introspect(result_id)."
-- `GroveFilter` schema is now a wire format AND a database format. Any change to the schema needs a migration *and* a connector-op compatibility consideration. Mitigate by keeping `GroveFilter` minimal and using version-aware reads.
+- `SgrFilter` schema is now a wire format AND a database format. Any change to the schema needs a migration *and* a connector-op compatibility consideration. Mitigate by keeping `SgrFilter` minimal and using version-aware reads.
 - Op count is large (22). Risk of agent confusion ("which op do I use?"). Mitigate via the prompt's loop description and the playbooks' guidance.
 
 **To revisit if reversed:** unlikely to fully reverse, but the easiest partial rollback is to keep the schema columns and have agents pass `filter` explicitly to `introspect` again. The auto-trace contract is the part that's hardest to undo because it relocates a responsibility from the agent to the server.
 
 ## 2026-06-09 addendum — field_filters narrow the count
 
-The original landing of this ADR shipped `apply_grove_filter` with field_filters intentionally excluded from the count subquery — the comment in `services/introspect.py` referred to an "ARCHITECTURE.md §13" that never made it into the repo, and the practical effect was that the agent's filter loop had no steering signal: adding `sector_targeted = Pharmaceutical` didn't change `candidate_count`, so the agent couldn't tell if its filter was doing anything.
+The original landing of this ADR shipped `apply_sgr_filter` with field_filters intentionally excluded from the count subquery — the comment in `services/introspect.py` referred to an "ARCHITECTURE.md §13" that never made it into the repo, and the practical effect was that the agent's filter loop had no steering signal: adding `sector_targeted = Pharmaceutical` didn't change `candidate_count`, so the agent couldn't tell if its filter was doing anything.
 
 Fixed: field_filters now narrow the count subquery via `EXISTS` against `PropertyValue`, keyed by property name within the active `document_class_id`. Field name resolution is scoped to a class (you can't field_filter without one), which matches how the agent already drives the loop.
 
 Distributions take the standard **faceted** approach: every field's distribution narrows by all *other* field_filters but not by its own, so the agent can still see "what other sectors exist in my current narrowed set" without that filter hiding its own candidate values. `total_documents` per distribution reflects the facet base, not the global pre-filter total.
 
-Operator support in v1: `eq`, `in`, `neq`, `gte`, `lte`, `gt`, `lt`. Comparisons are text-cast on `value->'_'`, which works for ISO dates and exact strings. A typed-comparison variant (numeric / date cast) can be added when a real query needs it. `regex_filters` and dossier scoping remain TODO in `apply_grove_filter`.
+Operator support in v1: `eq`, `in`, `neq`, `gte`, `lte`, `gt`, `lt`. Comparisons are text-cast on `value->'_'`, which works for ISO dates and exact strings. A typed-comparison variant (numeric / date cast) can be added when a real query needs it. `regex_filters` and dossier scoping remain TODO in `apply_sgr_filter`.
 
 ## Out of scope for this ADR (follow-ups)
 

@@ -16,7 +16,7 @@ type Tab =
   | 'packages';
 
 const TABS: { value: Tab; label: string; sub: string }[] = [
-  { value: 'document_classes', label: 'Document classes', sub: 'Kinds of documents Grove indexes' },
+  { value: 'document_classes', label: 'Document classes', sub: 'Kinds of documents SGR indexes' },
   { value: 'entity_types', label: 'Entity types', sub: 'Things extracted from documents' },
   { value: 'relationships', label: 'Relationships', sub: 'Edges between docs / entities / dossiers' },
   { value: 'dossier_classes', label: 'Dossier classes', sub: 'Optional document containers' },

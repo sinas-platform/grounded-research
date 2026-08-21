@@ -1,4 +1,4 @@
-"""Sinas integration status — is the sinas-grove package installed in Sinas,
+"""Sinas integration status — is the sinas-grounded-research package installed in Sinas,
 and at what version? Used by the admin UI to surface drift / missing install.
 """
 
@@ -15,22 +15,22 @@ from app.services.sinas import Management, get_management
 
 router = APIRouter(prefix="/sinas-status", tags=["sinas-status"])
 
-EXPECTED_PACKAGE_NAME = "sinas-grove"
-# Keep in lockstep with package/sinas-grove.yaml — the Activity page
+EXPECTED_PACKAGE_NAME = "sinas-grounded-research"
+# Keep in lockstep with package/sinas-grounded-research.yaml — the Activity page
 # shows a drift warning when the installed version differs.
 EXPECTED_PACKAGE_VERSION = "0.1.34"
 
 
 def _bundled_package_path() -> Path | None:
-    """Locate the bundled sinas-grove.yaml.
+    """Locate the bundled sinas-grounded-research.yaml.
 
     In the container the Dockerfile copies `package/` next to `backend/` at
     /app/package/. In local dev the repo layout puts it two levels above this
     file. Try both.
     """
     candidates = [
-        Path("/app/package/sinas-grove.yaml"),
-        Path(__file__).resolve().parents[4] / "package" / "sinas-grove.yaml",
+        Path("/app/package/sinas-grounded-research.yaml"),
+        Path(__file__).resolve().parents[4] / "package" / "sinas-grounded-research.yaml",
     ]
     for p in candidates:
         if p.is_file():
@@ -74,7 +74,7 @@ async def get_sinas_status(
             installed=False,
             installed_version=None,
             drift=False,
-            note="package not installed in Sinas — install via `sinas package install ./package/sinas-grove.yaml`",
+            note="package not installed in Sinas — install via `sinas package install ./package/sinas-grounded-research.yaml`",
         )
 
     installed_version = pkg.get("version") or pkg.get("package", {}).get("version")
@@ -86,21 +86,21 @@ async def get_sinas_status(
         installed=True,
         installed_version=installed_version,
         drift=drift,
-        note=None if not drift else "installed version differs from this Grove build",
+        note=None if not drift else "installed version differs from this SGR build",
     )
 
 
 @router.get("/package.yaml")
 async def download_bundled_package() -> Response:
-    """Return the bundled sinas-grove.yaml that ships with this Grove build."""
+    """Return the bundled sinas-grounded-research.yaml that ships with this SGR build."""
     path = _bundled_package_path()
     if path is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
-            "bundled sinas-grove.yaml not found in this build",
+            "bundled sinas-grounded-research.yaml not found in this build",
         )
     return Response(
         content=path.read_text(encoding="utf-8"),
         media_type="application/x-yaml",
-        headers={"Content-Disposition": 'attachment; filename="sinas-grove.yaml"'},
+        headers={"Content-Disposition": 'attachment; filename="sinas-grounded-research.yaml"'},
     )

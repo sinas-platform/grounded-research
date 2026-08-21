@@ -196,7 +196,7 @@ function SinasBanner({ status }: { status: SinasStatus }) {
       <div className="mb-6 flex items-center gap-2 px-4 py-2 rounded-md border border-forest-100 bg-forest-50 text-sm text-forest-800">
         <CheckCircle2 size={16} />
         <span>
-          Sinas integration healthy — sinas-grove{' '}
+          Sinas integration healthy — sinas-grounded-research{' '}
           <span className="font-mono">{status.installed_version}</span> installed.
         </span>
       </div>
@@ -210,7 +210,7 @@ function SinasBanner({ status }: { status: SinasStatus }) {
       <AlertTriangle size={16} />
       <span>
         {!status.installed
-          ? 'Sinas package not installed — Grove will not function until you install it.'
+          ? 'Sinas package not installed — SGR will not function until you install it.'
           : `Sinas package version drift — installed ${status.installed_version}, expected ${status.expected_version}.`}
       </span>
     </Link>

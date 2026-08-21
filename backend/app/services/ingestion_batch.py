@@ -134,7 +134,7 @@ class BatchWaveClient:
                         json={
                             "inputs": [{"message": m} for m, _ in items],
                             "execution_mode": "provider",
-                            "trigger_id_prefix": f"grove-ingest-{self.run_id or 'adhoc'}",
+                            "trigger_id_prefix": f"sgr-ingest-{self.run_id or 'adhoc'}",
                         },
                     )
                 if r.is_error:

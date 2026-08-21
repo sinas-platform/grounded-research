@@ -34,7 +34,7 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 
 async def _document_visibility(model, caller: CallerIdentity):
-    read_all = await caller.has_permission("grove.documents.read:all")
+    read_all = await caller.has_permission("sgr.documents.read:all")
     base = visible_clause(model, caller, read_all=read_all)
     if read_all or caller.is_admin:
         return base
@@ -147,7 +147,7 @@ async def get_document(
 @router.patch(
     "/{doc_id}",
     response_model=DocumentOut,
-    dependencies=[Depends(require_permission("grove.documents.write:own"))],
+    dependencies=[Depends(require_permission("sgr.documents.write:own"))],
 )
 async def update_document(
     doc_id: uuid.UUID,
@@ -158,7 +158,7 @@ async def update_document(
     row = await session.get(Document, doc_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
-    write_all = await caller.has_permission("grove.documents.write:all")
+    write_all = await caller.has_permission("sgr.documents.write:all")
     if not (write_all or caller.is_admin or row.owner_id == caller.user_id):
         raise HTTPException(status.HTTP_403_FORBIDDEN, "not your document")
     for k, v in payload.model_dump(exclude_unset=True).items():

@@ -29,7 +29,7 @@ async def _writable_answer_or_404(
     answer_id: uuid.UUID, session: AsyncSession, caller: CallerIdentity
 ) -> Answer:
     # write:own means the answer must be visible to the caller; write:all lifts that.
-    write_all = await caller.has_permission("grove.answers.write:all")
+    write_all = await caller.has_permission("sgr.answers.write:all")
     stmt = (
         select(Answer)
         .where(Answer.id == answer_id)
@@ -44,7 +44,7 @@ async def _writable_answer_or_404(
 async def _writable_claim_or_404(
     claim_id: uuid.UUID, session: AsyncSession, caller: CallerIdentity
 ) -> AnswerClaim:
-    write_all = await caller.has_permission("grove.answers.write:all")
+    write_all = await caller.has_permission("sgr.answers.write:all")
     stmt = (
         select(AnswerClaim)
         .join(Answer, Answer.id == AnswerClaim.answer_id)
@@ -66,7 +66,7 @@ class StartAnswerIn(BaseModel):
 @router.post(
     "/answers",
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def start_answer(
     payload: StartAnswerIn,
@@ -120,7 +120,7 @@ class DraftClaimIn(BaseModel):
     "/answers/{answer_id}/claims",
     response_model=ClaimWithEvidenceOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def draft_claim(
     answer_id: uuid.UUID,
@@ -183,7 +183,7 @@ async def draft_claim(
     "/claims/{claim_id}/evidence",
     response_model=ClaimEvidenceOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def bind_evidence(
     claim_id: uuid.UUID,
@@ -215,7 +215,7 @@ class UpdateClaimIn(BaseModel):
 @router.patch(
     "/claims/{claim_id}",
     response_model=ClaimOut,
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def update_claim(
     claim_id: uuid.UUID,
@@ -247,7 +247,7 @@ async def update_claim(
 @router.delete(
     "/claims/{claim_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def delete_claim(
     claim_id: uuid.UUID,
@@ -274,7 +274,7 @@ class ValidateAnswerIn(BaseModel):
 
 @router.post(
     "/answers/{answer_id}/validate",
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def validate_answer_evidence(
     answer_id: uuid.UUID,
@@ -297,7 +297,7 @@ class ValidationVerdict(BaseModel):
 
 @router.post(
     "/evidence/{evidence_id}/verdict",
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def record_validation_verdict(
     evidence_id: uuid.UUID,
@@ -305,7 +305,7 @@ async def record_validation_verdict(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    write_all = await caller.has_permission("grove.answers.write:all")
+    write_all = await caller.has_permission("sgr.answers.write:all")
     row = (
         await session.execute(
             select(ClaimEvidence)
@@ -333,7 +333,7 @@ class BulkVerdictsIn(BaseModel):
 
 @router.post(
     "/answers/{answer_id}/verdicts",
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def record_validation_verdicts(
     answer_id: uuid.UUID,
@@ -375,7 +375,7 @@ async def record_validation_verdicts(
 
 @router.post(
     "/answers/{answer_id}/publish",
-    dependencies=[Depends(require_permission("grove.answers.write:own"))],
+    dependencies=[Depends(require_permission("sgr.answers.write:own"))],
 )
 async def publish_answer(
     answer_id: uuid.UUID,

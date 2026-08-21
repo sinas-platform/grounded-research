@@ -33,7 +33,7 @@ from app.models import Document, Entity, EntityMention
 from app.models.runtime import DocumentVersion
 from app.services.query_runner import _Sinas
 
-GROUNDING_AGENT = "grove/grounding-agent"
+GROUNDING_AGENT = "sgr/grounding-agent"
 _CONTEXT_CHARS = 240
 _REJECT_CONFIDENCE = 0.6
 

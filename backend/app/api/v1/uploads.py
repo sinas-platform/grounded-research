@@ -1,5 +1,5 @@
-"""File upload — proxies to Sinas's grove/documents collection via the SDK.
-The post-upload function then registers the file with Grove asynchronously."""
+"""File upload — proxies to Sinas's sgr/documents collection via the SDK.
+The post-upload function then registers the file with SGR asynchronously."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
 
-GROVE_NAMESPACE = "grove"
-GROVE_COLLECTION = "documents"
+SGR_NAMESPACE = "sgr"
+SGR_COLLECTION = "documents"
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
@@ -53,8 +53,8 @@ async def upload_document(
     client = SinasClient(base_url=get_settings().sinas_url, token=caller.sinas_token)
     result = await asyncio.to_thread(
         client.files.upload_bytes,
-        namespace=GROVE_NAMESPACE,
-        collection=GROVE_COLLECTION,
+        namespace=SGR_NAMESPACE,
+        collection=SGR_COLLECTION,
         name=file.filename or "upload.bin",
         content=content,
         content_type=file.content_type or "application/octet-stream",

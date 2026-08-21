@@ -49,7 +49,7 @@ from app.models.config import EntityType
 from app.models.runtime import DocumentVersion, EntityProposal
 from app.services.query_runner import _Sinas
 
-RESOLVER_AGENT = "grove/entity-resolution-agent"
+RESOLVER_AGENT = "sgr/entity-resolution-agent"
 _CONTEXT_CHARS = 240
 _MAX_CANDIDATES = 8
 

@@ -3,9 +3,9 @@
 Each evidence verdict — does this span support this claim with this stance? —
 is an independent judgment over ~1k tokens. Running it inside a conversational
 validator agent made every verdict carry the whole answer transcript
-(measured: $1.50–3 and minutes of sequential rounds per answer). Here Grove
+(measured: $1.50–3 and minutes of sequential rounds per answer). Here SGR
 assembles each (claim, span) pair server-side and fans them out as parallel
-single-shot invocations of the tool-less `grove/evidence-check-agent`, then
+single-shot invocations of the tool-less `sgr/evidence-check-agent`, then
 writes the verdicts directly. No transcript, no enumeration round-trips, no
 paging; usage still lands in Sinas's llm_usage ledger.
 
@@ -34,7 +34,7 @@ _SPAN_MARGIN = 5
 _MAX_SPAN_CHARS = 4000
 _MAX_CONCURRENCY = 8
 
-_VALIDATOR_AGENT = "grove/evidence-check-agent"
+_VALIDATOR_AGENT = "sgr/evidence-check-agent"
 
 _PROMPT = """CLAIM: {claim}
 

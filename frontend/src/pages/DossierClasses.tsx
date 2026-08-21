@@ -97,7 +97,7 @@ export default function DossierClassesPage({ embedded = false }: { embedded?: bo
           ))}
           {list.data && list.data.length === 0 && (
             <div className="text-stone-500 text-sm py-8 text-center border border-dashed border-stone-300 rounded">
-              No dossier classes — Grove operates as a flat document repository.
+              No dossier classes — SGR operates as a flat document repository.
             </div>
           )}
         </div>

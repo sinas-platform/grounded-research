@@ -33,9 +33,9 @@ from app.db import AsyncSessionLocal
 from app.models import Relationship, RelationshipDefinition, UnresolvedRelationship
 from app.services.entity_keys import KeyIndex, key_norm, learn_aliases
 
-_log = logging.getLogger("grove.citation_adjudicate")
+_log = logging.getLogger("sgr.citation_adjudicate")
 
-_AGENT = "grove/entity-resolution-agent"
+_AGENT = "sgr/entity-resolution-agent"
 _BATCH = 15
 _DEFAULT_DEFS = ["cites", "book_cites_decision", "article_review_cites_decision",
                  "appealed_in", "cites_legal_instrument"]

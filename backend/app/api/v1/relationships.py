@@ -128,7 +128,7 @@ class ProposalDecision(BaseModel):
 
 @router.post(
     "/proposals/{proposal_id}/decision",
-    dependencies=[Depends(require_permission("grove.admin:all"))],
+    dependencies=[Depends(require_permission("sgr.admin:all"))],
 )
 async def decide_proposal(
     proposal_id: uuid.UUID,

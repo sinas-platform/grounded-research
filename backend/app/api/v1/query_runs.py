@@ -70,7 +70,7 @@ class QueryRunOut(OwnedOut):
     "",
     response_model=QueryRunOut,
     status_code=status.HTTP_201_CREATED,
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def create_query_run(
     payload: QueryRunIn,
@@ -104,7 +104,7 @@ async def list_query_runs(
     caller: CallerIdentity = Depends(get_caller),
     limit: int = 20,
 ):
-    read_all = await caller.has_permission("grove.results.read:all")
+    read_all = await caller.has_permission("sgr.results.read:all")
     rows = (
         await session.execute(
             select(QueryRun)
@@ -119,7 +119,7 @@ async def list_query_runs(
 async def _visible_run_or_404(
     run_id: uuid.UUID, session: AsyncSession, caller: CallerIdentity
 ) -> QueryRun:
-    read_all = await caller.has_permission("grove.results.read:all")
+    read_all = await caller.has_permission("sgr.results.read:all")
     row = (
         await session.execute(
             select(QueryRun)
@@ -144,7 +144,7 @@ async def get_query_run(
 @router.post(
     "/{run_id}/resume",
     response_model=QueryRunOut,
-    dependencies=[Depends(require_permission("grove.results.write:own"))],
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
 )
 async def resume_query_run(
     run_id: uuid.UUID,
@@ -181,7 +181,7 @@ class QueryRunActivityOut(BaseModel):
     synthesis: SearchActivityOut | None = None
 
 
-_TOOL_PREFIXES = ("connector__grove__api__", "call_agent_grove__", "call_agent_")
+_TOOL_PREFIXES = ("connector__sgr__api__", "call_agent_sgr__", "call_agent_")
 
 
 def _short_name(raw: str) -> str:

@@ -1,7 +1,7 @@
 /// <reference types="vite/client" />
 
 interface ImportMetaEnv {
-  readonly VITE_GROVE_API?: string;
+  readonly VITE_SGR_API?: string;
 }
 
 interface ImportMeta {

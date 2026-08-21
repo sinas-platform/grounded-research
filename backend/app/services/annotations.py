@@ -1,7 +1,7 @@
 """Annotations: config-declared derived fields computed from the relationship graph.
 
 An annotation definition is name + property path + reducer + materialize flag,
-declared in the GrovePackage. The path walks relationship instances by
+declared in the SgrPackage. The path walks relationship instances by
 definition name; the reducer folds the walk into a value. Everything domain-
 specific lives in the package config — this module is pure mechanism.
 
@@ -335,7 +335,7 @@ async def compute_annotations(
     missing = sorted(all_names - set(def_ids))
     if missing:
         raise AnnotationConfigError(
-            "relationship definition(s) not present in this Grove: " + ", ".join(missing)
+            "relationship definition(s) not present in this SGR: " + ", ".join(missing)
         )
     expand = make_expander(session, def_ids)
 

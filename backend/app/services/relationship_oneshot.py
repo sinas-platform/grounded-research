@@ -50,7 +50,7 @@ from app.services.query_runner import _Sinas
 
 log = logging.getLogger(__name__)
 
-RELATIONSHIP_AGENT = "grove/relationship-oneshot-agent"
+RELATIONSHIP_AGENT = "sgr/relationship-oneshot-agent"
 PROPOSAL_THRESHOLD = 0.8  # below this an open-mode edge becomes a proposal
 _MAX_MENTION_NAMES = 150
 _SOURCE_DOCUMENT = "DOCUMENT"

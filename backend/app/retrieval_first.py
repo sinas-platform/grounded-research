@@ -29,16 +29,16 @@ from sqlalchemy import text
 
 from app.config import get_settings
 
-PLAN_AGENT = "grove/retrieval-planner-agent"  # tool-less planning lane
+PLAN_AGENT = "sgr/retrieval-planner-agent"  # tool-less planning lane
 
 EFFORT_DEPTH = {"low": 1, "medium": 2, "high": 3}
 EFFORT_BRIEFING = {"low": 8, "medium": 15, "high": 25}
 STORE_TOP = 100  # full ranked list stored for later reranking
 
-# Domain framing comes from deployment config: Grove itself knows nothing
+# Domain framing comes from deployment config: SGR itself knows nothing
 # about what kind of corpus it is pointed at.
 def _domain_prefix() -> str:
-    d = get_settings().grove_domain.strip()
+    d = get_settings().sgr_domain.strip()
     return f"{d} " if d else ""
 
 
@@ -379,7 +379,7 @@ async def build_briefing(ranked: list[dict], effort: str) -> list[dict]:
 
 async def store_result(question: str, ranked: list[dict],
                        briefing: list[dict], plan: dict | None = None) -> str:
-    """Persist as a Grove result with per-doc rank + reason; briefing kept on
+    """Persist as a SGR result with per-doc rank + reason; briefing kept on
     the result's filter payload so synthesis/UI can read it."""
     from app.db import AsyncSessionLocal
 
@@ -418,7 +418,7 @@ async def store_result(question: str, ranked: list[dict],
 # Optional regression benchmark directory (gold_standard yaml + document
 # map). Domain-specific content lives OUTSIDE the repo; point this at your
 # deployment's benchmark folder to enable --regress.
-BENCH = Path(get_settings().grove_bench_dir or Path.home() / "grove-benchmark")
+BENCH = Path(get_settings().sgr_bench_dir or Path.home() / "sgr-benchmark")
 
 
 def _load_gold():

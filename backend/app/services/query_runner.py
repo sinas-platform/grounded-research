@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any
@@ -880,16 +881,14 @@ async def _draft_from_extracts(
         "court, an Advocate General, a case number or a date that no passage "
         "shows. Skip a passage group that establishes nothing usable. The "
         "final claim states the overall conclusion.\n\n"
-        "For each claim also give a RATIONALE: one or two sentences saying "
-        "which part of the question the claim answers and why the source you "
-        "cite is the one that settles it. Where two passage groups spoke to "
-        "the same point, say which you relied on and why the other did not "
-        "carry it. The rationale is your reasoning, not a restatement of the "
-        "claim, and it is not evidence — nothing in it may assert anything "
-        "the passages do not show. Name a source the way the claim names it "
-        "— the deciding body and its case or document reference — never by "
-        "the filename it is stored under: a reader of the answer has the "
-        "sources, not our file names.\n\n"
+        "For each claim also give a RATIONALE: ONE short sentence, at most "
+        "20 words — which part of the question this answers and why this "
+        "source settles it. Never restate the claim; the reader has just "
+        "read it. Where two passage groups spoke to the same point, name "
+        "the one you relied on. It is reasoning, not evidence — nothing in "
+        "it may assert anything the passages do not show. Name a source the "
+        "way the claim names it — deciding body and case reference — never "
+        "by its filename.\n\n"
         'Reply ONLY JSON: {"claims": [{"text": "<claim>", "type": '
         '"legal_principle|factual|procedural|conclusion", '
         '"rationale": "<why this claim rests on this source>", "evidence": '
@@ -1155,7 +1154,10 @@ async def _gate_answer(
         'true|false, "gap": "<what is missing, if not covered>"}],'
         ' "missing": "<if not publishable: what the claims fail to deliver on>",'
         ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
-        ' "tension": "<claims that contradict each other with no claim reconciling them, or null>",'
+        ' "tension": "<ONLY a pair of claims that CANNOT BOTH BE TRUE — quote the '
+'two incompatible propositions verbatim. Claims that restate the same rule, '
+'overlap, emphasise different aspects, or address different procedural '
+'stages are NOT in tension; when in doubt, null. Or null.>",'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
         ' "unused_sources": ["<filename>: <why it is plainly more direct or authoritative for a point made than the source cited for it>", ...]}',
@@ -1405,9 +1407,16 @@ async def _revise_answer(
     corpus_rows = (await _manifest_rows(parent_id))[:60]
     corpus = [r["filename"] for r in corpus_rows if r.get("filename")]
 
-    # current claims, each with the passages already bound to it. A claim the
+    # Current claims — but full passages only for the ones the feedback
+    # names. The reviser is instructed to change only what the feedback
+    # identifies, so untouched claims are context, not work: sending their
+    # passages tripled the prompt and invited re-emitting them, and the
+    # reviser call is where 70% of a run's wall-clock goes. A claim the
     # patch does not name keeps its row, its spans and its verdicts — it is
     # never rebuilt, so it is never re-judged.
+    named = {int(m) for f in feedback for m in re.findall(r"[Cc]laims? (\d+)", f)}
+    named |= {int(m) for f in feedback
+              for m in re.findall(r"(?:^|[ ,])(\d+)(?=[ ,.:]|$)", f)}
     by_claim: dict[int, dict] = {}
     for claim, ev, fn, content in rows:
         entry = by_claim.setdefault(claim.sequence, {"text": claim.claim_text,
@@ -1419,7 +1428,10 @@ async def _revise_answer(
         entry["passages"].append(f"[{fn} lines {lf}-{lt}]\n{body}")
 
     current = "\n\n".join(
-        f"CLAIM {seq}: {c['text']}\n" + ("\n".join(c["passages"]) or "(no passage)")
+        f"CLAIM {seq}: {c['text']}\n"
+        + (("\n".join(c["passages"]) or "(no passage)")
+           if (seq in named or not named) else "(passages withheld — this "
+           "claim is context; do not revise it)")
         for seq, c in sorted(by_claim.items()))
 
     # passages for anything the gate said was missing
@@ -1459,12 +1471,12 @@ async def _revise_answer(
         "changes neither the claim nor its evidence. Use it only when you "
         "have read the passages from the named source and they do not carry "
         "the point better — not to avoid the work.\n\n"
-        "Give a RATIONALE with every claim you revise or add, and with every "
-        "claim you keep: which part of the question it answers and why the "
-        "source you cite settles it. It is your reasoning, not evidence — "
-        "nothing in it may assert anything the passages do not show. Name a "
-        "source the way the claim names it — the deciding body and its case "
-        "or document reference — never by the filename it is stored under.\n\n"
+        "Give a RATIONALE with every claim you revise, add or keep: ONE "
+        "short sentence, at most 20 words — which part of the question it "
+        "answers and why this source settles it. Never restate the claim. "
+        "It is reasoning, not evidence — nothing in it may assert anything "
+        "the passages do not show. Name a source the way the claim names it "
+        "— deciding body and case reference — never by its filename.\n\n"
         + ("This is the final revision. If the passages available genuinely "
            "cannot settle a point the question asks about, do not stretch a "
            "source to cover it and do not leave the point unmentioned: add a "

@@ -26,7 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity
 from app.config import get_settings
-from app.models import AnswerClaim, ClaimEvidence, DocumentVersion
+from app.models import AnswerClaim, ClaimEvidence, Document, DocumentVersion
 
 # Lines of context around the cited span; enough to judge support without
 # re-litigating the document.
@@ -57,6 +57,17 @@ causal reason, and any generalisation across jurisdictions or authorities —
 and check it against the union of the passing spans. A case caption or party
 list establishes only that the case exists and which court decided it; it
 carries no holding.
+
+Attribution is itself a proposition. If the claim says WHERE its content
+comes from — "in case X", "the court held", "according to author Y" — that
+provenance must be carried by the passages or by the document's own
+identification below. A passage may discuss X while belonging to a
+different case entirely; if the document identifies itself as something
+other than what the claim attributes, COVERAGE is PARTIAL and the mismatch
+is what you name.
+
+DOCUMENT IDENTIFICATION (the opening of each cited document, verbatim):
+{doc_heads}
 
 COVERAGE is FULL only if every proposition is carried. Otherwise PARTIAL,
 and name what is missing.
@@ -101,13 +112,18 @@ async def _judge_claim(
     claim_id: uuid.UUID | None = None,
     sequence: int | None = None,
     run_id: uuid.UUID | None = None,
+    doc_heads: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """One judging call for a claim and ALL its spans; per-span verdicts."""
     spans_block = "\n\n".join(
         _SPAN_TMPL.format(i=i + 1, stance=ev.stance, line_from=lf, line_to=lt, span_text=txt)
         for i, (ev, txt, lf, lt) in enumerate(rows)
     )
-    prompt = _PROMPT.format(claim=claim_text, n=len(rows), spans_block=spans_block)
+    heads = "\n".join(
+        f"[{fn}]\n{head}" for fn, head in sorted((doc_heads or {}).items())
+    ) or "(unavailable)"
+    prompt = _PROMPT.format(claim=claim_text, n=len(rows),
+                            spans_block=spans_block, doc_heads=heads)
     async with sem:
         try:
             resp = await client.post(
@@ -184,6 +200,11 @@ async def validate_answer_evidence(
     if not rows:
         return {"judged": 0, "passed": 0, "failed": [], "errors": []}
 
+    filenames = dict((await session.execute(
+        select(Document.id, Document.filename)
+        .where(Document.id.in_({r[0].document_id for r in rows}))
+    )).all())
+
     # Resolve span text per row (documents may repeat across rows — cache).
     version_cache: dict[uuid.UUID, str | None] = {}
 
@@ -219,13 +240,23 @@ async def validate_answer_evidence(
         entry = by_claim.setdefault(
             claim.id,
             {"claim_id": claim.id, "claim_text": claim.claim_text,
-             "sequence": claim.sequence, "rows": []},
+             "sequence": claim.sequence, "rows": [], "doc_heads": {}},
         )
         entry["rows"].append((ev, span_text, lf, lt))
+        # The document's own opening lines, so the judge can check that a
+        # claim's stated provenance matches what the document IS. Raw source
+        # text, not interpretation: one answer attributed a holding to
+        # Delivery Hero/Glovo citing the Naspers/Just Eat Takeaway decision,
+        # and per-span entailment could not see it — the passage really does
+        # discuss those facts, in a different case's decision.
+        fn = filenames.get(ev.document_id) or str(ev.document_id)
+        if fn not in entry["doc_heads"]:
+            entry["doc_heads"][fn] = "\n".join(
+                l for l in content.splitlines()[:15] if l.strip())[:800]
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
             _judge_claim(client, sem, settings, e["claim_text"], e["rows"],
-                         e["claim_id"], e["sequence"], run_id)
+                         e["claim_id"], e["sequence"], run_id, e["doc_heads"])
             for e in by_claim.values()
         ]) if by_claim else []
     verdicts = [v for group in grouped for v in group]

@@ -359,6 +359,20 @@ async def _mark_run_terminal_if_done(run_id: uuid.UUID) -> None:
             run.status = "completed"
             run.completed_at = datetime.now(timezone.utc)
             await session.commit()
+            # Replay the unresolved-relationship queue now that this run has
+            # taught the resolver new names and aliases. Cites parked early
+            # in the run — "M.11936" seen before any document named the case
+            # — resolve against what the rest of the run created, and the
+            # touched entities get their annotations rematerialized, so the
+            # planning manifest is right when the first question arrives
+            # rather than after a manual repair. LLM-free and idempotent.
+            try:
+                from app.services.key_replay import run as replay_run
+
+                report = await replay_run(write=True)
+                log.info("post-run key replay: %s", report)
+            except Exception:  # noqa: BLE001
+                log.exception("post-run key replay failed (run %s)", run_id)
 
 
 async def progress_snapshot(run: IngestionRun) -> dict[str, Any]:

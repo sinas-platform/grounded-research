@@ -255,6 +255,7 @@ async def _apply_edges(
     entity_types: dict[uuid.UUID, uuid.UUID],
     doc_class_id: uuid.UUID | None,
     write: bool,
+    key_index=None,
 ) -> dict[str, int]:
     """Deterministic write path — mirrors the routing of the ingestion API:
     open+confident → Relationship, review or low confidence → proposal,
@@ -264,6 +265,8 @@ async def _apply_edges(
         "relationships": 0,
         "proposals": 0,
         "unresolved": 0,
+        "resolved_by_key": 0,
+        "aliases_learned": 0,
         "skipped_unknown_definition": 0,
         "skipped_unmapped": 0,
         "skipped_type_mismatch": 0,
@@ -365,6 +368,41 @@ async def _apply_edges(
             ] += 1
             continue
 
+        if target_id is not None:
+            # The extractor supplied both a resolvable name and a reference.
+            # That pairing is proof: the reference names this entity. Learned
+            # here, the same reference resolves directly next time — this is
+            # what keeps the unresolved queue from refilling on the next
+            # 70k-document ingestion.
+            reference = str(e.get("target_reference") or "").strip()
+            if reference and write:
+                from app.services.entity_keys import learn_aliases
+
+                report["aliases_learned"] += await learn_aliases(
+                    session, target_id, [reference])
+                if key_index is not None:
+                    key_index.learn(target_id, reference)
+
+        if target_id is None:
+            raw_target = str(e.get("target") or "").strip()
+            reference = str(e.get("target_reference") or "").strip() or raw_target
+            # A name the gazetteer does not know may still be a key an
+            # earlier resolution taught us.
+            if key_index is not None and reference:
+                d_target_type = (d["target_ref_id"]
+                                 if d["target_ref_type"] == "entity_type" else None)
+                hit = key_index.resolve(reference, d_target_type)
+                if hit is None and raw_target and raw_target != reference:
+                    hit = key_index.resolve(raw_target, d_target_type)
+                if hit is not None:
+                    target_id = hit
+                    report["resolved_by_key"] += 1
+                    if write:
+                        from app.services.entity_keys import learn_aliases
+
+                        report["aliases_learned"] += await learn_aliases(
+                            session, hit, [reference, raw_target])
+
         if target_id is None:
             raw_target = str(e.get("target") or "").strip()
             reference = str(e.get("target_reference") or "").strip() or raw_target
@@ -445,11 +483,12 @@ async def extract_document(
     *,
     definitions: list[dict[str, Any]] | None = None,
     write: bool = True,
+    key_index=None,
 ) -> dict[str, Any]:
     async with _PREP_GATE:
         return await _extract_document_gated(
             session, sinas, document_id,
-            definitions=definitions, write=write,
+            definitions=definitions, write=write, key_index=key_index,
         )
 
 
@@ -460,6 +499,7 @@ async def _extract_document_gated(
     *,
     definitions: list[dict[str, Any]] | None = None,
     write: bool = True,
+    key_index=None,
 ) -> dict[str, Any]:
     doc = await session.get(Document, document_id)
     report: dict[str, Any] = {
@@ -598,6 +638,7 @@ async def _extract_document_gated(
         entity_types=entity_types,
         doc_class_id=doc.document_class_id,
         write=write,
+        key_index=key_index,
     )
     report.update(counts)
     if write:
@@ -613,6 +654,11 @@ async def extract_relationships(
     sinas = _Sinas()
     async with AsyncSessionLocal() as session:
         definitions = await load_definitions(session)
+        # One key index for the whole batch: keys learned from an early
+        # document resolve references in the later ones, within this run.
+        from app.services.entity_keys import KeyIndex
+
+        key_index = await KeyIndex.load(session)
         if document_ids is None:
             document_ids = list(
                 (
@@ -630,7 +676,8 @@ async def extract_relationships(
             try:
                 reports.append(
                     await extract_document(
-                        session, sinas, did, definitions=definitions, write=write
+                        session, sinas, did, definitions=definitions,
+                        write=write, key_index=key_index,
                     )
                 )
             except Exception as exc:  # noqa: BLE001 — per-doc isolation

@@ -81,23 +81,40 @@ def _similar(a: str, b: str) -> float:
     return len(ta & tb) / len(ta | tb) if ta and tb else 0.0
 
 
-async def _fetch(session, question: str) -> dict[str, Any] | None:
-    """The most recent settled run for this question, with everything the
-    workbook shows. Matching is on wording overlap: the manifest phrases a
-    question in the reviewers' words and the run stores the wording that was
-    actually asked, and the two are rarely identical."""
-    runs = (await session.execute(text("""
-        SELECT id, question, status, answer_id, parent_result_id, created_at
-        FROM query_run
-        WHERE status IN ('published', 'partial')
-        ORDER BY created_at DESC"""))).mappings().all()
-    best, score = None, 0.0
-    for r in runs:
-        s = _similar(question, r["question"])
-        if s > score:
-            best, score = r, s
-    if not best or score < 0.45:
-        return None
+async def _fetch(session, question: str,
+                 run_id: str | None = None) -> dict[str, Any] | None:
+    """Everything the workbook shows for one question's run.
+
+    A manifest entry may name its run outright, and should: two questions in
+    a set can be near-identical on purpose — the same issue asked of two
+    jurisdictions, or the same jurisdiction asked two ways — and wording
+    overlap cannot tell those apart. It also cannot tell this run from a
+    duplicate of it launched an hour earlier. Falling back to overlap is for
+    a manifest written before the runs existed.
+    """
+    if run_id:
+        row = (await session.execute(text("""
+            SELECT id, question, status, answer_id, parent_result_id,
+                   created_at, telemetry
+            FROM query_run WHERE id = CAST(:i AS uuid)"""),
+            {"i": str(run_id)})).mappings().first()
+        if row is None:
+            return None
+        best, score = row, 1.0
+    else:
+        runs = (await session.execute(text("""
+            SELECT id, question, status, answer_id, parent_result_id,
+                   created_at, telemetry
+            FROM query_run
+            WHERE status IN ('published', 'partial')
+            ORDER BY created_at DESC"""))).mappings().all()
+        best, score = None, 0.0
+        for r in runs:
+            sc = _similar(question, r["question"])
+            if sc > score:
+                best, score = r, sc
+        if not best or score < 0.45:
+            return None
 
     claims = (await session.execute(text("""
         SELECT c.id, c.sequence, c.claim_text, c.claim_type, c.rationale
@@ -202,6 +219,26 @@ def _write_question(wb: Workbook, entry: dict, data: dict | None) -> dict:
                run["created_at"].strftime("%Y-%m-%d %H:%M") if run["created_at"] else "",
                "Outcome", run["status"]])
     ws.cell(ws.max_row, 1).font = BOLD
+
+    # A partial run does not ship an answer — it ships a note saying which
+    # part of the question the sources could not settle. That note IS the
+    # deliverable, so a reviewer judging a partial has to see it; showing
+    # only the surviving claims makes a deliberate abstention look like a
+    # thin answer.
+    partial = (run["telemetry"] or {}).get("partial") or {}
+    if run["status"] == "partial" and partial:
+        ws.append([])
+        section("Why this answer is partial")
+        ws.append(["Cause", partial.get("cause", "")])
+        ws.cell(ws.max_row, 1).font = BOLD
+        ws.append(["What could not be settled", partial.get("explanation", "")])
+        ws.cell(ws.max_row, 1).font = BOLD
+        ws.cell(ws.max_row, 2).alignment = WRAP
+        ws.row_dimensions[ws.max_row].height = 60
+        ws.append(["Note sent with the answer", partial.get("message", "")])
+        ws.cell(ws.max_row, 1).font = BOLD
+        ws.cell(ws.max_row, 2).alignment = WRAP
+        ws.row_dimensions[ws.max_row].height = 190
 
     # Reference numbers, so a citation can be found in the ranked list
     # below without searching for a filename. The number IS the rank.
@@ -398,7 +435,7 @@ async def build(manifest: Path, out: Path, title: str) -> None:
     meta = []
     async with AsyncSessionLocal() as session:
         for e in entries:
-            data = await _fetch(session, e["question"])
+            data = await _fetch(session, e["question"], e.get("run_id"))
             meta.append(_write_question(wb, e, data))
             print(f"  {meta[-1]['tab']:5} {meta[-1]['status']:10} "
                   f"{meta[-1]['claims']:>3} claims", flush=True)

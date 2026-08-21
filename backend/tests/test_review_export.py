@@ -38,7 +38,7 @@ def _data(n_claims: int = 3, n_docs: int = 5) -> dict:
         "run": {"id": uuid.uuid4(), "question": ENTRY["question"],
                 "status": "published", "answer_id": uuid.uuid4(),
                 "parent_result_id": uuid.uuid4(),
-                "created_at": datetime(2026, 8, 20, 15, 34)},
+                "created_at": datetime(2026, 8, 20, 15, 34), "telemetry": {}},
         "claims": [{"id": ids[i], "sequence": i + 1,
                     "claim_text": f"Claim number {i + 1} says a thing.",
                     "claim_type": "legal_principle",
@@ -192,3 +192,36 @@ def test_a_filename_in_the_reasoning_gets_its_reference_number():
                if ws.cell(r, 1).value == "Claim ID")
     assert ws.cell(hdr + 1, 3).value == (
         "[3] doc2.md restates the conclusion; [1] doc0.md carries the reasoning.")
+
+
+def test_a_partial_run_shows_the_note_that_ships_with_it():
+    """A partial does not ship an answer, it ships a note saying which part
+    of the question the sources could not settle. That note is the
+    deliverable — a reviewer shown only the surviving claims would read a
+    deliberate abstention as a thin answer."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    data = _data(n_claims=2)
+    data["run"]["status"] = "partial"
+    data["run"]["telemetry"] = {"partial": {
+        "cause": "coverage",
+        "explanation": "no passage dates the earliest national case",
+        "message": "**Unable to establish:** the sources do not date the "
+                   "earliest national review.",
+    }}
+    _write_question(wb, ENTRY, data)
+    ws = wb["Q03"]
+    rows = {ws.cell(r, 1).value: ws.cell(r, 2).value
+            for r in range(1, ws.max_row + 1)}
+    assert rows["Cause"] == "coverage"
+    assert rows["What could not be settled"].startswith("no passage dates")
+    assert "Unable to establish" in rows["Note sent with the answer"]
+
+
+def test_a_published_run_has_no_partial_block():
+    wb = Workbook()
+    wb.remove(wb.active)
+    _write_question(wb, ENTRY, _data())
+    ws = wb["Q03"]
+    heads = [ws.cell(r, 1).value for r in range(1, ws.max_row + 1)]
+    assert "Why this answer is partial" not in heads

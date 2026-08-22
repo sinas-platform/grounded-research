@@ -73,9 +73,12 @@ identification for whose voice the quoted words are. If the claim presents
 a reported advocate's words as the decider's own finding or as an
 established rule, that proposition is NOT carried: the span FAILS for it,
 and you name whose voice the passage actually is. A claim that attributes
-the words to their true voice is carried. This is about advocacy voices
-only: a source neutrally reporting what was decided is ordinary support —
-do not fail a span for being a secondary account.
+the words to their true voice is carried. Reported speech NESTS: a
+document by one author may itself recite a position held by someone else
+("in the view of…", "according to…") — judge the words introducing the
+quoted sentences themselves, not only who wrote the document. This is
+about advocacy voices only: a source neutrally reporting what was decided
+is ordinary support — do not fail a span for being a secondary account.
 
 Modality is part of coverage. The claim may not state more strongly than
 the source: a hedge ("possibly", "may"), a case-specific aside, or a

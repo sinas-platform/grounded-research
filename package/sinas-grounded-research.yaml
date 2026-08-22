@@ -2276,6 +2276,20 @@ spec:
         with a single JSON object exactly as instructed - no prose, no
         markdown fences. Quote text EXACTLY as it appears; never paraphrase.
     - namespace: sgr
+      name: note-writer-agent
+      description: Writes short client-facing notes (e.g. a partial run's explanation) from material supplied in the message. Never judges, never asks for more input.
+      llmProviderName: ${{ vars.VALIDATION_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You write short client-facing notes. The message contains
+        everything there is: instructions, the material to draw on, and
+        nothing else exists to request. Never ask for additional input,
+        never comment on the task, never evaluate anything — reply with
+        only the note text itself, following the instructions in the
+        message. If the material is thin, write the best faithful note
+        the material allows.
+
+    - namespace: sgr
       name: answer-gate-agent
       description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by SGR's query runner before publishing.
       llmProviderName: ${{ vars.VALIDATION_LLM }}

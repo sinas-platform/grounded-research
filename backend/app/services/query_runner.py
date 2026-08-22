@@ -1912,10 +1912,15 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
     )
     message = ""
     try:
+        # A dedicated writer persona: the gate agent's system prompt expects
+        # a draft to judge, and invoked without one it refused — and the
+        # refusal text was persisted as the client-facing note.
         message = await sinas.invoke(
-            "sgr/answer-gate-agent",
+            "sgr/note-writer-agent",
             "Reply with ONLY the note text itself — no preamble, no commentary "
             "about the task, no restatement of these instructions. "
+            "Never reference claims or findings by number; internal numbering "
+            "may not match what the reader sees. "
             "Write a note (max 200 words) to "
             + get_settings().sgr_audience
             + ", in the SAME "

@@ -1267,6 +1267,27 @@ def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
     )
 
 
+async def _compact_claim_sequences(session, answer_id: uuid.UUID) -> None:
+    """Compact claim numbering to 1..N. Sequence gaps left by drops are
+    identity during revision, but a terminal answer whose claims jump 3 -> 5
+    sends reviewers hunting for a missing claim. Only call once no patch
+    cycle can run again. Does not commit."""
+    claims = (await session.execute(
+        select(AnswerClaim)
+        .where(AnswerClaim.answer_id == answer_id)
+        .order_by(AnswerClaim.sequence)
+    )).scalars().all()
+    if any(c.sequence != i for i, c in enumerate(claims, start=1)):
+        # Two phases under uq_answer_claim_sequence: park everything out
+        # of range first, then assign the compact numbering.
+        park = len(claims) + 1000
+        for i, c in enumerate(claims):
+            c.sequence = park + i
+        await session.flush()
+        for i, c in enumerate(claims, start=1):
+            c.sequence = i
+
+
 async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) -> None:
     from app.models import Answer
 
@@ -1274,24 +1295,7 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
         row = await session.get(Answer, answer_id)
         row.status = "published"
         row.published_at = _now()
-        # Compact claim numbering. Sequence gaps left by reviser drops are
-        # identity during revision, but a published answer whose claims jump
-        # 3 -> 5 sends reviewers hunting for a missing claim. Renumbering is
-        # safe here: no patch cycle runs after publication.
-        claims = (await session.execute(
-            select(AnswerClaim)
-            .where(AnswerClaim.answer_id == answer_id)
-            .order_by(AnswerClaim.sequence)
-        )).scalars().all()
-        if any(c.sequence != i for i, c in enumerate(claims, start=1)):
-            # Two phases under uq_answer_claim_sequence: park everything out
-            # of range first, then assign the compact numbering.
-            park = len(claims) + 1000
-            for i, c in enumerate(claims):
-                c.sequence = park + i
-            await session.flush()
-            for i, c in enumerate(claims, start=1):
-                c.sequence = i
+        await _compact_claim_sequences(session, answer_id)
         await session.commit()
     await _tele(run_id, "validate", published=_iso(), **tele)
 
@@ -1838,6 +1842,11 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         question, parent_id = run.question, run.parent_result_id
+        if run.answer_id:
+            # A partial is as terminal as a publish; reviewers read its
+            # claims by number too.
+            await _compact_claim_sequences(session, run.answer_id)
+            await session.commit()
         validated_claims: list[str] = []
         if run.answer_id:
             # Claims whose every evidence row passed verification are as

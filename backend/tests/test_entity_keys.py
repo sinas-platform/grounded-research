@@ -103,8 +103,14 @@ def test_validator_prompt_carries_document_identity():
 
     assert "{doc_heads}" in _PROMPT
     assert "Attribution is itself a proposition" in _PROMPT
+    # Voice and modality rules are generic in core; what they look like in a
+    # given corpus arrives via the deployment's `validation` playbook.
+    assert "{domain_guidance}" in _PROMPT
+    assert "Voice is part of attribution" in _PROMPT
+    assert "Modality is part of coverage" in _PROMPT
     rendered = _PROMPT.format(claim="c", n=1, spans_block="s",
-                              doc_heads="[m11936.md]\nCase M.11936")
+                              doc_heads="[m11936.md]\nCase M.11936",
+                              domain_guidance="")
     assert "Case M.11936" in rendered
 
 

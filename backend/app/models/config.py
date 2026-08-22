@@ -219,7 +219,7 @@ class DossierClassDocumentClass(Base):
 # ─────────────────────────────────────────────────────────────
 class Playbook(Base, TimestampMixin):
     """Markdown playbook the deep-search / synthesis agents fetch via the
-    SGR connector. `kind` is `retrieval` or `synthesis`."""
+    SGR connector. `kind` is `retrieval`, `synthesis`, or `validation`."""
 
     __tablename__ = "playbook"
     __table_args__ = (UniqueConstraint("kind", "name", name="uq_playbook_kind_name"),)

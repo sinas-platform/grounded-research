@@ -66,10 +66,27 @@ different case entirely; if the document identifies itself as something
 other than what the claim attributes, COVERAGE is PARTIAL and the mismatch
 is what you name.
 
+Voice is part of attribution. A passage may be the deciding or authoring
+voice of its document, or the document REPORTING the words of an advocate
+or interested party. Check the passage's framing and the document
+identification for whose voice the quoted words are. If the claim presents
+a reported advocate's words as the decider's own finding or as an
+established rule, that proposition is NOT carried: the span FAILS for it,
+and you name whose voice the passage actually is. A claim that attributes
+the words to their true voice is carried. This is about advocacy voices
+only: a source neutrally reporting what was decided is ordinary support —
+do not fail a span for being a secondary account.
+
+Modality is part of coverage. The claim may not state more strongly than
+the source: a hedge ("possibly", "may"), a case-specific aside, or a
+provisional finding must survive into the claim; "possibly X" is not "X",
+and a speculative aside is not a rule. Name any strengthening as missing
+coverage.
+
 DOCUMENT IDENTIFICATION (the opening of each cited document, verbatim):
 {doc_heads}
 
-COVERAGE is FULL only if every proposition is carried. Otherwise PARTIAL,
+{domain_guidance}COVERAGE is FULL only if every proposition is carried. Otherwise PARTIAL,
 and name what is missing.
 
 Reply with exactly one line PER SPAN, in order, then one COVERAGE line,
@@ -90,6 +107,27 @@ _STANCES = {
     "contradicts": ("is claimed to CONTRADICT the claim", "contradict"),
     "qualifies": ("is claimed to QUALIFY (limit) the claim", "qualify"),
 }
+
+
+async def _domain_guidance() -> str:
+    """Deployment-supplied validation guidance (playbook kind `validation`).
+
+    The core prompt states the generic rules — voice, modality, attribution.
+    What those look like in a given corpus (the reporting formulas, the
+    hedges, the document conventions) is domain knowledge and comes from the
+    deployment's config, never from this file. Empty when none is installed.
+    """
+    from app.db import AsyncSessionLocal
+    from app.models import Playbook
+
+    async with AsyncSessionLocal() as session:
+        content = (await session.execute(
+            select(Playbook.content).where(Playbook.kind == "validation")
+            .limit(1))).scalar_one_or_none()
+    if not content:
+        return ""
+    return ("CORPUS GUIDANCE (what the rules above look like in this "
+            "corpus):\n" + content.strip() + "\n\n")
 
 
 def _slice_span(content_md: str, span: dict[str, Any]) -> tuple[str, int, int]:
@@ -113,6 +151,7 @@ async def _judge_claim(
     sequence: int | None = None,
     run_id: uuid.UUID | None = None,
     doc_heads: dict[str, str] | None = None,
+    domain_guidance: str = "",
 ) -> list[dict[str, Any]]:
     """One judging call for a claim and ALL its spans; per-span verdicts."""
     spans_block = "\n\n".join(
@@ -123,7 +162,8 @@ async def _judge_claim(
         f"[{fn}]\n{head}" for fn, head in sorted((doc_heads or {}).items())
     ) or "(unavailable)"
     prompt = _PROMPT.format(claim=claim_text, n=len(rows),
-                            spans_block=spans_block, doc_heads=heads)
+                            spans_block=spans_block, doc_heads=heads,
+                            domain_guidance=domain_guidance)
     async with sem:
         try:
             resp = await client.post(
@@ -253,10 +293,12 @@ async def validate_answer_evidence(
         if fn not in entry["doc_heads"]:
             entry["doc_heads"][fn] = "\n".join(
                 l for l in content.splitlines()[:15] if l.strip())[:800]
+    guidance = await _domain_guidance() if by_claim else ""
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
             _judge_claim(client, sem, settings, e["claim_text"], e["rows"],
-                         e["claim_id"], e["sequence"], run_id, e["doc_heads"])
+                         e["claim_id"], e["sequence"], run_id, e["doc_heads"],
+                         domain_guidance=guidance)
             for e in by_claim.values()
         ]) if by_claim else []
     verdicts = [v for group in grouped for v in group]

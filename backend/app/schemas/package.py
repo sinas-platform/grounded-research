@@ -133,7 +133,7 @@ class PackageAnnotationEntry(_Strict):
     materialize: bool = False
 
 
-PlaybookKind = Literal["retrieval", "synthesis"]
+PlaybookKind = Literal["retrieval", "synthesis", "validation"]
 
 
 class PackagePlaybookScopeEntry(_Strict):

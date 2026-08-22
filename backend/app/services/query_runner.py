@@ -1259,7 +1259,11 @@ def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
         + "\nGround every new or revised claim ONLY in evidence you can bind "
         "(read documents with numbered:true and copy the visible line numbers "
         "into spans). Revise an existing claim by re-posting its sequence "
-        "number. Then reply REMEDIATION COMPLETE."
+        "number. When the problem is voice — the cited passage reports an "
+        "advocate's or interested party's words, and the claim presents them "
+        "as the decider's own finding — the fix is re-attribution, not "
+        "dropping: restate the claim in the true voice if it still advances "
+        "the answer. Then reply REMEDIATION COMPLETE."
     )
 
 
@@ -1270,6 +1274,24 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
         row = await session.get(Answer, answer_id)
         row.status = "published"
         row.published_at = _now()
+        # Compact claim numbering. Sequence gaps left by reviser drops are
+        # identity during revision, but a published answer whose claims jump
+        # 3 -> 5 sends reviewers hunting for a missing claim. Renumbering is
+        # safe here: no patch cycle runs after publication.
+        claims = (await session.execute(
+            select(AnswerClaim)
+            .where(AnswerClaim.answer_id == answer_id)
+            .order_by(AnswerClaim.sequence)
+        )).scalars().all()
+        if any(c.sequence != i for i, c in enumerate(claims, start=1)):
+            # Two phases under uq_answer_claim_sequence: park everything out
+            # of range first, then assign the compact numbering.
+            park = len(claims) + 1000
+            for i, c in enumerate(claims):
+                c.sequence = park + i
+            await session.flush()
+            for i, c in enumerate(claims, start=1):
+                c.sequence = i
         await session.commit()
     await _tele(run_id, "validate", published=_iso(), **tele)
 
@@ -1833,15 +1855,19 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
                     )
                 ).all()
             ]
-        cited: set[str] = set()
+        cited_in_order: list[str] = []
         if run.answer_id:
-            cited = set((await session.execute(
+            for (fn,) in (await session.execute(
                 select(Document.filename)
                 .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
                 .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
                 .where(AnswerClaim.answer_id == run.answer_id)
                 .where(ClaimEvidence.validated.is_(True))
-            )).scalars().all())
+                .order_by(AnswerClaim.sequence)
+            )).all():
+                if fn not in cited_in_order:
+                    cited_in_order.append(fn)
+        cited = set(cited_in_order)
         sources: list[tuple[str, str]] = []
         if parent_id:
             ranked = [
@@ -1856,12 +1882,18 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
                     )
                 ).all()
             ]
-            # documents the verified claims cite lead the list; best-ranked
-            # uncited fill the remainder — a partial's sources should start
-            # with what the findings actually rest on.
-            sources = [s for s in ranked if s[0] in cited]
+            # Every document the verified claims cite leads the list, in
+            # claim order — even when retrieval ranked it below the stored
+            # top-40 (intersecting with the ranked list dropped exactly the
+            # documents the findings rest on). Best-ranked uncited docs only
+            # fill whatever room is left.
+            reasons = dict(ranked)
+            sources = [
+                (fn, reasons.get(fn, "cited by the verified findings"))
+                for fn in cited_in_order
+            ]
             sources += [s for s in ranked if s[0] not in cited]
-            sources = sources[:10]
+            sources = sources[:max(10, len(cited_in_order))]
     src_lines = "\n".join(f"- {fn}: {r}" for fn, r in sources) or "(none stored)"
     claim_lines = "\n".join(f"- {c[:300]}" for c in validated_claims[:12])
     claims_part = (

@@ -157,7 +157,7 @@ class DossierClassPropertyOut(TimestampedOut, DossierClassPropertyIn):
 # ─────────────────────────────────────────────────────────────
 # Playbooks (content + scope, both SGR-side)
 # ─────────────────────────────────────────────────────────────
-PlaybookKindLit = Literal["retrieval", "synthesis"]
+PlaybookKindLit = Literal["retrieval", "synthesis", "validation"]
 
 
 class PlaybookIn(BaseModel):

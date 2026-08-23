@@ -517,6 +517,67 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) ->
     return want[:200] in have
 
 
+async def _content_anchors(
+    point: str, filenames: list[str], take: int = 4
+) -> list[tuple[str, list[int]]]:
+    """Documents whose FULL TEXT contains the point's distinctive terms,
+    with the matching line numbers.
+
+    The summary matcher (_relevant_docs) sees only manifest text; a gate
+    point like "the ten-day time limit for both routes" matched nothing
+    there while two retrieved documents quoted the statute verbatim — the
+    reviser was told the part was missing five times and never shown the
+    documents that carry it. Literal token scan, no tsvector config, no
+    stemming: numbers, case references and names survive across languages,
+    which is what makes a cross-language corpus searchable at all.
+    """
+    toks = re.findall(r"[\w()./§-]{2,}", point or "")
+    seen: set[str] = set()
+    special, plain = [], []
+    for t in toks:
+        low = t.lower().strip(".,;:()")
+        if not low or low in seen:
+            continue
+        seen.add(low)
+        if any(ch.isdigit() for ch in t):
+            special.append(low)
+        elif t[0].isupper() and len(low) > 3:
+            special.append(low)
+        elif len(low) > 5:
+            plain.append(low)
+    terms = (special + plain)[:10]
+    if not terms or not filenames:
+        return []
+    scored: list[tuple[float, str, list[int]]] = []
+    async with AsyncSessionLocal() as session:
+        for fn in filenames[:60]:
+            content = (await session.execute(
+                select(DocumentVersion.content_md)
+                .join(Document, Document.current_version_id == DocumentVersion.id)
+                .where(Document.filename == fn))).scalar()
+            if not content:
+                continue
+            low = content.lower()
+            hits = [t for t in terms if t in low]
+            # digit-bearing terms are the strongest cross-language signal
+            score = sum(3.0 if any(ch.isdigit() for ch in t) else 1.0
+                        for t in hits)
+            if score <= 0:
+                continue
+            lines = []
+            if hits:
+                best = max(hits, key=lambda t: (any(c.isdigit() for c in t), len(t)))
+                pos, ln = 0, []
+                for m in re.finditer(re.escape(best), low):
+                    ln.append(low.count("\n", 0, m.start()) + 1)
+                    if len(ln) >= 3:
+                        break
+                lines = ln
+            scored.append((score, fn, lines))
+    scored.sort(key=lambda s: -s[0])
+    return [(fn, lines) for _, fn, lines in scored[:take]]
+
+
 def _relevant_docs(point: str, corpus_rows: list[dict], take: int = 4) -> list[str]:
     """Documents whose own text most specifically matches this point.
 
@@ -1283,18 +1344,30 @@ async def _revise_answer(
         for seq, c in sorted(by_claim.items()))
 
     # passages for anything the gate said was missing
-    def _anchors_for(point: str) -> list[str]:
-        """Documents that could contain this point, best first, plus a couple
-        of top-ranked ones for context. Same matcher planning uses."""
-        picked = _relevant_docs(point, corpus_rows, take=6)
-        return picked + [fn for fn in corpus[:4] if fn not in picked]
+    async def _anchors_for(point: str) -> tuple[list[str], str]:
+        """Documents that could contain this point, best first: full-text
+        term hits (with line neighborhoods for the extractor) lead, then
+        the summary matcher planning uses, then a couple of top-ranked
+        for context."""
+        found = await _content_anchors(point, corpus, take=4)
+        picked = [fn for fn, _ in found]
+        picked += [fn for fn in _relevant_docs(point, corpus_rows, take=6)
+                   if fn not in picked]
+        picked += [fn for fn in corpus[:4] if fn not in picked]
+        near = "; ".join(
+            f"{fn} near line {lines[0]}" for fn, lines in found if lines)
+        return picked[:10], near
 
     fresh = ""
     if extra_points and corpus:
-        plan = [{"n": i, "establishes": pt[:600], "anchors": _anchors_for(pt),
-                 "hint": "extract the passage that states this; a case caption "
-                         "or party list is not a holding"}
-                for i, pt in enumerate(extra_points[:5], start=1)]
+        plan = []
+        for i, pt in enumerate(extra_points[:5], start=1):
+            anchors, near = await _anchors_for(pt)
+            plan.append({
+                "n": i, "establishes": pt[:600], "anchors": anchors,
+                "hint": ("extract the passage that states this; a case "
+                         "caption or party list is not a holding"
+                         + (f". Matching terms sit at: {near}" if near else ""))})
         for ex in await _extract_passages(sinas, plan, run_id):
             for pas in (ex.get("passages") or [])[:3]:
                 fresh += (f"\n[{pas['filename']} lines {pas['line_from']}-"

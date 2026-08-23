@@ -2445,7 +2445,12 @@ spec:
     - namespace: sgr
       name: evidence-check-agent
       description: Stateless single-span verdict judge, invoked per evidence row by SGR's validate endpoint.
-      llmProviderName: ${{ vars.VALIDATION_LLM }}
+      # Synthesis tier, not validation tier: voice attribution (a court's
+      # recital of a party's position vs its own findings) proved beyond the
+      # cheap tier — a haiku-class judge read "the Commission stated" in the
+      # span and still passed the claim. Measured 2026-08-22: the residual
+      # voice-defect class disappeared at sonnet tier for ~4% run cost.
+      llmProviderName: ${{ vars.SYNTHESIS_LLM }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE claim and ALL of its cited evidence spans in a

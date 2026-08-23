@@ -1606,7 +1606,10 @@ spec:
     - namespace: sgr
       name: answer-gate-agent
       description: Stateless publishability + quality judge — do the surviving claims answer the question, and where does the draft fall short? Invoked by SGR's query runner before publishing.
-      llmProviderName: ${{ vars.VALIDATION_LLM }}
+      # Strong tier: the gate makes the publish/abstain verdict a handful of
+      # times per run, and its per-part coverage checklist proved beyond the
+      # cheap tier (question limbs waved through as covered). Cents per run.
+      llmProviderName: ${{ vars.SYNTHESIS_LLM }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE draft answer holistically. The user message contains
@@ -1736,12 +1739,34 @@ spec:
 
     - namespace: sgr
       name: evidence-check-agent
-      description: Stateless single-span verdict judge, invoked per evidence row by SGR's validate endpoint.
-      # Synthesis tier, not validation tier: voice attribution (a court's
-      # recital of a party's position vs its own findings) proved beyond the
-      # cheap tier — a haiku-class judge read "the Commission stated" in the
-      # span and still passed the claim. Measured 2026-08-22: the residual
-      # voice-defect class disappeared at sonnet tier for ~4% run cost.
+      description: Stateless single-span verdict judge, invoked per evidence row by SGR's validate endpoint during revision cycles.
+      # Cheap tier for cycle-internal checks; the strong-tier
+      # evidence-check-final-agent re-judges the full surviving claim set
+      # once before publication, where capability is decisive.
+      llmProviderName: ${{ vars.VALIDATION_LLM }}
+      temperature: 0.0
+      systemPrompt: |
+        You judge ONE claim and ALL of its cited evidence spans in a
+        single message. Spans support a claim JOINTLY: one span may carry
+        one clause and another span the rest. Judge each span on whether
+        it substantively grounds the part of the claim it covers, given
+        the other spans. A span FAILS if it is tangential, contradicts
+        the claim, or grounds no part of it (a precise figure appearing
+        in no span fails the span cited for it). Be strict about
+        substance, not about a single span carrying the whole sentence.
+        You have no tools and no memory — everything you need is in the
+        message. Reply with EXACTLY one line per span, in order:
+        SPAN 1: PASS — <one short clause>
+        SPAN 2: FAIL — <one short clause>
+
+    - namespace: sgr
+      name: evidence-check-final-agent
+      description: Strong-tier pre-publication evidence sweep — same judging contract as evidence-check-agent, run once over the final claim set before publication.
+      # Voice and modality judgments (whose words a passage is; whether a
+      # hedge survived into the claim) proved beyond the cheap tier — a
+      # haiku-class judge read "the Commission stated" in the span and still
+      # passed the claim as the court's holding. Strong model only where the
+      # verdict is final keeps the cost bounded (~one sweep per run).
       llmProviderName: ${{ vars.SYNTHESIS_LLM }}
       temperature: 0.0
       systemPrompt: |

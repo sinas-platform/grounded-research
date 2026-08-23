@@ -1466,6 +1466,44 @@ async def _stage_validate_publish(
                 ok, missing, issues, correctness, points = await _gate_answer(
                     sinas, question, answer_id, run_id)
                 if ok and not correctness and (not issues or gate_cycles <= 0):
+                    # Pre-publication sweep on the strong validation tier:
+                    # the full surviving claim set, re-judged once where the
+                    # verdict is final. Cycle-internal validation stays on
+                    # the cheap tier; this is where capability is decisive
+                    # (voice, modality) and where a miss ships to a reader.
+                    async with AsyncSessionLocal() as s2:
+                        run_row = await s2.get(QueryRun, run_id)
+                        sweeps = int(((run_row.telemetry or {}).get("validate")
+                                      or {}).get("final_sweeps") or 0)
+                    async with AsyncSessionLocal() as s2:
+                        fv = await validate_answer_evidence(
+                            s2, caller, answer_id, pending_only=False,
+                            run_id=run_id, final=True)
+                    f_over = fv.get("overreaching") or []
+                    await _tele(run_id, "validate", final_sweeps=sweeps + 1,
+                                final_sweep_result={
+                                    "failed": len(fv["failed"]),
+                                    "overreaching": len(f_over)})
+                    if fv["failed"] or f_over:
+                        fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
+                              for f in fv["failed"]]
+                        fb += [f"Claim {o.get('claim_sequence')} asserts more "
+                               f"than its passages establish: {o.get('uncovered')}. "
+                               "Narrow it to what the passages say, or bind "
+                               "evidence that carries the rest."
+                               for o in f_over]
+                        if sweeps >= 1:
+                            # One repair attempt was already spent on sweep
+                            # findings; publishing anyway would ship the
+                            # exact defect class this sweep exists to stop.
+                            raise PartialOutcome(
+                                "faithfulness",
+                                "final evidence review still found claims "
+                                "asserting more than their sources carry — "
+                                + " ".join(fb)[:600])
+                        await _revise_answer(sinas, run_id, answer_id,
+                                             question, fb, last_attempt=True)
+                        return await _stage_validate_publish(run_id, sinas, 0)
                     # quality issues never block publication on their own —
                     # unremediated ones are recorded, not fatal
                     tele = {"quality_issues": issues} if issues else {}
@@ -1483,12 +1521,17 @@ async def _stage_validate_publish(
                             points or ([missing] if missing else []),
                             last_attempt=True)
                         return await _stage_validate_publish(run_id, sinas, 0)
+                    if not ok:
+                        raise PartialOutcome(
+                            "coverage",
+                            f"the validated claims no longer answer the question — {missing}")
+                    # Distinct cause: this is not a source-coverage gap, and
+                    # labeling it one made partial notes claim the sources
+                    # were silent on points the run's own evidence settled.
                     raise PartialOutcome(
-                        "coverage",
-                        (f"the validated claims no longer answer the question — {missing}")
-                        if not ok else
-                        ("the answer could not be made internally consistent — "
-                         + " ".join(correctness)[:600]))
+                        "consistency",
+                        "the answer could not be made internally consistent — "
+                        + " ".join(correctness)[:600])
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
                 await _record_fed(run_id, key)
                 await _revise_answer(

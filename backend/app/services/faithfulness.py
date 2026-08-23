@@ -26,7 +26,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity
 from app.config import get_settings
-from app.models import AnswerClaim, ClaimEvidence, Document, DocumentVersion
+from app.models import (AnswerClaim, ClaimEvidence, Document, DocumentClass,
+                        DocumentVersion)
+from app.services.toc import derive_toc
 
 # Lines of context around the cited span; enough to judge support without
 # re-litigating the document.
@@ -35,6 +37,10 @@ _MAX_SPAN_CHARS = 4000
 _MAX_CONCURRENCY = 8
 
 _VALIDATOR_AGENT = "sgr/evidence-check-agent"
+# The pre-publication sweep runs on the strong tier: voice and modality
+# judgments proved beyond the cheap model exactly where the verdict is
+# final. Cycle-internal checks stay on the cheap tier.
+_FINAL_VALIDATOR_AGENT = "sgr/evidence-check-final-agent"
 
 _PROMPT = """CLAIM: {claim}
 
@@ -44,6 +50,12 @@ span on whether it substantively supports the part of the claim it covers,
 given the other spans.
 
 {spans_block}
+
+A span may carry a `section:` label — the heading of the part of the
+document it sits in, computed from the document's own table of contents.
+Use it: the same sentence carries different weight inside a section that
+recites positions or background than inside the author's own findings or
+operative conclusions.
 
 A span FAILS if it is only tangentially related, contradicts the claim, or
 covers no part of it (e.g. the claim's precise figure appears in no span).
@@ -100,7 +112,7 @@ COVERAGE: FULL — <one short clause>
 or
 COVERAGE: PARTIAL — <the propositions no span establishes>"""
 
-_SPAN_TMPL = """SPAN {i} (stance: {stance}; lines {line_from}-{line_to}):
+_SPAN_TMPL = """SPAN {i} (stance: {stance}; lines {line_from}-{line_to}{section}):
 ---
 {span_text}
 ---"""
@@ -133,6 +145,28 @@ async def _domain_guidance() -> str:
             "corpus):\n" + content.strip() + "\n\n")
 
 
+def _span_section(toc: list[dict], line_from: int, line_to: int) -> str:
+    """The innermost TOC section containing the span, with its parent —
+    computed from the document's own headings. Position inside a document's
+    structure is data the judge cannot infer from a ±5-line window: the same
+    sentence means something different inside a section that reports
+    positions than inside the author's own conclusions."""
+    inner = None
+    for e in toc:
+        if e["line"] <= line_from and line_to <= e.get("line_to", 0):
+            if inner is None or e["level"] >= inner["level"]:
+                inner = e
+    if inner is None:
+        return ""
+    parent = None
+    for e in toc:
+        if (e["level"] < inner["level"] and e["line"] <= inner["line"]
+                and inner["line"] <= e.get("line_to", 0)):
+            parent = e
+    path = (f"{parent['title']} > " if parent else "") + inner["title"]
+    return path[:160]
+
+
 def _slice_span(content_md: str, span: dict[str, Any]) -> tuple[str, int, int]:
     lines = content_md.splitlines()
     total = len(lines)
@@ -155,11 +189,14 @@ async def _judge_claim(
     run_id: uuid.UUID | None = None,
     doc_heads: dict[str, str] | None = None,
     domain_guidance: str = "",
+    agent: str = _VALIDATOR_AGENT,
 ) -> list[dict[str, Any]]:
     """One judging call for a claim and ALL its spans; per-span verdicts."""
     spans_block = "\n\n".join(
-        _SPAN_TMPL.format(i=i + 1, stance=ev.stance, line_from=lf, line_to=lt, span_text=txt)
-        for i, (ev, txt, lf, lt) in enumerate(rows)
+        _SPAN_TMPL.format(
+            i=i + 1, stance=ev.stance, line_from=lf, line_to=lt, span_text=txt,
+            section=f"; section: {sec}" if sec else "")
+        for i, (ev, txt, lf, lt, sec) in enumerate(rows)
     )
     heads = "\n".join(
         f"[{fn}]\n{head}" for fn, head in sorted((doc_heads or {}).items())
@@ -170,7 +207,7 @@ async def _judge_claim(
     async with sem:
         try:
             resp = await client.post(
-                f"{settings.sinas_url}/agents/{_VALIDATOR_AGENT}/invoke",
+                f"{settings.sinas_url}/agents/{agent}/invoke",
                 headers={"Authorization": f"Bearer {settings.sinas_api_key}"},
                 json={"message": prompt},
                 timeout=120.0,
@@ -181,8 +218,7 @@ async def _judge_claim(
             if run_id is not None:
                 from app.services.query_runner import record_llm_call
 
-                await record_llm_call(run_id, payload.get("chat_id"),
-                                      _VALIDATOR_AGENT)
+                await record_llm_call(run_id, payload.get("chat_id"), agent)
         except Exception as exc:
             return [{"evidence_id": ev.id, "error": f"invoke failed: {exc}"} for ev, *_ in rows]
 
@@ -226,6 +262,7 @@ async def validate_answer_evidence(
     answer_id: uuid.UUID,
     pending_only: bool = True,
     run_id: uuid.UUID | None = None,
+    final: bool = False,
 ) -> dict[str, Any]:
     """Judge (pending) evidence rows of an answer as parallel stateless calls
     and record the verdicts. Returns a summary the synthesis agent can act on
@@ -243,10 +280,13 @@ async def validate_answer_evidence(
     if not rows:
         return {"judged": 0, "passed": 0, "failed": [], "errors": []}
 
-    filenames = dict((await session.execute(
-        select(Document.id, Document.filename)
+    doc_rows = (await session.execute(
+        select(Document.id, Document.filename, DocumentClass.name)
+        .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
         .where(Document.id.in_({r[0].document_id for r in rows}))
-    )).all())
+    )).all()
+    filenames = {i: fn for i, fn, _ in doc_rows}
+    doc_classes = {i: cls for i, _, cls in doc_rows}
 
     # Resolve span text per row (documents may repeat across rows — cache).
     version_cache: dict[uuid.UUID, str | None] = {}
@@ -274,18 +314,28 @@ async def validate_answer_evidence(
     sem = asyncio.Semaphore(_MAX_CONCURRENCY)
     errors: list[dict[str, Any]] = []
     by_claim: dict[uuid.UUID, dict[str, Any]] = {}
+    toc_cache: dict[int, list[dict]] = {}
     for ev, claim in rows:
         content = await _content_for(ev)
         if not content:
             errors.append({"evidence_id": ev.id, "error": "no extracted content"})
             continue
         span_text, lf, lt = _slice_span(content, ev.span or {})
+        # The span's position in the document's own structure, from the
+        # deterministic TOC — cached per content object, not per row.
+        ck = id(content)
+        if ck not in toc_cache:
+            toc_cache[ck] = derive_toc(content)
+        section = _span_section(
+            toc_cache[ck],
+            int((ev.span or {}).get("line_from") or lf),
+            int((ev.span or {}).get("line_to") or lt))
         entry = by_claim.setdefault(
             claim.id,
             {"claim_id": claim.id, "claim_text": claim.claim_text,
              "sequence": claim.sequence, "rows": [], "doc_heads": {}},
         )
-        entry["rows"].append((ev, span_text, lf, lt))
+        entry["rows"].append((ev, span_text, lf, lt, section))
         # The document's own opening lines, so the judge can check that a
         # claim's stated provenance matches what the document IS. Raw source
         # text, not interpretation: one answer attributed a holding to
@@ -294,14 +344,23 @@ async def validate_answer_evidence(
         # discuss those facts, in a different case's decision.
         fn = filenames.get(ev.document_id) or str(ev.document_id)
         if fn not in entry["doc_heads"]:
-            entry["doc_heads"][fn] = "\n".join(
+            # The document's ingestion-assigned class leads its head block:
+            # what kind of thing the document IS (a decision, an advisory
+            # opinion, commentary) is a judgment input, and the raw head
+            # lines below stay as the document's own testimony to check the
+            # class against.
+            cls = doc_classes.get(ev.document_id)
+            head = "\n".join(
                 l for l in content.splitlines()[:15] if l.strip())[:800]
+            entry["doc_heads"][fn] = (
+                (f"(classified at ingestion as: {cls})\n" if cls else "") + head)
     guidance = await _domain_guidance() if by_claim else ""
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
             _judge_claim(client, sem, settings, e["claim_text"], e["rows"],
                          e["claim_id"], e["sequence"], run_id, e["doc_heads"],
-                         domain_guidance=guidance)
+                         domain_guidance=guidance,
+                         agent=_FINAL_VALIDATOR_AGENT if final else _VALIDATOR_AGENT)
             for e in by_claim.values()
         ]) if by_claim else []
     verdicts = [v for group in grouped for v in group]

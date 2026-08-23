@@ -124,25 +124,52 @@ _STANCES = {
 }
 
 
-async def _domain_guidance() -> str:
-    """Deployment-supplied validation guidance (playbook kind `validation`).
+async def _domain_guidance(cited_classes: set[str] | None = None) -> str:
+    """Deployment-supplied validation guidance (playbooks of kind
+    `validation`), scope-filtered.
 
     The core prompt states the generic rules — voice, modality, attribution.
     What those look like in a given corpus (the reporting formulas, the
     hedges, the document conventions) is domain knowledge and comes from the
-    deployment's config, never from this file. Empty when none is installed.
+    deployment's config, never from this file. A playbook with no scope rows
+    applies to every validation; one scoped to document classes is included
+    only when the answer actually cites a document of that class — so
+    per-family conventions accumulate in their own entries instead of
+    bloating the generic guidance. Empty when none is installed.
     """
     from app.db import AsyncSessionLocal
-    from app.models import Playbook
+    from app.models import DocumentClass, Playbook, PlaybookScope
 
     async with AsyncSessionLocal() as session:
-        content = (await session.execute(
-            select(Playbook.content).where(Playbook.kind == "validation")
-            .limit(1))).scalar_one_or_none()
-    if not content:
+        rows = (await session.execute(
+            select(Playbook.id, Playbook.content)
+            .where(Playbook.kind == "validation")
+            .order_by(Playbook.name))).all()
+        if not rows:
+            return ""
+        scoped = (await session.execute(
+            select(PlaybookScope.playbook_id, DocumentClass.name)
+            .outerjoin(DocumentClass,
+                       DocumentClass.id == PlaybookScope.document_class_id)
+            .where(PlaybookScope.playbook_id.in_([r[0] for r in rows]))
+        )).all()
+    classes_by_pb: dict = {}
+    for pb_id, cls in scoped:
+        classes_by_pb.setdefault(pb_id, set()).add(cls)
+    parts = []
+    for pb_id, content in rows:
+        if not content:
+            continue
+        pb_classes = classes_by_pb.get(pb_id) or set()
+        # No scope rows, or only the everywhere-sentinel (None) → global.
+        applies = pb_classes <= {None} or bool(
+            pb_classes & (cited_classes or set()))
+        if applies:
+            parts.append(content.strip())
+    if not parts:
         return ""
     return ("CORPUS GUIDANCE (what the rules above look like in this "
-            "corpus):\n" + content.strip() + "\n\n")
+            "corpus):\n" + "\n\n".join(parts) + "\n\n")
 
 
 def _span_section(toc: list[dict], line_from: int, line_to: int) -> str:
@@ -354,7 +381,8 @@ async def validate_answer_evidence(
                 l for l in content.splitlines()[:15] if l.strip())[:800]
             entry["doc_heads"][fn] = (
                 (f"(classified at ingestion as: {cls})\n" if cls else "") + head)
-    guidance = await _domain_guidance() if by_claim else ""
+    guidance = await _domain_guidance(
+        {c for c in doc_classes.values() if c}) if by_claim else ""
     async with httpx.AsyncClient() as client:
         grouped = await asyncio.gather(*[
             _judge_claim(client, sem, settings, e["claim_text"], e["rows"],

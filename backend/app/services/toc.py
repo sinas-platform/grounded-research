@@ -67,6 +67,36 @@ _BOLD_HEADING = re.compile(r"^\*\*(?P<title>[^*].{2,%d}?)\*\*$" % _MAX_TITLE)
 # gate below carry the rest, in any language.)
 _SENTENCE_TAIL = re.compile(r"[,;:]$")
 
+# Court-judgment subsection markers: "(a) Arguments of the parties",
+# "(2) Findings of the Court", "(i) …". Lowercase/parenthesized, which
+# _NUMBERED deliberately excludes. Uppercase title start separates real
+# headings from enumerated prose ("(i) to the Product Universal … and");
+# a full-sentence tail (including a closing period — regulation recitals
+# are numbered "(1) This Regulation lays down ….") is rejected below.
+_PAREN_HEADING = re.compile(
+    r"^\s{0,3}\((?P<num>[a-z]|\d{1,2}|[ivxl]{1,4})\)"
+    r"\s+(?P<title>[A-Z][^\n]{2,58})\s*$"
+)
+
+# Standalone ALL-CAPS line — the section convention of French court
+# decisions ("EXPOSÉ DU LITIGE", "MOTIFS DE LA DÉCISION", "PAR CES
+# MOTIFS") and many older decisions. Unicode-aware via str.isupper().
+# Heuristic-pool and floodable: header blocks (party names, court
+# addresses) also come in caps, so this tier is shed first on overflow.
+_CAPS_LINE = re.compile(r"^\s{0,3}(?P<title>\S[^\n]{3,58}?)\s*:?\s*$")
+
+# The same headings fused to their first paragraph by sentence-based
+# normalization: "(2) Findings of the Court 150 According to settled
+# case-law, …" — the heading has no terminal punctuation, so a sentence
+# segmenter glues it to the numbered paragraph that follows. The title is
+# cut where a bare paragraph number followed by an uppercase word starts.
+# Kept deliberately narrow (short title, no sentence punctuation inside).
+_FUSED_HEADING = re.compile(
+    r"^\s{0,3}(?P<num>\((?:[a-z]|\d{1,2}|[ivxl]{1,4})\)|[A-Z]\.|\d{1,2}\.|[IVXLC]{1,6}\.)"
+    r"\s+(?P<title>[A-Z][^.;:!?\n]{2,58}?)"
+    r"\s+\d{1,4}\s+[A-Z]"
+)
+
 
 def _numbered_level(num: str) -> int:
     """'3.' → 1, '3.1.' → 2, '3.1.2.' → 3; roman/letter markers → 1."""
@@ -154,6 +184,46 @@ def derive_toc(content: str) -> list[dict]:
                     "src": "dotted",
                 }
             )
+            continue
+        m = _PAREN_HEADING.match(line)
+        if m:
+            title = m.group("title").strip()
+            if _SENTENCE_TAIL.search(title) or title.endswith("."):
+                continue
+            prev = lines[i - 2].strip() if i >= 2 else ""
+            prev_clean = re.sub(r"[\d\s]+$", "", prev)
+            if (
+                len(prev) > 40
+                and prev_clean
+                and not prev_clean.endswith((".", ":", "?", '"', "'", ")"))
+            ):
+                continue
+            numbered_entries.append(
+                {"level": 3, "title": f"({m.group('num')}) {title}",
+                 "line": i, "src": "paren"}
+            )
+            continue
+        m = _FUSED_HEADING.match(line)
+        if m:
+            num = m.group("num")
+            numbered_entries.append(
+                {"level": 3 if num.startswith("(") else _numbered_level(num),
+                 "title": f"{num} {m.group('title').strip()}",
+                 "line": i, "src": "fused"}
+            )
+            continue
+        m = _CAPS_LINE.match(line)
+        if m:
+            title = m.group("title").strip()
+            letters = [ch for ch in title if ch.isalpha()]
+            if (
+                len(letters) >= 4
+                and title.isupper()
+                and not any(ch.isdigit() for ch in title)
+            ):
+                numbered_entries.append(
+                    {"level": 1, "title": title, "line": i, "src": "capsline"}
+                )
 
     # Explicit structure wins outright: enough markdown headings means the
     # author (or a structure-preserving converter) already declared the
@@ -164,16 +234,18 @@ def derive_toc(content: str) -> list[dict]:
         entries = sorted(md_entries + numbered_entries, key=lambda e: e["line"])
 
     if len(entries) > _MAX_ENTRIES:
-        # The dotted-number heuristic flooded (a document that numbers
-        # every paragraph). Retry with only the high-confidence sources —
-        # markdown, all-caps-numbered and bold headings — before giving
-        # up: old Commission decisions have BOTH numbered paragraphs and
-        # caps section headings, and the ceiling must not discard the
-        # real structure along with the noise.
-        entries = sorted(
-            md_entries + [e for e in numbered_entries if e.get("src") != "dotted"],
-            key=lambda e: e["line"],
-        )
+        # Flooded. Shed heuristic tiers progressively — noisiest first —
+        # so adding a new heuristic can never cost a document the
+        # structure an older, more reliable one already found.
+        for drop in (("capsline",), ("capsline", "paren", "fused"),
+                     ("capsline", "paren", "fused", "dotted")):
+            entries = sorted(
+                md_entries
+                + [e for e in numbered_entries if e.get("src") not in drop],
+                key=lambda e: e["line"],
+            )
+            if len(entries) <= _MAX_ENTRIES:
+                break
         if len(entries) > _MAX_ENTRIES:
             return []
     for e in entries:

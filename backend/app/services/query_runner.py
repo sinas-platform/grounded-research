@@ -1431,13 +1431,39 @@ async def _revise_answer(
     fresh = ""
     if extra_points and corpus:
         plan = []
+        windows: list[tuple[str, int, int, str]] = []
         for i, pt in enumerate(extra_points[:5], start=1):
             anchors, near = await _anchors_for(pt)
+            # The term scan already KNOWS where the matching lines sit.
+            # Hand the reviser those windows directly — text copied from
+            # the stored document, so the quotes are correct by
+            # construction — instead of hoping a whole-document extraction
+            # pass lands on them. This is how a ten-day statutory limit,
+            # located by search, still went unextracted for a whole run.
+            found = await _content_anchors(pt, corpus, take=3)
+            async with AsyncSessionLocal() as session:
+                for fn, lines in found:
+                    if not lines:
+                        continue
+                    content = (await session.execute(
+                        select(DocumentVersion.content_md)
+                        .join(Document,
+                              Document.current_version_id == DocumentVersion.id)
+                        .where(Document.filename == fn))).scalar()
+                    if not content:
+                        continue
+                    doc_lines = content.split("\n")
+                    lf = max(1, lines[0] - 3)
+                    lt = min(len(doc_lines), lines[0] + 6)
+                    windows.append(
+                        (fn, lf, lt, "\n".join(doc_lines[lf - 1:lt])[:1500]))
             plan.append({
                 "n": i, "establishes": pt[:600], "anchors": anchors,
                 "hint": ("extract the passage that states this; a case "
                          "caption or party list is not a holding"
                          + (f". Matching terms sit at: {near}" if near else ""))})
+        for fn, lf, lt, txt in windows[:8]:
+            fresh += f"\n[{fn} lines {lf}-{lt}]\n{txt}\n"
         for ex in await _extract_passages(sinas, plan, run_id):
             for pas in (ex.get("passages") or [])[:3]:
                 fresh += (f"\n[{pas['filename']} lines {pas['line_from']}-"

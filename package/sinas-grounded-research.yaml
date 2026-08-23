@@ -1592,7 +1592,11 @@ spec:
     - namespace: sgr
       name: note-writer-agent
       description: Writes short client-facing notes (e.g. a partial run's explanation) from material supplied in the message. Never judges, never asks for more input.
-      llmProviderName: ${{ vars.VALIDATION_LLM }}
+      # Strong tier: the honest-scope rule below is load-bearing (a note
+      # that falsely asserts "the sources do not contain X" reaches the
+      # client), and the cheap tier ignored it as a message-level
+      # instruction. One call per partial — cents.
+      llmProviderName: ${{ vars.SYNTHESIS_LLM }}
       temperature: 0.0
       systemPrompt: |
         You write short client-facing notes. The message contains
@@ -1602,6 +1606,13 @@ spec:
         only the note text itself, following the instructions in the
         message. If the material is thin, write the best faithful note
         the material allows.
+
+        One hard rule about gaps: describe them as what THIS ANALYSIS
+        could not establish. Never write that the sources, materials, or
+        documents lack, omit, or do not contain something — the analysis
+        has read only part of them and cannot know that. "This analysis
+        could not establish X" is always correct; "the sources do not
+        state X" never is.
 
     - namespace: sgr
       name: answer-gate-agent

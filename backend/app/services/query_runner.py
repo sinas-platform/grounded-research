@@ -340,6 +340,26 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                 session, [r[0] for r in rows], definitions
             )
 
+        # Deployment-defined property values (dates, numbers, whatever the
+        # config declares). A gate judging claims against each other needs
+        # to see that one cited document predates the instrument another
+        # describes — a 2021 commentary on a proposal was cited for
+        # deadlines the enacted regulation, in the same answer, contradicts.
+        from app.models import DocumentClassProperty, PropertyValue
+
+        props_by_doc: dict = {}
+        if rows:
+            prop_rows = (await session.execute(
+                select(PropertyValue.document_id, DocumentClassProperty.name,
+                       PropertyValue.value)
+                .join(DocumentClassProperty,
+                      DocumentClassProperty.id == PropertyValue.property_id)
+                .where(PropertyValue.document_id.in_([r[0] for r in rows]))
+            )).all()
+            for did, pname, pval in prop_rows:
+                if pval is not None:
+                    props_by_doc.setdefault(did, []).append((pname, pval))
+
         result = await session.get(Result, parent_id)
         briefing_by_doc = {
             b.get("document_id"): b
@@ -364,9 +384,12 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
         )
+        props = "; ".join(
+            f"{n}: {_fmt(v)}"[:60] for n, v in (props_by_doc.get(did) or [])[:6]
+        )
         out.append({
             "document_id": did, "filename": fn, "class": cls or "",
-            "annotations": ann, "reason": (reason or ""),
+            "annotations": ann, "properties": props, "reason": (reason or ""),
             "summary": (summary or ""),
             "briefing": briefing_by_doc.get(str(did)),
         })
@@ -375,8 +398,8 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
 
 def _manifest_line(r: dict) -> str:
     return (f"- {r['filename']} | {r['class'] or '-'} | "
-            f"{r['annotations'] or '-'} | {r['reason'][:120]} | "
-            f"{r['summary'][:200]}")
+            f"{r['annotations'] or '-'} | {r.get('properties') or '-'} | "
+            f"{r['reason'][:120]} | {r['summary'][:200]}")
 
 
 async def _doc_manifest(parent_id: uuid.UUID) -> str:
@@ -924,6 +947,7 @@ async def _gate_answer(
     source_lines = "\n".join(
         f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
         f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
+        f"{r.get('properties') or '-'} | "
         f"{r['summary'].replace(chr(10), ' ')[:200]}"
         for r in mrows
     ) or "(working set unavailable)"
@@ -1496,6 +1520,26 @@ async def _stage_validate_publish(
                             # One repair attempt was already spent on sweep
                             # findings; publishing anyway would ship the
                             # exact defect class this sweep exists to stop.
+                            # Drop the flagged claims first: overreach
+                            # findings do not fail evidence rows, so without
+                            # this the partial's validated-claims set kept
+                            # exactly the claims the sweep objected to.
+                            flagged_ids = {f["claim_id"] for f in fv["failed"]
+                                           if f.get("claim_id")}
+                            flagged_ids |= {o["claim_id"] for o in f_over
+                                            if o.get("claim_id")}
+                            async with AsyncSessionLocal() as s3:
+                                for cid in flagged_ids:
+                                    cid = uuid.UUID(str(cid))
+                                    await s3.execute(
+                                        ClaimEvidence.__table__.delete()
+                                        .where(ClaimEvidence.claim_id == cid))
+                                    await s3.execute(
+                                        AnswerClaim.__table__.delete()
+                                        .where(AnswerClaim.id == cid))
+                                await s3.commit()
+                            await _tele(run_id, "validate",
+                                        final_sweep_dropped=len(flagged_ids))
                             raise PartialOutcome(
                                 "faithfulness",
                                 "final evidence review still found claims "
@@ -1754,6 +1798,9 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
             "about the task, no restatement of these instructions. "
             "Never reference claims or findings by number; internal numbering "
             "may not match what the reader sees. "
+            "Describe any gap as what THIS ANALYSIS could not establish — "
+            "never state that the sources lack or do not contain something: "
+            "the analysis has read only part of them and cannot know that. "
             "Write a note (max 200 words) to "
             + get_settings().sgr_audience
             + ", in the SAME "

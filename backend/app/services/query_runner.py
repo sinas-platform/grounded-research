@@ -1142,6 +1142,76 @@ def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
     )
 
 
+async def _pre_publish_sweep(
+    run_id: uuid.UUID, sinas: _Sinas, caller, answer_id: uuid.UUID,
+    question: str,
+) -> bool:
+    """Strong-tier re-judge of the FULL surviving claim set — the last
+    checkpoint before any publish, on every path that publishes. Returns
+    True when publication may proceed; False after feeding findings to one
+    repair cycle (the caller re-enters the validate loop); raises
+    PartialOutcome once the repair chance is spent, with the flagged
+    claims dropped so the partial cannot ship them.
+
+    Cycle-internal validation stays on the cheap tier; this is where
+    capability is decisive (voice, modality) and where a miss ships to a
+    reader. It originally guarded only the clean-cycle publish branch —
+    a run that exhausted its validation rounds published unswept.
+    """
+    from app.services.faithfulness import validate_answer_evidence
+
+    async with AsyncSessionLocal() as s2:
+        run_row = await s2.get(QueryRun, run_id)
+        sweeps = int(((run_row.telemetry or {}).get("validate")
+                      or {}).get("final_sweeps") or 0)
+    async with AsyncSessionLocal() as s2:
+        fv = await validate_answer_evidence(
+            s2, caller, answer_id, pending_only=False,
+            run_id=run_id, final=True)
+    f_over = fv.get("overreaching") or []
+    await _tele(run_id, "validate", final_sweeps=sweeps + 1,
+                final_sweep_result={
+                    "failed": len(fv["failed"]),
+                    "overreaching": len(f_over)})
+    if not fv["failed"] and not f_over:
+        return True
+    fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
+          for f in fv["failed"]]
+    fb += [f"Claim {o.get('claim_sequence')} asserts more "
+           f"than its passages establish: {o.get('uncovered')}. "
+           "Narrow it to what the passages say, or bind "
+           "evidence that carries the rest."
+           for o in f_over]
+    if sweeps >= 1:
+        # One repair attempt was already spent on sweep findings;
+        # publishing anyway would ship the exact defect class this sweep
+        # exists to stop. Drop the flagged claims first: overreach
+        # findings do not fail evidence rows, so without this the
+        # partial's validated-claims set kept exactly the claims the
+        # sweep objected to.
+        flagged_ids = {f["claim_id"] for f in fv["failed"]
+                       if f.get("claim_id")}
+        flagged_ids |= {o["claim_id"] for o in f_over if o.get("claim_id")}
+        async with AsyncSessionLocal() as s3:
+            for cid in flagged_ids:
+                cid = uuid.UUID(str(cid))
+                await s3.execute(
+                    ClaimEvidence.__table__.delete()
+                    .where(ClaimEvidence.claim_id == cid))
+                await s3.execute(
+                    AnswerClaim.__table__.delete()
+                    .where(AnswerClaim.id == cid))
+            await s3.commit()
+        await _tele(run_id, "validate", final_sweep_dropped=len(flagged_ids))
+        raise PartialOutcome(
+            "faithfulness",
+            "final evidence review still found claims asserting more "
+            "than their sources carry — " + " ".join(fb)[:600])
+    await _revise_answer(sinas, run_id, answer_id, question, fb,
+                         last_attempt=True)
+    return False
+
+
 async def _compact_claim_sequences(session, answer_id: uuid.UUID) -> None:
     """Compact claim numbering to 1..N. Sequence gaps left by drops are
     identity during revision, but a terminal answer whose claims jump 3 -> 5
@@ -1563,63 +1633,8 @@ async def _stage_validate_publish(
                 ok, missing, issues, correctness, points = await _gate_answer(
                     sinas, question, answer_id, run_id)
                 if ok and not correctness and (not issues or gate_cycles <= 0):
-                    # Pre-publication sweep on the strong validation tier:
-                    # the full surviving claim set, re-judged once where the
-                    # verdict is final. Cycle-internal validation stays on
-                    # the cheap tier; this is where capability is decisive
-                    # (voice, modality) and where a miss ships to a reader.
-                    async with AsyncSessionLocal() as s2:
-                        run_row = await s2.get(QueryRun, run_id)
-                        sweeps = int(((run_row.telemetry or {}).get("validate")
-                                      or {}).get("final_sweeps") or 0)
-                    async with AsyncSessionLocal() as s2:
-                        fv = await validate_answer_evidence(
-                            s2, caller, answer_id, pending_only=False,
-                            run_id=run_id, final=True)
-                    f_over = fv.get("overreaching") or []
-                    await _tele(run_id, "validate", final_sweeps=sweeps + 1,
-                                final_sweep_result={
-                                    "failed": len(fv["failed"]),
-                                    "overreaching": len(f_over)})
-                    if fv["failed"] or f_over:
-                        fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
-                              for f in fv["failed"]]
-                        fb += [f"Claim {o.get('claim_sequence')} asserts more "
-                               f"than its passages establish: {o.get('uncovered')}. "
-                               "Narrow it to what the passages say, or bind "
-                               "evidence that carries the rest."
-                               for o in f_over]
-                        if sweeps >= 1:
-                            # One repair attempt was already spent on sweep
-                            # findings; publishing anyway would ship the
-                            # exact defect class this sweep exists to stop.
-                            # Drop the flagged claims first: overreach
-                            # findings do not fail evidence rows, so without
-                            # this the partial's validated-claims set kept
-                            # exactly the claims the sweep objected to.
-                            flagged_ids = {f["claim_id"] for f in fv["failed"]
-                                           if f.get("claim_id")}
-                            flagged_ids |= {o["claim_id"] for o in f_over
-                                            if o.get("claim_id")}
-                            async with AsyncSessionLocal() as s3:
-                                for cid in flagged_ids:
-                                    cid = uuid.UUID(str(cid))
-                                    await s3.execute(
-                                        ClaimEvidence.__table__.delete()
-                                        .where(ClaimEvidence.claim_id == cid))
-                                    await s3.execute(
-                                        AnswerClaim.__table__.delete()
-                                        .where(AnswerClaim.id == cid))
-                                await s3.commit()
-                            await _tele(run_id, "validate",
-                                        final_sweep_dropped=len(flagged_ids))
-                            raise PartialOutcome(
-                                "faithfulness",
-                                "final evidence review still found claims "
-                                "asserting more than their sources carry — "
-                                + " ".join(fb)[:600])
-                        await _revise_answer(sinas, run_id, answer_id,
-                                             question, fb, last_attempt=True)
+                    if not await _pre_publish_sweep(
+                            run_id, sinas, caller, answer_id, question):
                         return await _stage_validate_publish(run_id, sinas, 0)
                     # quality issues never block publication on their own —
                     # unremediated ones are recorded, not fatal
@@ -1717,6 +1732,11 @@ async def _stage_validate_publish(
     ok, missing, issues, correctness, points = await _gate_answer(
         sinas, question, answer_id, run_id)
     if ok and not correctness and (not issues or gate_cycles <= 0):
+        async with AsyncSessionLocal() as session:
+            caller = _runner_caller(await session.get(QueryRun, run_id))
+        if not await _pre_publish_sweep(
+                run_id, sinas, caller, answer_id, question):
+            return await _stage_validate_publish(run_id, sinas, 0)
         tele = {"quality_issues": issues} if issues else {}
         await _publish_answer(
             run_id, answer_id, dropped_claims=len(failing_ids), **tele

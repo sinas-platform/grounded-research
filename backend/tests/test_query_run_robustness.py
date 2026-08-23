@@ -1,5 +1,4 @@
-"""Unit tests for query-run robustness: failed-run chat teardown and the
-chat-based decompose stage.
+"""Unit tests for query-run robustness: failed-run chat teardown.
 
 Pure helpers plus a fake sinas client; no DB, no network — the wiring into
 run_pipeline is exercised against the real stack elsewhere, same convention
@@ -10,16 +9,13 @@ Run from the backend directory: `python -m pytest tests/test_query_run_robustnes
 
 import pytest
 from app.services.query_runner import (
-    _await_reply,
     _chat_ids_for_cleanup,
-    _parse_subqueries,
     _teardown_chats,
 )
 
 
 class _FakeSinas:
-    def __init__(self, message_batches=None, fail_deletes=()):
-        self._batches = list(message_batches or [])
+    def __init__(self, fail_deletes=()):
         self.deleted = []
         self._fail_deletes = set(fail_deletes)
 
@@ -27,13 +23,6 @@ class _FakeSinas:
         if chat_id in self._fail_deletes:
             raise RuntimeError("delete failed")
         self.deleted.append(chat_id)
-
-    async def chat_messages(self, chat_id):
-        if not self._batches:
-            return []
-        if len(self._batches) == 1:
-            return self._batches[0]
-        return self._batches.pop(0)
 
 
 # ── _chat_ids_for_cleanup ────────────────────────────────────────────────────
@@ -83,47 +72,3 @@ async def test_teardown_survives_a_failing_delete():
     sinas = _FakeSinas(fail_deletes={"b"})
     await _teardown_chats(sinas, ["a", "b", "c"])  # must not raise
     assert sinas.deleted == ["a", "c"]
-
-
-# ── _parse_subqueries ────────────────────────────────────────────────────────
-
-
-def test_parse_accepts_plain_and_fenced_json_arrays():
-    assert _parse_subqueries('["a", "b"]', "q?", 3) == (["a", "b"], True)
-    assert _parse_subqueries('```json\n["a"]\n```', "q?", 3) == (["a"], True)
-
-
-def test_parse_caps_at_max_fanout():
-    subs, ok = _parse_subqueries('["a", "b", "c"]', "q?", 2)
-    assert ok and subs == ["a", "b"]
-
-
-def test_parse_falls_back_to_the_question():
-    assert _parse_subqueries("I'll search first...", "q?", 2) == (["q?"], False)
-    assert _parse_subqueries('{"not": "a list"}', "q?", 2) == (["q?"], False)
-    assert _parse_subqueries("[]", "q?", 2) == (["q?"], False)
-
-
-# ── _await_reply ─────────────────────────────────────────────────────────────
-
-
-@pytest.mark.asyncio
-async def test_await_reply_returns_first_assistant_content():
-    sinas = _FakeSinas(
-        message_batches=[
-            [],  # first poll: nothing yet
-            [
-                {"role": "user", "content": "decompose this"},
-                {"role": "assistant", "content": '["a"]'},
-            ],
-        ]
-    )
-    out = await _await_reply(sinas, "c", window_s=1.0, poll_s=0.01)
-    assert out == '["a"]'
-
-
-@pytest.mark.asyncio
-async def test_await_reply_times_out_to_none():
-    sinas = _FakeSinas(message_batches=[[{"role": "tool", "content": "{}"}]])
-    out = await _await_reply(sinas, "c", window_s=0.05, poll_s=0.01)
-    assert out is None

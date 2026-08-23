@@ -1,20 +1,18 @@
 """Server-supervised question pipeline (the query-side ingestion_runner).
 
-The choreography of a question — dispatch sub-searches, wait, merge, brief
-synthesis, validate, publish — lives HERE, in code, with per-stage state
-checkpointed on the QueryRun row. Agents are consulted only for judgment:
+The choreography of a question — retrieve, synthesize, validate, publish —
+lives HERE, in code, with per-stage state checkpointed on the QueryRun row.
+Agents are consulted only for judgment, via stateless one-shot invokes:
 
-  decompose   one forced-JSON call (search-orchestrator agent, single turn)
-  search      sgr/deep-search-agent chats — the agentic retrieval core
-  draft       sgr/synthesis-agent chat, scoped to DRAFTING ONLY
-  verdicts    the stateless evidence-check fan-out (services/faithfulness)
+  retrieve    the retrieval-first engine (app/retrieval_first): schema-aware
+              plan + deterministic channels, in-process
+  synthesize  sgr/retrieval-planner-agent (argument plan, draft, revisions)
+              and sgr/passage-extractor-agent (verbatim grounding extracts)
+  verdicts    the stateless evidence-check fan-out (services/faithfulness),
+              then sgr/answer-gate-agent judging the surviving answer
 
-Supervision rules: stage completion is observed in the DATABASE, never on a
-held HTTP connection; a silent chat (no new messages, no artifact progress)
-is nudged at most MAX_NUDGES times, then a search is re-dispatched once and
-anything else fails the run explicitly. Every transition lands in
-QueryRun.telemetry. A failed run can be resumed: completed stages short-
-circuit off the persisted state.
+Every transition lands in QueryRun.telemetry. A failed run can be resumed:
+completed stages short-circuit off the persisted state.
 """
 
 from __future__ import annotations
@@ -35,15 +33,6 @@ from app.db import AsyncSessionLocal
 from app.models import AnswerClaim, ClaimEvidence, Document, DocumentClass, DocumentVersion, Result, ResultDocument
 from app.models.query import QueryRun
 
-POLL_S = 12
-SEARCH_TIMEOUT_S = 25 * 60
-# Decompose runs on the same chat pattern as the other stages; the window is
-# generous because an over-eager orchestrator may work before replying, and
-# the run degrades to the undecomposed question rather than failing.
-DECOMPOSE_TIMEOUT_S = 10 * 60
-DRAFT_TIMEOUT_S = 20 * 60
-IDLE_DEAD_S = 150
-MAX_NUDGES = 2
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
 # converging runs finish instead of dying at an arbitrary budget.
@@ -70,9 +59,6 @@ MAX_CLAIMS = 14
 # lives; run 3d7f39d3 burned $23.81 there hunting unanchorable evidence).
 # Checked on every supervision poll; tripping it fails the run loudly.
 RUN_COST_CAP_USD = get_settings().sgr_run_cost_cap_usd
-# effort → maximum sub-query fan-out. The bound is enforced here (truncation)
-# AND stated in the decompose instruction; no magic numbers in agent prose.
-EFFORT_FANOUT = {"low": 1, "medium": 2, "high": 3}
 
 _log = __import__("logging").getLogger("sgr.query_runner")
 
@@ -177,16 +163,6 @@ class _Sinas:
         except Exception:
             pass
 
-    async def chat_last_activity(self, chat_id: str) -> datetime | None:
-        msgs = await self.chat_messages(chat_id)
-        if not msgs:
-            return None
-        ts = msgs[-1].get("created_at")
-        try:
-            return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
-        except Exception:
-                return None
-
 
 async def record_llm_call(run_id, chat_id, agent: str | None) -> None:
     """Note that a run made this call. Best-effort: bookkeeping must never be
@@ -244,17 +220,11 @@ async def _tele(run_id: uuid.UUID, stage: str, **detail: Any) -> None:
         await session.commit()
 
 
-async def _chat_is_idle(sinas: _Sinas, chat_id: str) -> bool:
-    last = await sinas.chat_last_activity(chat_id)
-    if last is None:
-        return True
-    return (_now() - last).total_seconds() > IDLE_DEAD_S
-
-
 def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list[str]:
     """Every sinas chat a run has opened, read from the state the stages
-    already record: telemetry entries carrying a chat_id (decompose, draft,
-    discovery) and the per-sub-query search chats. Order-stable, deduped."""
+    already record: telemetry entries carrying a chat_id (discovery, plus
+    stages of the retired chat-based pipeline on old runs) and those runs'
+    per-sub-query search chats. Order-stable, deduped."""
     ids: list[str] = []
     for entry in (telemetry or {}).values():
         if isinstance(entry, dict) and isinstance(entry.get("chat_id"), str):
@@ -275,187 +245,7 @@ async def _teardown_chats(sinas: _Sinas, chat_ids: list[str]) -> None:
             _log.warning("teardown of chat %s failed", chat_id)
 
 
-async def _await_reply(
-    sinas: _Sinas, chat_id: str, window_s: float, poll_s: float = POLL_S
-) -> str | None:
-    """Poll a chat until the agent posts a non-empty assistant message;
-    return its content, or None when the window closes first."""
-    deadline = asyncio.get_event_loop().time() + window_s
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(poll_s)
-        for m in reversed(await sinas.chat_messages(chat_id)):
-            if m.get("role") == "assistant" and (m.get("content") or "").strip():
-                return m["content"]
-    return None
-
-
-def _parse_subqueries(reply: str, question: str, max_fanout: int) -> tuple[list[str], bool]:
-    """The decompose reply must be a JSON array of strings; anything else
-    falls back to the question itself — decomposition is an optimization,
-    never a failure mode. Returns (subqueries, parsed_ok)."""
-    try:
-        cleaned = reply.strip().strip("`")
-        cleaned = cleaned.removeprefix("json").strip()
-        subs = json.loads(cleaned)
-        assert isinstance(subs, list) and subs and all(isinstance(x, str) for x in subs)
-    except Exception:
-        return [question], False
-    return subs[:max_fanout], True
-
-
 # ── stages ──────────────────────────────────────────────────────────────────
-
-
-async def _stage_decompose(run_id: uuid.UUID, sinas: _Sinas) -> list[str]:
-    async with AsyncSessionLocal() as session:
-        run = await session.get(QueryRun, run_id)
-        if run.subqueries:
-            return list(run.subqueries)
-        question = run.question
-        max_fanout = EFFORT_FANOUT.get(run.effort, 2)
-    await _mark(run_id, status="decomposing")
-    await _tele(run_id, "decompose", started=_iso(), max_fanout=max_fanout)
-    # House pattern (chat + observed completion) instead of a one-shot invoke:
-    # a long-lived HTTP read is a timeout waiting to happen when the agent
-    # decides to work before replying, and the server keeps executing after
-    # the client gives up. The chat id lands in telemetry so a failed run's
-    # teardown can find it.
-    chat_id = await sinas.chat_create("sgr/search-orchestrator", "[query-run] decompose")
-    await _tele(run_id, "decompose", chat_id=chat_id)
-    sinas.send_detached(
-        chat_id,
-        "Decompose the following question into independent retrieval sub-queries. "
-        f"Use AT MOST {max_fanout} sub-quer{'y' if max_fanout == 1 else 'ies'}; "
-        "fewer is better when the question does not demand parallel angles. "
-        "Reply with ONLY a JSON array of strings. Do not run searches or call "
-        "any tools first; reply directly.\n\n"
-        f"Question: {question}",
-    )
-    reply = await _await_reply(sinas, chat_id, DECOMPOSE_TIMEOUT_S)
-    if reply is None:
-        subs, ok = [question], False
-    else:
-        subs, ok = _parse_subqueries(reply, question, max_fanout)
-    if not ok:
-        # Window closed or off-script reply: proceed with the question itself
-        # and stop the chat so no agent keeps working for a stage that moved on.
-        await sinas.chat_delete(chat_id)
-    subs = subs[:max_fanout]
-    await _mark(run_id, subqueries=subs)
-    await _tele(run_id, "decompose", completed=_iso(), subqueries=subs)
-    return subs
-
-
-_UUID_RE = __import__("re").compile(
-    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
-)
-
-
-async def _search_result_for(
-    sinas: "_Sinas", chat_id: str
-) -> tuple[str, str] | None:
-    """Find the result the deep-search agent published IN THIS CHAT.
-
-    The agent rephrases its result's query, so matching results by query text
-    is unreliable (it silently never matches, and the runner nudges forever).
-    Instead read the chat: create_draft_result / add_files_to_result /
-    publish_result tool calls all carry the result id. Collect the candidate
-    ids from the chat and return the one that is a real, published (or draft)
-    result owned by this run's search — checked against the DB.
-    """
-    ids: list[str] = []
-    for m in await sinas.chat_messages(chat_id):
-        content = m.get("content")
-        if not isinstance(content, str) or "result" not in content.lower():
-            continue
-        for uid in _UUID_RE.findall(content):
-            if uid not in ids:
-                ids.append(uid)
-    if not ids:
-        return None
-    async with AsyncSessionLocal() as session:
-        rows = {
-            str(r[0]): r[1]
-            for r in (
-                await session.execute(
-                    select(Result.id, Result.status).where(
-                        Result.id.in_([uuid.UUID(i) for i in ids])
-                    )
-                )
-            ).all()
-        }
-    # prefer a published result; else the latest draft the chat created
-    for uid in ids:
-        if rows.get(uid) == "published":
-            return uid, "published"
-    for uid in ids:
-        if uid in rows:
-            return uid, rows[uid]
-    return None
-
-
-async def _stage_search(run_id: uuid.UUID, sinas: _Sinas) -> list[str]:
-    async with AsyncSessionLocal() as session:
-        run = await session.get(QueryRun, run_id)
-        question, subs = run.question, list(run.subqueries)
-        searches: dict[str, dict] = dict(run.searches or {})
-        done = {s: m["result_id"] for s, m in searches.items() if m.get("result_id")}
-        if len(done) == len(subs):
-            return [done[s] for s in subs]
-    await _mark(run_id, status="searching")
-    await _tele(run_id, "search", started=_iso())
-
-    dispatch_msg = (
-        "Run your retrieval workflow for this sub-query and publish the result. "
-        "Do not end your turn before publish_result succeeds.\n\n"
-        "Sub-query: {sq}\n\nContext — the user's full question: {q}"
-    )
-    for sq in subs:
-        if sq not in searches:
-            chat = await sinas.chat_create("sgr/deep-search-agent", f"[query-run] {sq[:50]}")
-            searches[sq] = {"chat_id": chat, "started": _iso(), "nudges": 0, "redispatched": False}
-            sinas.send_detached(chat, dispatch_msg.format(sq=sq, q=question))
-    await _mark(run_id, searches=searches)
-
-    deadline = asyncio.get_event_loop().time() + SEARCH_TIMEOUT_S
-    while asyncio.get_event_loop().time() < deadline:
-        await asyncio.sleep(POLL_S)
-        changed = False
-        for sq, meta in searches.items():
-            if meta.get("result_id"):
-                continue
-            found = await _search_result_for(sinas, meta["chat_id"])
-            if found and found[1] == "published":
-                meta["result_id"] = found[0]
-                changed = True
-                continue
-            if not await _chat_is_idle(sinas, meta["chat_id"]):
-                continue
-            if meta["nudges"] < MAX_NUDGES:
-                meta["nudges"] += 1
-                changed = True
-                sinas.send_detached(
-                    meta["chat_id"],
-                    "Continue your retrieval workflow from where you stopped"
-                    + (" — your draft result is unpublished; finish validation and publish it."
-                       if found else " — create and publish the result.")
-                    + " Do not end your turn before publish_result succeeds.",
-                )
-            elif not meta["redispatched"]:
-                meta.update(redispatched=True, nudges=0, started=_iso())
-                chat = await sinas.chat_create("sgr/deep-search-agent", f"[query-run retry] {sq[:40]}")
-                meta["chat_id"] = chat
-                sinas.send_detached(chat, dispatch_msg.format(sq=sq, q=question))
-                changed = True
-            else:
-                raise RuntimeError(f"sub-search dead after nudges+retry: {sq[:60]!r}")
-        if changed:
-            await _mark(run_id, searches=searches)
-        if all(m.get("result_id") for m in searches.values()):
-            await _tele(run_id, "search", completed=_iso(),
-                        results={s: m["result_id"] for s, m in searches.items()})
-            return [searches[s]["result_id"] for s in subs]
-    raise RuntimeError("search stage timed out")
 
 
 async def _stage_merge(run_id: uuid.UUID, children: list[str]) -> uuid.UUID:

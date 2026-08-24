@@ -1,0 +1,113 @@
+name: Build & Push Docker Image
+
+# Builds the single Sinas Grounded Research image (frontend + backend, root Dockerfile)
+# and pushes it to GHCR. Mirrors the Sinas build-images workflow.
+#
+# Triggers & resulting image tags:
+#   push to main           -> :edge           (+ :sha-…)
+#   tag 0.1.0-rc.1         -> :0.1.0-rc.1                     release candidate (prerelease)
+#   tag 0.1.0              -> :0.1.0 :0.1 :latest             final release
+#   manual dispatch        -> :<image_tag or sanitized ref>   build ANY branch/SHA on demand
+#
+# Only a final (non-prerelease) semver tag moves :latest (metadata-action latest=auto).
+on:
+  push:
+    branches: [main]
+    tags:
+      - '[0-9]+.[0-9]+.[0-9]+'           # 0.1.0        (final)
+      - '[0-9]+.[0-9]+.[0-9]+-rc.[0-9]+' # 0.1.0-rc.1   (release candidate)
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or SHA to build (e.g. a feature branch)
+        required: true
+        default: main
+      image_tag:
+        description: 'Tag for the built image (optional; default: sanitized ref name)'
+        required: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE: ghcr.io/${{ github.repository }}
+  # Multi-arch so the image runs on amd64 cloud nodes AND arm64 (Apple Silicon, arm nodes).
+  PLATFORMS: linux/amd64,linux/arm64
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # On workflow_dispatch, build the requested ref; otherwise the triggering ref.
+          ref: ${{ github.event.inputs.ref || github.ref }}
+
+      - name: Resolve dispatch image tag
+        if: github.event_name == 'workflow_dispatch'
+        id: disp
+        run: |
+          TAG="${{ github.event.inputs.image_tag }}"
+          [ -z "$TAG" ] && TAG="${{ github.event.inputs.ref }}"
+          # Sanitize to a valid, readable image tag.
+          TAG=$(printf '%s' "$TAG" | sed 's#[^a-zA-Z0-9._-]#-#g' | cut -c1-120)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          # metadata-action skips {{major}}.{{minor}} and :latest for prereleases, so a
+          # -rc tag only ever produces its own exact tag.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=sha,prefix=,enable=${{ github.event_name != 'workflow_dispatch' }}
+            type=raw,value=${{ steps.disp.outputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: ${{ env.PLATFORMS }}
+
+  # On a version tag, publish a GitHub Release. Prerelease flag is set automatically
+  # for -rc tags. The image itself is the artifact; deployment manifests live with
+  # each deployment, not in this repo.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          generate_release_notes: true

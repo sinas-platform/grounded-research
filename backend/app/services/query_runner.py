@@ -78,6 +78,50 @@ class PartialOutcome(Exception):
         super().__init__(f"{cause}: {explanation}")
 
 
+class CancelledOutcome(Exception):
+    """A run stopped because someone asked it to stop. Terminal, and not a
+    failure: nothing went wrong, so it is neither retryable nor an error to
+    report.
+
+    Deliberately a plain Exception raised at checkpoints rather than
+    `task.cancel()`. `asyncio.CancelledError` derives from BaseException, so
+    it would sail past `run_pipeline`'s `except Exception` and leave the run
+    stuck in its in-flight status with its sinas chats never torn down —
+    cancelling by that route strands exactly what it means to clean up.
+    """
+
+    def __init__(self, requested_by: str | None = None):
+        self.requested_by = requested_by
+        super().__init__("cancelled on request")
+
+
+async def _cancel_requested(run_id: uuid.UUID) -> bool:
+    """Whether a cancel has been recorded for this run.
+
+    Read from telemetry rather than a column: it needs no migration, it is
+    already the state the stages read and write, and it survives a restart —
+    which an in-process flag would not.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        entry = (run.telemetry or {}).get("cancel")
+    return bool(isinstance(entry, dict) and entry.get("requested"))
+
+
+async def _check_cancel(run_id: uuid.UUID) -> None:
+    """Raise if a cancel is pending. Call between units of billable work.
+
+    Placement is the whole design: a checkpoint only stops spend that has not
+    happened yet, so these sit before each stage and inside the per-item
+    loops, not merely at the top of the pipeline.
+    """
+    if await _cancel_requested(run_id):
+        async with AsyncSessionLocal() as session:
+            run = await session.get(QueryRun, run_id)
+            entry = (run.telemetry or {}).get("cancel") or {}
+        raise CancelledOutcome(requested_by=entry.get("requested_by"))
+
+
 def _domain_article() -> str:
     """"a legal " / "an " — deployment says what kind of corpus this is."""
     d = get_settings().sgr_domain.strip()
@@ -1848,6 +1892,23 @@ def _note_language(question: str) -> str:
     return names.get(_guess_language(question or ""), "English")
 
 
+async def _mark_cancelled(run_id: uuid.UUID, c: CancelledOutcome) -> None:
+    """Terminal `cancelled`: record when it stopped and who asked.
+
+    No phrasing call, unlike `_mark_partial`: a cancelled run owes the client
+    no explanation beyond the fact, and spending money to narrate a stop the
+    client asked for would be perverse. `error` stays null — nothing failed.
+    """
+    await _tele(
+        run_id,
+        "cancel",
+        cancelled_at=_now().isoformat(),
+        requested_by=c.requested_by,
+        message="This run was cancelled before it produced an answer.",
+    )
+    await _mark(run_id, status="cancelled", error=None, completed_at=_now())
+
+
 async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> None:
     """Terminal `partial`: store cause + explanation + a short client-facing
     note (one cheap phrasing call, in the question's language) over the top
@@ -1985,9 +2046,15 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
         if run.parent_result_id:  # resume: retrieval already stored
             return
     await _mark(run_id, status="retrieving")
+    # Between each step, not just at the stage boundary: these are the four
+    # billable calls of the stage, and a checkpoint is only worth having
+    # where it can still stop the next one from being made.
     plan = await rf.plan_question(question, effort=effort)
+    await _check_cancel(run_id)
     ranked = await rf.retrieve_and_rank(plan)
+    await _check_cancel(run_id)
     briefing = await rf.build_briefing(ranked, effort)
+    await _check_cancel(run_id)
     rid = await rf.store_result(question, ranked, briefing, plan)
     await _mark(run_id, parent_result_id=uuid.UUID(str(rid)))
     await _tele(run_id, "retrieval", completed=_iso(),
@@ -2005,6 +2072,7 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as session:
         mode = (await session.get(QueryRun, run_id)).mode
     try:
+        await _check_cancel(run_id)
         if mode in ("full", "retrieval"):
             await _stage_retrieve_first(run_id)
         if mode == "retrieval":
@@ -2012,10 +2080,24 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
             _log.info("query run %s retrieval published", run_id)
             return
         # synthesis mode requires parent_result_id supplied at creation
+        await _check_cancel(run_id)
         await _stage_synthesize(run_id, sinas)
+        await _check_cancel(run_id)
         await _stage_validate_publish(run_id, sinas)
         await _mark(run_id, status="published", completed_at=_now())
         _log.info("query run %s published", run_id)
+    except CancelledOutcome as c:
+        _log.info("query run %s cancelled", run_id)
+        await _mark_cancelled(run_id, c)
+        # Same teardown as partial and failed: a cancelled run must not leave
+        # agents working for nobody, which is most of the point of cancelling.
+        try:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(QueryRun, run_id)
+                chat_ids = _chat_ids_for_cleanup(run.telemetry, run.searches)
+            await _teardown_chats(sinas, chat_ids)
+        except Exception:
+            _log.warning("post-cancel chat teardown failed for run %s", run_id)
     except PartialOutcome as p:
         _log.warning("query run %s partial: %s", run_id, p)
         await _mark_partial(run_id, sinas, p)

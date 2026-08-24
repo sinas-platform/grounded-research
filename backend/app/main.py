@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -33,9 +34,19 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
             "Local development only; never expose this mode beyond localhost."
         )
     log.info("sinas url: %s", settings.sinas_url)
-    # No background workers: ingestion + discovery submit batches to Sinas
-    # at API request time and reconcile via live-fetch on GET.
+    maintenance_task = None
+    if settings.sgr_maintenance_interval_seconds > 0:
+        from app.services.maintenance import maintenance_loop
+
+        maintenance_task = asyncio.create_task(
+            maintenance_loop(settings.sgr_maintenance_interval_seconds))
+        log.info("maintenance loop armed: every %ss",
+                 settings.sgr_maintenance_interval_seconds)
+    # No other background workers: ingestion + discovery submit batches to
+    # Sinas at API request time and reconcile via live-fetch on GET.
     yield
+    if maintenance_task is not None:
+        maintenance_task.cancel()
     await get_management().aclose()
 
 

@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     # Server
     sgr_port: int = Field(default=8080, validation_alias="SGR_PORT")
     sgr_log_level: str = Field(default="INFO", validation_alias="SGR_LOG_LEVEL")
+
+    # Periodic corpus maintenance (alias replay, entity backfill,
+
+    # annotation rematerialization, wall normalization). 0 disables.
+
+    sgr_maintenance_interval_seconds: int = 21600
     sgr_cors_origins: str = Field(default="", validation_alias="SGR_CORS_ORIGINS")
 
     # Auth

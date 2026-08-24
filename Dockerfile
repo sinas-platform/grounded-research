@@ -19,7 +19,7 @@ RUN npm run build
 # Stage 2 — python deps
 # ────────────────────────────────────────────────────────────────
 FROM python:3.11-slim AS deps
-ENV POETRY_VERSION=1.8.3 \
+ENV POETRY_VERSION=2.1.3 \
     POETRY_HOME=/opt/poetry \
     POETRY_VIRTUALENVS_CREATE=false \
     PYTHONDONTWRITEBYTECODE=1 \

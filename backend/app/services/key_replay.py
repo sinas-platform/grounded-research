@@ -139,7 +139,13 @@ async def backfill_full_text_entities(
               RelationshipDefinition.id ==
               UnresolvedRelationship.relationship_definition_id)
         .where(UnresolvedRelationship.status == "unresolved")
-        .where(RelationshipDefinition.name.like("is_full_text_of%"))
+        # Structural, not by name: a document-embodies-entity definition is
+        # one whose source is a document class and target an entity type —
+        # the same criterion annotations_for_documents uses. The definition
+        # names ("is_full_text_of" here) belong to the deployment's config,
+        # not to this module.
+        .where(RelationshipDefinition.source_ref_type == "document_class")
+        .where(RelationshipDefinition.target_ref_type == "entity_type")
     )).all())
 
     report = {"queued": len(rows), "created": 0, "linked_existing": 0,

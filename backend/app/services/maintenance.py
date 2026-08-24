@@ -71,7 +71,8 @@ async def _full_text_entity_ids(session) -> list[uuid.UUID]:
         SELECT DISTINCT r.target_id
         FROM relationship r
         JOIN relationship_definition rd ON rd.id = r.relationship_definition_id
-        WHERE rd.name LIKE 'is_full_text_of%'"""))).all()
+        WHERE rd.source_ref_type = 'document_class'
+          AND rd.target_ref_type = 'entity_type'"""))).all()
     return [r[0] for r in rows]
 
 

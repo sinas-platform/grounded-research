@@ -1,68 +1,79 @@
-"""File upload — proxies to Sinas's sgr/documents collection via the SDK.
-The post-upload function then registers the file with SGR asynchronously."""
+"""Single-file upload — registers directly with Grove, the system of
+record. This used to proxy the file into a Sinas collection whose
+post-upload function called back into SGR: an extra hop, a 9.6s-per-file
+function execution, and an identity scheme (collection_file_id) that
+bypassed content-hash dedup. Grove-native now, same write path as bulk."""
 
 from __future__ import annotations
 
-import asyncio
+import uuid
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
-from sinas import SinasClient
+from fastapi import (APIRouter, Depends, File, Form, HTTPException,
+                     UploadFile, status)
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller
-from app.config import get_settings
+from app.db import get_session
+from app.models import DocumentClass
 
 router = APIRouter(prefix="/uploads", tags=["uploads"])
-
-SGR_NAMESPACE = "sgr"
-SGR_COLLECTION = "documents"
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
 async def upload_document(
     file: UploadFile = File(...),
-    metadata_json: str | None = Form(default=None),
+    source: str | None = Form(
+        default=None,
+        description="Connector/source name; the filename becomes the "
+                    "external_ref (the source's natural key) when set."),
+    document_class: str | None = Form(
+        default=None,
+        description="Source-declared class name; applied on create, and on "
+                    "re-upload only when the document has no class yet."),
     staged: bool = Form(
         default=False,
-        description="If true, document is parked and the auto-pipeline doesn't fire. Used for the discovery upload flow.",
-    ),
+        description="If true, document is parked and the auto-pipeline "
+                    "doesn't fire. Used for the discovery upload flow."),
+    session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    if caller.sinas_token is None:
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "uploads require a Sinas token",
-        )
+    raw = await file.read()
+    try:
+        content = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                            "uploads must be UTF-8 text (markdown)")
 
-    content = await file.read()
-    metadata: dict | None = None
-    if metadata_json:
-        import json as _json
-
-        try:
-            metadata = _json.loads(metadata_json)
-        except _json.JSONDecodeError as exc:
+    declared_class_id: uuid.UUID | None = None
+    if document_class is not None:
+        declared = (await session.execute(
+            select(DocumentClass).where(DocumentClass.name == document_class)
+        )).scalar_one_or_none()
+        if declared is None:
             raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, f"metadata_json is not valid JSON: {exc}"
-            ) from exc
-    if metadata is None:
-        metadata = {}
-    metadata.setdefault("source", "manual")
-    if staged:
-        metadata["staged"] = True
+                status.HTTP_422_UNPROCESSABLE_ENTITY,
+                f"unknown document class {document_class!r}")
+        declared_class_id = declared.id
 
-    client = SinasClient(base_url=get_settings().sinas_url, token=caller.sinas_token)
-    result = await asyncio.to_thread(
-        client.files.upload_bytes,
-        namespace=SGR_NAMESPACE,
-        collection=SGR_COLLECTION,
-        name=file.filename or "upload.bin",
-        content=content,
-        content_type=file.content_type or "application/octet-stream",
-        file_metadata=metadata,
-    )
+    from app.services.document_registry import register_document
+
+    reg = await register_document(
+        session, filename=file.filename or "upload.md", content=content,
+        owner_id=caller.user_id, roles=caller.roles,
+        source=source, staged=staged,
+        document_class_id=declared_class_id)
+    await session.commit()
+
+    if reg.outcome in ("created", "new_version") and not staged:
+        from app.api.v1.bulk import _spawn
+
+        _spawn(uuid.uuid4().hex[:12], [str(reg.document.id)],
+               "extract,resolve,relationships")
+
     return {
-        "status": "accepted",
-        "filename": file.filename,
-        "sinas_response": result,
-        "note": "ingestion runs asynchronously — poll /api/v1/documents to see the registered document",
+        "status": reg.outcome,
+        "document_id": str(reg.document.id) if reg.document else None,
+        "version": reg.version,
+        "staged": staged,
     }

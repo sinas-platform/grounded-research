@@ -103,29 +103,10 @@ spec:
         measured here: keep this on a caching-enabled provider.
       required: true
 
-  # ─────────────────────────────────────────────
-  # Collection — uploads here trigger ingestion
-  # ─────────────────────────────────────────────
-  collections:
-    - namespace: sgr
-      name: documents
-      description: Documents indexed by SGR. Upload here to trigger ingestion.
-      metadataSchema:
-        type: object
-        properties:
-          source:
-            type: string
-            description: Where the document came from (manual, api, batch, s3, sftp)
-          dossier_id:
-            type: string
-            description: Optional — assign on upload to a known dossier
-          dossier_path_hint:
-            type: string
-            description: Optional — string the dossier assignment pass can use
-        additionalProperties: true
-      maxFileSizeMb: 50
-      maxTotalSizeGb: 50
-      postUploadFunction: sgr/post_upload
+  # Grove is the system of record: no Sinas collection, no post-upload
+  # function. Every route registers via SGR's own API (content-hash +
+  # source identity dedup); the old collection path keyed identity on
+  # collection_file_id and bypassed both.
 
   # ─────────────────────────────────────────────
   # Connector — wraps the SGR HTTP API
@@ -1414,15 +1395,6 @@ spec:
   # ─────────────────────────────────────────────
   # Function — post-upload hook on sgr/documents
   # ─────────────────────────────────────────────
-  functions:
-    - namespace: sgr
-      name: post_upload
-      description: >
-        Invoked by Sinas after a file is uploaded to the sgr/documents
-        collection. Registers the document with SGR and submits an
-        ingestion run (the in-process pipeline).
-      sharedPool: true
-      timeout: 120
       inputSchema:
         type: object
         properties:

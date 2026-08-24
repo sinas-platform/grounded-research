@@ -12,7 +12,7 @@ SGR turns unstructured documents into a structured, filterable graph and exposes
 
 - **Backend**: FastAPI + SQLAlchemy (asyncpg) + Postgres. Owns the SGR domain model (document classes, properties, entities, relationships, dossiers, results, answers).
 - **Frontend**: Vite + React + TypeScript + Tailwind. Admin UI for configuration and review.
-- **Sinas package** (`package/sinas-grounded-research.yaml`): defines the agents, connector, collection, and post-upload function that Sinas needs to install in order to drive SGR.
+- **Sinas package** (`package/sinas-grounded-research.yaml`): defines the agents and connector that Sinas needs to install in order to drive SGR. Documents are Grove's own record — uploads go to SGR directly.
 - **Single image**: one Dockerfile builds the frontend and the backend; FastAPI serves the static SPA. Suitable for Render, Heroku, Scaleway Serverless Containers, Fly, etc.
 
 SGR depends on a running Sinas instance for agents, file storage, RBAC, and skills. Standalone deployment is not supported in v1.

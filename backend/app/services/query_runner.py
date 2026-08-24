@@ -78,6 +78,50 @@ class PartialOutcome(Exception):
         super().__init__(f"{cause}: {explanation}")
 
 
+class CancelledOutcome(Exception):
+    """A run stopped because someone asked it to stop. Terminal, and not a
+    failure: nothing went wrong, so it is neither retryable nor an error to
+    report.
+
+    Deliberately a plain Exception raised at checkpoints rather than
+    `task.cancel()`. `asyncio.CancelledError` derives from BaseException, so
+    it would sail past `run_pipeline`'s `except Exception` and leave the run
+    stuck in its in-flight status with its sinas chats never torn down —
+    cancelling by that route strands exactly what it means to clean up.
+    """
+
+    def __init__(self, requested_by: str | None = None):
+        self.requested_by = requested_by
+        super().__init__("cancelled on request")
+
+
+async def _cancel_requested(run_id: uuid.UUID) -> bool:
+    """Whether a cancel has been recorded for this run.
+
+    Read from telemetry rather than a column: it needs no migration, it is
+    already the state the stages read and write, and it survives a restart —
+    which an in-process flag would not.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        entry = (run.telemetry or {}).get("cancel")
+    return bool(isinstance(entry, dict) and entry.get("requested"))
+
+
+async def _check_cancel(run_id: uuid.UUID) -> None:
+    """Raise if a cancel is pending. Call between units of billable work.
+
+    Placement is the whole design: a checkpoint only stops spend that has not
+    happened yet, so these sit before each stage and inside the per-item
+    loops, not merely at the top of the pipeline.
+    """
+    if await _cancel_requested(run_id):
+        async with AsyncSessionLocal() as session:
+            run = await session.get(QueryRun, run_id)
+            entry = (run.telemetry or {}).get("cancel") or {}
+        raise CancelledOutcome(requested_by=entry.get("requested_by"))
+
+
 def _domain_article() -> str:
     """"a legal " / "an " — deployment says what kind of corpus this is."""
     d = get_settings().sgr_domain.strip()
@@ -221,10 +265,22 @@ async def _tele(run_id: uuid.UUID, stage: str, **detail: Any) -> None:
 
 
 def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list[str]:
-    """Every sinas chat a run has opened, read from the state the stages
-    already record: telemetry entries carrying a chat_id (discovery, plus
-    stages of the retired chat-based pipeline on old runs) and those runs'
-    per-sub-query search chats. Order-stable, deduped."""
+    """Chats found in the state the retired chat-based pipeline recorded:
+    telemetry entries carrying a chat_id (discovery and its stages) and those
+    runs' per-sub-query search chats. Order-stable, deduped.
+
+    On a retrieval-first run this returns nothing, and that is the current
+    truth rather than an oversight: measured across the six most recent runs,
+    45-94 chats were opened and this found 0 of them every time. The
+    authoritative list is `RunLLMCall`, which `_run_cost_usd` already joins.
+
+    Do NOT "fix" this by pointing it at RunLLMCall on its own. Archiving every
+    chat a run opened buys nothing — see `_teardown_chats` for why archiving
+    stops no work — while hiding the paper trail we want kept in Sinas. Wire
+    the real abort here when it lands, and scope it to what can still cost
+    something: the detached agents, not the synchronous invokes that finished
+    before the call returned.
+    """
     ids: list[str] = []
     for entry in (telemetry or {}).values():
         if isinstance(entry, dict) and isinstance(entry.get("chat_id"), str):
@@ -236,8 +292,23 @@ def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list
 
 
 async def _teardown_chats(sinas: _Sinas, chat_ids: list[str]) -> None:
-    """Delete each chat a failed run opened, so no agent keeps working for
-    nobody. Best-effort throughout: one failed delete never blocks the rest."""
+    """Archive each chat named, best-effort: one failure never blocks the rest.
+
+    It does NOT stop anything. Sinas's `DELETE /chats/{id}` is a soft-delete —
+    it sets `archived = True` and returns; messages and llm_usage rows are
+    untouched, and no generation is interrupted. An earlier version of this
+    docstring claimed it stopped agents working "for nobody"; it never did.
+
+    Two consequences worth keeping in view:
+      * Cancellation saves money only through the checkpoints in the pipeline
+        that stop the NEXT call being made. Nothing here contributes to that.
+      * The one genuine fire-and-forget — the detached relationship-proposal
+        agent — cannot be stopped by any call we currently have. A real abort
+        is being added on the Sinas side; this is the seam to wire it into.
+
+    Note also that `llm_usage` deliberately carries no foreign keys, so
+    archiving never threatens the cost ledger. The paper trail survives.
+    """
     for chat_id in chat_ids:
         try:
             await sinas.chat_delete(chat_id)
@@ -1848,6 +1919,23 @@ def _note_language(question: str) -> str:
     return names.get(_guess_language(question or ""), "English")
 
 
+async def _mark_cancelled(run_id: uuid.UUID, c: CancelledOutcome) -> None:
+    """Terminal `cancelled`: record when it stopped and who asked.
+
+    No phrasing call, unlike `_mark_partial`: a cancelled run owes the client
+    no explanation beyond the fact, and spending money to narrate a stop the
+    client asked for would be perverse. `error` stays null — nothing failed.
+    """
+    await _tele(
+        run_id,
+        "cancel",
+        cancelled_at=_now().isoformat(),
+        requested_by=c.requested_by,
+        message="This run was cancelled before it produced an answer.",
+    )
+    await _mark(run_id, status="cancelled", error=None, completed_at=_now())
+
+
 async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> None:
     """Terminal `partial`: store cause + explanation + a short client-facing
     note (one cheap phrasing call, in the question's language) over the top
@@ -1985,9 +2073,15 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
         if run.parent_result_id:  # resume: retrieval already stored
             return
     await _mark(run_id, status="retrieving")
-    plan = await rf.plan_question(question, effort=effort)
+    # Between each step, not just at the stage boundary: these are the four
+    # billable calls of the stage, and a checkpoint is only worth having
+    # where it can still stop the next one from being made.
+    plan = await rf.plan_question(question, effort=effort, run_id=run_id)
+    await _check_cancel(run_id)
     ranked = await rf.retrieve_and_rank(plan)
+    await _check_cancel(run_id)
     briefing = await rf.build_briefing(ranked, effort)
+    await _check_cancel(run_id)
     rid = await rf.store_result(question, ranked, briefing, plan)
     await _mark(run_id, parent_result_id=uuid.UUID(str(rid)))
     await _tele(run_id, "retrieval", completed=_iso(),
@@ -2005,6 +2099,7 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as session:
         mode = (await session.get(QueryRun, run_id)).mode
     try:
+        await _check_cancel(run_id)
         if mode in ("full", "retrieval"):
             await _stage_retrieve_first(run_id)
         if mode == "retrieval":
@@ -2012,10 +2107,27 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
             _log.info("query run %s retrieval published", run_id)
             return
         # synthesis mode requires parent_result_id supplied at creation
+        await _check_cancel(run_id)
         await _stage_synthesize(run_id, sinas)
+        await _check_cancel(run_id)
         await _stage_validate_publish(run_id, sinas)
         await _mark(run_id, status="published", completed_at=_now())
         _log.info("query run %s published", run_id)
+    except CancelledOutcome as c:
+        _log.info("query run %s cancelled", run_id)
+        await _mark_cancelled(run_id, c)
+        # Same call as partial and failed, and worth being clear about what it
+        # buys: nothing, today. Cancellation's saving is entirely the calls the
+        # checkpoints stopped from being made. This archives whatever the
+        # retired pipeline recorded — currently nothing on a retrieval-first
+        # run — and is where a real Sinas abort gets wired when it exists.
+        try:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(QueryRun, run_id)
+                chat_ids = _chat_ids_for_cleanup(run.telemetry, run.searches)
+            await _teardown_chats(sinas, chat_ids)
+        except Exception:
+            _log.warning("post-cancel chat teardown failed for run %s", run_id)
     except PartialOutcome as p:
         _log.warning("query run %s partial: %s", run_id, p)
         await _mark_partial(run_id, sinas, p)

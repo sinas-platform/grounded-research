@@ -13,6 +13,7 @@ GET  /bulk/jobs/{id} progress counts derived from the database
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import subprocess
@@ -80,6 +81,11 @@ async def create_job(payload: BulkJobIn,
 @router.post("/upload", response_model=BulkJobOut,
              status_code=status.HTTP_202_ACCEPTED)
 async def upload_zip(file: UploadFile,
+                     source: str | None = Query(
+                         default=None,
+                         description="Connector/source name; with it each "
+                                     "file's name becomes its external_ref "
+                                     "(the source's natural key)."),
                      staged: bool = Query(
                          default=False,
                          description="Hold the documents back from the live "
@@ -100,41 +106,27 @@ async def upload_zip(file: UploadFile,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "not a zip")
     job_id = uuid.uuid4().hex[:12]
     doc_ids: list[str] = []
+    unchanged = 0
+    duplicates = 0
+    from app.services.document_registry import register_document
+
     for name in zf.namelist():
         base = Path(name).name
         if not base.endswith(".md") or base.startswith("."):
             continue
         content = zf.read(name).decode("utf-8", errors="replace")
-        content = content.replace("\x00", "").replace("\\u0000", "")
-        cfid = f"bulk:{job_id}:{base}"
-        existing = (await session.execute(
-            select(Document).where(Document.filename == base)
-        )).scalars().first()
-        if existing is not None:
-            doc = existing
-            latest = (await session.execute(
-                select(DocumentVersion)
-                .where(DocumentVersion.document_id == doc.id)
-                .order_by(DocumentVersion.version.desc()).limit(1)
-            )).scalars().first()
-            version = (latest.version + 1) if latest else 1
+        reg = await register_document(
+            session, filename=base, content=content,
+            owner_id=caller.user_id, roles=caller.roles,
+            source=source, staged=staged)
+        if reg.outcome == "unchanged":
+            unchanged += 1
+        elif reg.outcome == "duplicate":
+            duplicates += 1
         else:
-            doc = Document(filename=base, collection_file_id=cfid,
-                           owner_id=caller.user_id,
-                           roles=caller.roles or [], staged=staged)
-            session.add(doc)
-            await session.flush()
-            version = 1
-        from app.services.toc import normalize_line_density
-
-        dv = DocumentVersion(document_id=doc.id, version=version,
-                             content_md=normalize_line_density(content))
-        session.add(dv)
-        await session.flush()
-        doc.current_version_id = dv.id
-        doc_ids.append(str(doc.id))
+            doc_ids.append(str(reg.document.id))
     await session.commit()
-    if not doc_ids:
+    if not doc_ids and not unchanged and not duplicates:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "zip had no .md files")
     _spawn(job_id, doc_ids, "extract,resolve,relationships")
     return BulkJobOut(job_id=job_id, document_count=len(doc_ids),

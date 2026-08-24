@@ -37,6 +37,10 @@ QUERY_RUN_STATUSES = (
     "published",
     "partial",
     "failed",
+    # Terminal, and distinct from `failed`: the run was stopped on request and
+    # nothing went wrong. Reached only through a cancel request the pipeline
+    # observes at a checkpoint — see `CancelledOutcome` in query_runner.
+    "cancelled",
 )
 
 

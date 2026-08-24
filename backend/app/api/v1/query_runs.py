@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
+from app.models._common import now_utc
 from app.models.query import QueryRun
 from app.schemas.common import OwnedOut
 from app.services.query_runner import _Sinas, run_pipeline
@@ -161,6 +162,49 @@ async def resume_query_run(
     await session.commit()
     await session.refresh(run)
     _launch(run.id)
+    return run
+
+
+@router.post(
+    "/{run_id}/cancel",
+    response_model=QueryRunOut,
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
+)
+async def cancel_query_run(
+    run_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """Ask a running query run to stop, and stop paying for it.
+
+    Records the request rather than killing the task: the pipeline observes it
+    at its next checkpoint, then finalises through the same path as a partial
+    outcome so the run reaches a terminal status with its sinas chats torn
+    down. The response therefore still shows the in-flight status — the run
+    flips to `cancelled` when the pipeline next looks, not here.
+
+    Idempotent on an already-cancelling run; 409 on one that has finished,
+    where there is nothing left to stop.
+    """
+    run = await _visible_run_or_404(run_id, session, caller)
+    if run.status in ("published", "partial", "failed", "cancelled"):
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"run is {run.status}; only an unfinished run can be cancelled",
+        )
+    telemetry = dict(run.telemetry or {})
+    entry = dict(telemetry.get("cancel") or {})
+    entry.update(
+        {
+            "requested": True,
+            "requested_at": entry.get("requested_at") or now_utc().isoformat(),
+            "requested_by": str(caller.user_id),
+        }
+    )
+    telemetry["cancel"] = entry
+    run.telemetry = telemetry
+    await session.commit()
+    await session.refresh(run)
     return run
 
 

@@ -37,6 +37,15 @@ class Document(Base, TimestampMixin, OwnedMixin):
     current_version_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     classification_confidence: Mapped[float | None] = mapped_column(Float)
     collection_file_id: Mapped[str | None] = mapped_column(String(500), index=True)
+    # Source identity: the ingesting connector's natural key (CELEX, ECLI,
+    # publication number, ...). Decides create-vs-new-version on
+    # re-ingestion; unique together where both are set.
+    source: Mapped[str | None] = mapped_column(String(200))
+    external_ref: Mapped[str | None] = mapped_column(String(500))
+    # Exact-content duplicate of an earlier document; the duplicate is
+    # staged out of retrieval, never deleted.
+    duplicate_of_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document.id", ondelete="SET NULL"))
     # Staged docs skip the auto-ingestion pipeline (classifier + extractors
     # don't fire on upload). Discovery and front-matter scans still see them;
     # retrieval does not. Flips false when a manual IngestionRun completes.
@@ -62,6 +71,9 @@ class DocumentVersion(Base, TimestampMixin):
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
     content_md: Mapped[str | None] = mapped_column(Text)
+    # sha256 of content_md as stored (post-normalization); exact-content
+    # identity for dedup.
+    content_hash: Mapped[str | None] = mapped_column(String(64), index=True)
     content_tsvector: Mapped[str | None] = mapped_column(TSVECTOR)
 
     document: Mapped[Document] = relationship(

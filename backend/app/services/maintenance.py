@@ -12,7 +12,10 @@ pass, run on a timer by the backend (SGR_MAINTENANCE_INTERVAL_SECONDS,
 
     python -m app.services.maintenance
 
-Every step is deterministic — no model calls, no spend.
+Every step is deterministic — no model calls, no spend — except the
+extraction-retry step, which respawns the bulk pipeline over documents
+whose extraction failed (capped per pass; the pipeline itself skips
+anything already extracted, so a retry costs only the failed docs).
 """
 
 from __future__ import annotations
@@ -128,6 +131,40 @@ async def _purge_stale_annotations(session) -> int:
     return res.rowcount or 0
 
 
+# A pass never respawns more than this many docs: keeps the model spend of
+# one tick bounded and visible even if something upstream mass-fails.
+_RETRY_CAP = 200
+# Leave freshly-registered docs to the pipeline their upload spawned; only
+# docs this old with no extraction are considered failed rather than pending.
+_RETRY_MIN_AGE_MINUTES = 60
+
+
+async def _retry_failed_extractions(session) -> int:
+    """Documents with content but no extraction — a failed or crashed
+    extract stage (e.g. one malformed model reply in a 750-doc batch).
+    Respawn the bulk pipeline over them; its worklist is derived from data,
+    so the run is idempotent and only the failed docs cost anything."""
+    rows = (await session.execute(text("""
+        SELECT d.id
+        FROM document d JOIN document_version dv ON dv.id = d.current_version_id
+        WHERE COALESCE(TRIM(d.summary), '') = ''
+          AND COALESCE(TRIM(dv.content_md), '') != ''
+          AND d.staged = false
+          AND d.duplicate_of_id IS NULL
+          AND d.created_at < now() - make_interval(mins => :age_min)
+        ORDER BY d.created_at
+        LIMIT :cap"""), {"age_min": _RETRY_MIN_AGE_MINUTES,
+                         "cap": _RETRY_CAP})).all()
+    if not rows:
+        return 0
+    from app.api.v1.bulk import _spawn
+
+    job_id = "maint-" + uuid.uuid4().hex[:8]
+    _spawn(job_id, [str(r[0]) for r in rows], "extract,resolve,relationships")
+    log.info("extraction retry: respawned %d docs as job %s", len(rows), job_id)
+    return len(rows)
+
+
 async def run_maintenance() -> dict[str, Any]:
     """One idempotent upkeep pass. Order matters: resolutions and minting
     change the graph that rematerialization then walks."""
@@ -145,6 +182,7 @@ async def run_maintenance() -> dict[str, Any]:
         stats["hashes_backfilled"] = await _backfill_content_hashes(session)
         stats["duplicates_marked"] = await _sweep_exact_duplicates(session)
         stats["stale_annotations_purged"] = await _purge_stale_annotations(session)
+        stats["extraction_retries"] = await _retry_failed_extractions(session)
         subjects = await _full_text_entity_ids(session)
         stats["rematerialized_values"] = await rematerialize(session, subjects)
         stats["remat_subjects"] = len(subjects)

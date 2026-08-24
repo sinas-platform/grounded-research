@@ -1835,6 +1835,19 @@ def _gate_key(missing: str, correctness: list[str]) -> str:
     return ((missing or "")[:200] + "||" + " ".join(correctness)[:300]).strip()
 
 
+
+def _note_language(question: str) -> str:
+    """The note is written in the question's language, decided
+    deterministically server-side: the writer model kept keying on the
+    sources' language (a French-law question in English got a French
+    note), and prompt rules did not hold."""
+    from app.services.toc import _guess_language
+
+    names = {"en": "English", "fr": "French", "de": "German",
+             "nl": "Dutch", "es": "Spanish", "it": "Italian"}
+    return names.get(_guess_language(question or ""), "English")
+
+
 async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> None:
     """Terminal `partial`: store cause + explanation + a short client-facing
     note (one cheap phrasing call, in the question's language) over the top
@@ -1927,8 +1940,9 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
             "the analysis has read only part of them and cannot know that. "
             "Write a note (max 200 words) to "
             + get_settings().sgr_audience
-            + ", in the SAME "
-            "LANGUAGE as the question below. Structure: (1) state plainly which "
+            + ". WRITE THE NOTE IN " + _note_language(question).upper() + " — the "
+            "language of the question, regardless of the language of any "
+            "sources or findings below. Structure: (1) state plainly which "
             "part of the question could NOT be established and why (reason "
             "below, rephrased plainly — no internal jargon, no dollar amounts; if "
             "the reason mentions spend or budget, phrase it as: the analysis "

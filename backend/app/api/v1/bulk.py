@@ -108,70 +108,23 @@ async def upload_zip(file: UploadFile,
     doc_ids: list[str] = []
     unchanged = 0
     duplicates = 0
-    from app.services.toc import normalize_line_density
+    from app.services.document_registry import register_document
 
     for name in zf.namelist():
         base = Path(name).name
         if not base.endswith(".md") or base.startswith("."):
             continue
         content = zf.read(name).decode("utf-8", errors="replace")
-        content = content.replace("\x00", "").replace("\\u0000", "")
-        content = normalize_line_density(content)
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-
-        # Identity resolution, strongest first: the connector's natural key
-        # (source, external_ref) when given; else filename — the external
-        # ref of last resort. Grove is the record; no Sinas collection id
-        # is minted (24,721 dangling fabricated ids taught us that).
-        existing = None
-        if source:
-            existing = (await session.execute(
-                select(Document).where(Document.source == source,
-                                       Document.external_ref == base)
-            )).scalars().first()
-        if existing is None:
-            existing = (await session.execute(
-                select(Document).where(Document.filename == base)
-            )).scalars().first()
-        if existing is not None:
-            doc = existing
-            latest = (await session.execute(
-                select(DocumentVersion)
-                .where(DocumentVersion.document_id == doc.id)
-                .order_by(DocumentVersion.version.desc()).limit(1)
-            )).scalars().first()
-            if latest is not None and latest.content_hash == content_hash:
-                # Same identity, same bytes: the retry-amplification case.
-                # Idempotent — nothing new to store or process.
-                unchanged += 1
-                continue
-            version = (latest.version + 1) if latest else 1
+        reg = await register_document(
+            session, filename=base, content=content,
+            owner_id=caller.user_id, roles=caller.roles,
+            source=source, staged=staged)
+        if reg.outcome == "unchanged":
+            unchanged += 1
+        elif reg.outcome == "duplicate":
+            duplicates += 1
         else:
-            # No identity match — but identical content under a different
-            # name is an exact duplicate, not a new document.
-            same = (await session.execute(
-                select(Document)
-                .join(DocumentVersion,
-                      DocumentVersion.id == Document.current_version_id)
-                .where(DocumentVersion.content_hash == content_hash)
-            )).scalars().first()
-            if same is not None:
-                duplicates += 1
-                continue
-            doc = Document(filename=base,
-                           source=source or None,
-                           external_ref=base if source else None,
-                           owner_id=caller.user_id,
-                           roles=caller.roles or [], staged=staged)
-            session.add(doc)
-            await session.flush()
-            version = 1
-        dv = DocumentVersion(document_id=doc.id, version=version,
-                             content_md=content, content_hash=content_hash)
-        session.add(dv)
-        await session.flush()
-        doc.current_version_id = dv.id
-        doc_ids.append(str(doc.id))
+            doc_ids.append(str(reg.document.id))
     await session.commit()
     if not doc_ids and not unchanged and not duplicates:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "zip had no .md files")

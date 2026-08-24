@@ -21,7 +21,7 @@ ADRs live in `docs/adrs/` with the `YYYY-MM-DD-slug.md` filename pattern; see `d
 
 **Migrations are tracked.** Don't gitignore `backend/app/alembic/versions/`. Every schema change needs an Alembic revision. Numbered sequentially (currently up to 0006).
 
-**SGR depends on Sinas being reachable.** Local dev requires Sinas running on `host.docker.internal:8000` (or wherever `SINAS_URL` points). The post-upload function lives in Sinas and is installed via the package.
+**SGR depends on Sinas being reachable.** Local dev requires Sinas running on `host.docker.internal:8000` (or wherever `SINAS_URL` points) for agent invocations and auth. Documents are Grove's own record: uploads register directly with SGR (content-hash + source-identity dedup); there is no Sinas collection or post-upload function.
 
 **Authentication has two modes.** `SGR_AUTH_MODE=sinas` (default, per-user bearer tokens proxied to Sinas) and `SGR_AUTH_MODE=simplified` (single admin API key). The frontend's `/api/v1/me` endpoint reflects which.
 

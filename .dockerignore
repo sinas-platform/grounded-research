@@ -1,0 +1,10 @@
+.git
+.github
+.claude
+**/node_modules
+**/__pycache__
+**/*.pyc
+frontend/dist
+.env
+.env.*
+docs

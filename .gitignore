@@ -13,7 +13,7 @@ env/
 .mypy_cache/
 .ruff_cache/
 
-node_modules/
+node_modules
 frontend/dist/
 backend/app/static/
 *.log

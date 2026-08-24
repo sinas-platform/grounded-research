@@ -451,17 +451,22 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
                     SELECT coalesce(sum(
                       CASE
                         WHEN model ILIKE '%flash-lite%' THEN
-                          prompt_tokens * 0.05 + completion_tokens * 0.20
+                          prompt_tokens * 0.10 + completion_tokens * 0.40
                         WHEN model ILIKE '%gemini%' THEN
                           prompt_tokens * 0.30 + completion_tokens * 2.50
                         WHEN model ILIKE '%haiku%' THEN
                           (prompt_tokens - cache_read_tokens - cache_write_tokens) * 1.0
                           + cache_write_tokens * 1.25 + cache_read_tokens * 0.10
                           + completion_tokens * 5.0
+                        WHEN model ILIKE '%opus%' THEN
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 5.0
+                          + cache_write_tokens * 6.25 + cache_read_tokens * 0.50
+                          + completion_tokens * 25.0
                         ELSE
-                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 3.0
-                          + cache_write_tokens * 3.75 + cache_read_tokens * 0.30
-                          + completion_tokens * 15.0
+                          -- sonnet-5 tier (console price table, 24 Aug 2026)
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 2.0
+                          + cache_write_tokens * 2.50 + cache_read_tokens * 0.20
+                          + completion_tokens * 10.0
                       END) / 1e6, 0)
                     FROM llm_usage
                     WHERE chat_id = ANY(CAST(:cids AS uuid[]))

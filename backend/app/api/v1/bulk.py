@@ -13,6 +13,7 @@ GET  /bulk/jobs/{id} progress counts derived from the database
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import subprocess
@@ -80,6 +81,11 @@ async def create_job(payload: BulkJobIn,
 @router.post("/upload", response_model=BulkJobOut,
              status_code=status.HTTP_202_ACCEPTED)
 async def upload_zip(file: UploadFile,
+                     source: str | None = Query(
+                         default=None,
+                         description="Connector/source name; with it each "
+                                     "file's name becomes its external_ref "
+                                     "(the source's natural key)."),
                      staged: bool = Query(
                          default=False,
                          description="Hold the documents back from the live "
@@ -100,16 +106,33 @@ async def upload_zip(file: UploadFile,
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "not a zip")
     job_id = uuid.uuid4().hex[:12]
     doc_ids: list[str] = []
+    unchanged = 0
+    duplicates = 0
+    from app.services.toc import normalize_line_density
+
     for name in zf.namelist():
         base = Path(name).name
         if not base.endswith(".md") or base.startswith("."):
             continue
         content = zf.read(name).decode("utf-8", errors="replace")
         content = content.replace("\x00", "").replace("\\u0000", "")
-        cfid = f"bulk:{job_id}:{base}"
-        existing = (await session.execute(
-            select(Document).where(Document.filename == base)
-        )).scalars().first()
+        content = normalize_line_density(content)
+        content_hash = hashlib.sha256(content.encode()).hexdigest()
+
+        # Identity resolution, strongest first: the connector's natural key
+        # (source, external_ref) when given; else filename — the external
+        # ref of last resort. Grove is the record; no Sinas collection id
+        # is minted (24,721 dangling fabricated ids taught us that).
+        existing = None
+        if source:
+            existing = (await session.execute(
+                select(Document).where(Document.source == source,
+                                       Document.external_ref == base)
+            )).scalars().first()
+        if existing is None:
+            existing = (await session.execute(
+                select(Document).where(Document.filename == base)
+            )).scalars().first()
         if existing is not None:
             doc = existing
             latest = (await session.execute(
@@ -117,24 +140,40 @@ async def upload_zip(file: UploadFile,
                 .where(DocumentVersion.document_id == doc.id)
                 .order_by(DocumentVersion.version.desc()).limit(1)
             )).scalars().first()
+            if latest is not None and latest.content_hash == content_hash:
+                # Same identity, same bytes: the retry-amplification case.
+                # Idempotent — nothing new to store or process.
+                unchanged += 1
+                continue
             version = (latest.version + 1) if latest else 1
         else:
-            doc = Document(filename=base, collection_file_id=cfid,
+            # No identity match — but identical content under a different
+            # name is an exact duplicate, not a new document.
+            same = (await session.execute(
+                select(Document)
+                .join(DocumentVersion,
+                      DocumentVersion.id == Document.current_version_id)
+                .where(DocumentVersion.content_hash == content_hash)
+            )).scalars().first()
+            if same is not None:
+                duplicates += 1
+                continue
+            doc = Document(filename=base,
+                           source=source or None,
+                           external_ref=base if source else None,
                            owner_id=caller.user_id,
                            roles=caller.roles or [], staged=staged)
             session.add(doc)
             await session.flush()
             version = 1
-        from app.services.toc import normalize_line_density
-
         dv = DocumentVersion(document_id=doc.id, version=version,
-                             content_md=normalize_line_density(content))
+                             content_md=content, content_hash=content_hash)
         session.add(dv)
         await session.flush()
         doc.current_version_id = dv.id
         doc_ids.append(str(doc.id))
     await session.commit()
-    if not doc_ids:
+    if not doc_ids and not unchanged and not duplicates:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "zip had no .md files")
     _spawn(job_id, doc_ids, "extract,resolve,relationships")
     return BulkJobOut(job_id=job_id, document_count=len(doc_ids),

@@ -76,6 +76,58 @@ async def _full_text_entity_ids(session) -> list[uuid.UUID]:
     return [r[0] for r in rows]
 
 
+async def _backfill_content_hashes(session) -> int:
+    """sha256 for versions that predate the identity columns."""
+    rows = (await session.execute(text("""
+        SELECT id, content_md FROM document_version
+        WHERE content_hash IS NULL AND content_md IS NOT NULL
+        LIMIT 50000"""))).all()
+    import hashlib
+
+    for vid, content in rows:
+        await session.execute(text(
+            "UPDATE document_version SET content_hash = :h WHERE id = :i"),
+            {"h": hashlib.sha256(content.encode()).hexdigest(), "i": vid})
+    await session.commit()
+    return len(rows)
+
+
+async def _sweep_exact_duplicates(session) -> int:
+    """Documents whose current content is byte-identical to an earlier
+    document's: mark duplicate_of and stage them out of retrieval. Nothing
+    is deleted — published evidence keeps its pinned versions, and the
+    marking is reversible."""
+    rows = (await session.execute(text("""
+        WITH cur AS (
+          SELECT d.id, d.created_at, dv.content_hash
+          FROM document d JOIN document_version dv ON dv.id = d.current_version_id
+          WHERE dv.content_hash IS NOT NULL AND d.duplicate_of_id IS NULL
+        )
+        SELECT a.id, b.id
+        FROM cur a JOIN cur b ON a.content_hash = b.content_hash
+          AND (b.created_at < a.created_at
+               OR (b.created_at = a.created_at AND b.id < a.id))"""))).all()
+    canonical: dict = {}
+    for dup_id, earlier_id in rows:
+        canonical.setdefault(dup_id, earlier_id)
+    for dup_id, earlier_id in canonical.items():
+        await session.execute(text("""
+            UPDATE document SET duplicate_of_id = :c, staged = true
+            WHERE id = :d"""), {"c": earlier_id, "d": dup_id})
+    await session.commit()
+    return len(canonical)
+
+
+async def _purge_stale_annotations(session) -> int:
+    """Annotation values whose subject entity was merged away — inert
+    (nothing reads a merged entity), but debt that accumulates."""
+    res = await session.execute(text("""
+        DELETE FROM annotation_value av USING entity e
+        WHERE e.id = av.subject_id AND e.merged_into_id IS NOT NULL"""))
+    await session.commit()
+    return res.rowcount or 0
+
+
 async def run_maintenance() -> dict[str, Any]:
     """One idempotent upkeep pass. Order matters: resolutions and minting
     change the graph that rematerialization then walks."""
@@ -90,6 +142,9 @@ async def run_maintenance() -> dict[str, Any]:
         stats["full_text_backfill"] = await backfill_full_text_entities(
             session, key_index=ki)
         stats["walls_normalized"] = await _normalize_new_walls(session)
+        stats["hashes_backfilled"] = await _backfill_content_hashes(session)
+        stats["duplicates_marked"] = await _sweep_exact_duplicates(session)
+        stats["stale_annotations_purged"] = await _purge_stale_annotations(session)
         subjects = await _full_text_entity_ids(session)
         stats["rematerialized_values"] = await rematerialize(session, subjects)
         stats["remat_subjects"] = len(subjects)

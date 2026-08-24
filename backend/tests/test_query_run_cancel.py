@@ -152,3 +152,30 @@ async def test_marking_cancelled_records_the_fact_and_clears_no_error(
     assert stage == "cancel"
     assert detail["requested_by"] == "u-1"
     assert detail["message"]
+
+
+def test_teardown_finds_nothing_on_a_retrieval_first_run() -> None:
+    """Pin the current limitation rather than leaving it to be rediscovered.
+
+    `_chat_ids_for_cleanup` reads the retired chat-based pipeline's state, so
+    on a retrieval-first run it finds none of the chats actually opened —
+    measured at 0 of 45-94 across the six most recent runs. Cancellation's
+    saving comes from the checkpoints, not from here.
+
+    When a real Sinas abort lands, this test should start failing. That is the
+    intended signal, not a regression.
+    """
+    retrieval_first_telemetry = {
+        "retrieval": {"completed": "2026-08-20T10:00:00Z", "documents": 40},
+        "draft": {"completed": "2026-08-20T10:03:00Z"},
+    }
+
+    assert qr._chat_ids_for_cleanup(retrieval_first_telemetry, None) == []
+
+
+def test_teardown_still_collects_the_retired_pipelines_chats() -> None:
+    """Historical runs must stay collectable — old rows still carry chat ids."""
+    legacy = {"discovery": {"chat_id": "chat-1"}}
+    searches = {"sub-1": {"chat_id": "chat-2"}, "sub-2": {"chat_id": "chat-1"}}
+
+    assert qr._chat_ids_for_cleanup(legacy, searches) == ["chat-1", "chat-2"]

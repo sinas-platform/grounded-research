@@ -265,10 +265,22 @@ async def _tele(run_id: uuid.UUID, stage: str, **detail: Any) -> None:
 
 
 def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list[str]:
-    """Every sinas chat a run has opened, read from the state the stages
-    already record: telemetry entries carrying a chat_id (discovery, plus
-    stages of the retired chat-based pipeline on old runs) and those runs'
-    per-sub-query search chats. Order-stable, deduped."""
+    """Chats found in the state the retired chat-based pipeline recorded:
+    telemetry entries carrying a chat_id (discovery and its stages) and those
+    runs' per-sub-query search chats. Order-stable, deduped.
+
+    On a retrieval-first run this returns nothing, and that is the current
+    truth rather than an oversight: measured across the six most recent runs,
+    45-94 chats were opened and this found 0 of them every time. The
+    authoritative list is `RunLLMCall`, which `_run_cost_usd` already joins.
+
+    Do NOT "fix" this by pointing it at RunLLMCall on its own. Archiving every
+    chat a run opened buys nothing — see `_teardown_chats` for why archiving
+    stops no work — while hiding the paper trail we want kept in Sinas. Wire
+    the real abort here when it lands, and scope it to what can still cost
+    something: the detached agents, not the synchronous invokes that finished
+    before the call returned.
+    """
     ids: list[str] = []
     for entry in (telemetry or {}).values():
         if isinstance(entry, dict) and isinstance(entry.get("chat_id"), str):
@@ -280,8 +292,23 @@ def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list
 
 
 async def _teardown_chats(sinas: _Sinas, chat_ids: list[str]) -> None:
-    """Delete each chat a failed run opened, so no agent keeps working for
-    nobody. Best-effort throughout: one failed delete never blocks the rest."""
+    """Archive each chat named, best-effort: one failure never blocks the rest.
+
+    It does NOT stop anything. Sinas's `DELETE /chats/{id}` is a soft-delete —
+    it sets `archived = True` and returns; messages and llm_usage rows are
+    untouched, and no generation is interrupted. An earlier version of this
+    docstring claimed it stopped agents working "for nobody"; it never did.
+
+    Two consequences worth keeping in view:
+      * Cancellation saves money only through the checkpoints in the pipeline
+        that stop the NEXT call being made. Nothing here contributes to that.
+      * The one genuine fire-and-forget — the detached relationship-proposal
+        agent — cannot be stopped by any call we currently have. A real abort
+        is being added on the Sinas side; this is the seam to wire it into.
+
+    Note also that `llm_usage` deliberately carries no foreign keys, so
+    archiving never threatens the cost ledger. The paper trail survives.
+    """
     for chat_id in chat_ids:
         try:
             await sinas.chat_delete(chat_id)
@@ -2049,7 +2076,7 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     # Between each step, not just at the stage boundary: these are the four
     # billable calls of the stage, and a checkpoint is only worth having
     # where it can still stop the next one from being made.
-    plan = await rf.plan_question(question, effort=effort)
+    plan = await rf.plan_question(question, effort=effort, run_id=run_id)
     await _check_cancel(run_id)
     ranked = await rf.retrieve_and_rank(plan)
     await _check_cancel(run_id)
@@ -2089,8 +2116,11 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
     except CancelledOutcome as c:
         _log.info("query run %s cancelled", run_id)
         await _mark_cancelled(run_id, c)
-        # Same teardown as partial and failed: a cancelled run must not leave
-        # agents working for nobody, which is most of the point of cancelling.
+        # Same call as partial and failed, and worth being clear about what it
+        # buys: nothing, today. Cancellation's saving is entirely the calls the
+        # checkpoints stopped from being made. This archives whatever the
+        # retired pipeline recorded — currently nothing on a retrieval-first
+        # run — and is where a real Sinas abort gets wired when it exists.
         try:
             async with AsyncSessionLocal() as session:
                 run = await session.get(QueryRun, run_id)

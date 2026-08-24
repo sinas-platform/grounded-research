@@ -179,10 +179,15 @@ async def _resolve_names(names: list[str]) -> list[dict]:
     return list(seen.values())
 
 
-async def plan_question(question: str, effort: str = "medium") -> dict:
+async def plan_question(
+    question: str, effort: str = "medium", run_id: uuid.UUID | None = None
+) -> dict:
     from app.services.query_runner import _Sinas
 
-    sinas = _Sinas()
+    # Bound to the run so the two planning invokes below land in RunLLMCall.
+    # Unbound, `record_llm_call` drops them, and their spend is invisible to
+    # both `_run_cost_usd` and the cost cap that reads it.
+    sinas = _Sinas(run_id=run_id)
     corpus_map = await build_corpus_map()
     r1 = _parse(await sinas.invoke(PLAN_AGENT, _ROUND1_PROMPT.format(
         corpus_map=corpus_map, question=question, domain=_domain_prefix())))

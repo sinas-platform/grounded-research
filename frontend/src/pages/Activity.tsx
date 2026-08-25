@@ -140,7 +140,7 @@ export default function ActivityPage() {
           icon={<GitMerge size={18} />}
           title="Relationship proposals"
           subtitle={`${(relationshipProposals.data ?? []).length} awaiting review`}
-          to="/review/proposals"
+          to="/review/entities#relationships"
         >
           {(relationshipProposals.data ?? []).length === 0 ? (
             <Empty>No pending relationship proposals.</Empty>
@@ -176,11 +176,11 @@ function DashCard({
   return (
     <Link
       to={to}
-      className="block p-5 rounded-lg border border-stone-200 bg-white hover:border-forest-500 hover:shadow-sm transition"
+      className="block p-5 rounded-lg border border-stone-200 bg-white hover:border-primary-500 hover:shadow-sm transition"
     >
       <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-2 text-stone-700">
-          <span className="text-forest-600">{icon}</span>
+          <span className="text-primary-600">{icon}</span>
           <span className="font-semibold">{title}</span>
         </div>
         <span className="text-xs text-stone-500">{subtitle}</span>
@@ -193,7 +193,7 @@ function DashCard({
 function SinasBanner({ status }: { status: SinasStatus }) {
   if (status.installed && !status.drift) {
     return (
-      <div className="mb-6 flex items-center gap-2 px-4 py-2 rounded-md border border-forest-100 bg-forest-50 text-sm text-forest-800">
+      <div className="mb-6 flex items-center gap-2 px-4 py-2 rounded-md border border-primary-100 bg-primary-50 text-sm text-primary-800">
         <CheckCircle2 size={16} />
         <span>
           Sinas integration healthy — sinas-grounded-research{' '}
@@ -285,7 +285,7 @@ function StatusDot({ status }: { status: string }) {
     running: 'bg-blue-400',
     scanning: 'bg-blue-400',
     consolidating: 'bg-purple-400',
-    completed: 'bg-forest-500',
+    completed: 'bg-primary-500',
     failed: 'bg-red-500',
     cancelled: 'bg-stone-400',
   };

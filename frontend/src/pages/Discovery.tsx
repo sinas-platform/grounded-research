@@ -166,7 +166,7 @@ export default function DiscoveryPage() {
               onClick={() => setTab(k)}
               className={`px-4 py-2 text-sm border-b-2 -mb-px ${
                 tab === k
-                  ? 'border-forest-600 text-forest-700 font-medium'
+                  ? 'border-primary-600 text-primary-700 font-medium'
                   : 'border-transparent text-stone-600 hover:text-stone-900'
               }`}
             >
@@ -324,7 +324,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
   });
 
   return (
-    <div className="mb-6 p-5 border border-forest-500 bg-forest-50 rounded space-y-6">
+    <div className="mb-6 p-5 border border-primary-500 bg-primary-50 rounded space-y-6">
       {/* ─── Section 1: what are you discovering ─── */}
       <section>
         <div className="text-xs font-semibold uppercase tracking-wider text-stone-500 mb-2">
@@ -336,7 +336,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
               key={k}
               className={`flex items-start gap-2.5 p-2 rounded border cursor-pointer transition-colors ${
                 kind === k
-                  ? 'border-forest-500 bg-white'
+                  ? 'border-primary-500 bg-white'
                   : 'border-transparent hover:bg-white/60'
               }`}
             >
@@ -364,7 +364,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
         </div>
 
         {kind === 'document_class_property' && (
-          <div className="mt-3 pl-4 border-l-2 border-forest-300">
+          <div className="mt-3 pl-4 border-l-2 border-primary-300">
             <Field
               label="Parent document class"
               hint="Properties belong to a class — pick which one"
@@ -397,7 +397,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
         <div className="space-y-1.5">
           <label
             className={`flex items-start gap-2.5 p-2 rounded border cursor-pointer transition-colors ${
-              scope === 'all' ? 'border-forest-500 bg-white' : 'border-transparent hover:bg-white/60'
+              scope === 'all' ? 'border-primary-500 bg-white' : 'border-transparent hover:bg-white/60'
             }`}
           >
             <input
@@ -420,7 +420,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
           </label>
           <label
             className={`flex items-start gap-2.5 p-2 rounded border cursor-pointer transition-colors ${
-              scope === 'staged_only' ? 'border-forest-500 bg-white' : 'border-transparent hover:bg-white/60'
+              scope === 'staged_only' ? 'border-primary-500 bg-white' : 'border-transparent hover:bg-white/60'
             }`}
           >
             <input
@@ -443,7 +443,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
           </label>
           <label
             className={`flex items-start gap-2.5 p-2 rounded border cursor-pointer transition-colors ${
-              scope === 'custom' ? 'border-forest-500 bg-white' : 'border-transparent hover:bg-white/60'
+              scope === 'custom' ? 'border-primary-500 bg-white' : 'border-transparent hover:bg-white/60'
             }`}
           >
             <input
@@ -482,7 +482,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
                       }}
                       className={`px-2 py-1 rounded border text-xs ${
                         classFilter.has(c.id)
-                          ? 'border-forest-500 bg-forest-50 text-forest-700'
+                          ? 'border-primary-500 bg-primary-50 text-primary-700'
                           : 'border-stone-300 text-stone-700 hover:bg-stone-100'
                       }`}
                     >
@@ -625,7 +625,7 @@ function NewRunForm({ onClose }: { onClose: () => void }) {
 
       {/* ─── Results & preview ─── */}
       {lastResult && (
-        <div className="text-sm text-stone-700 bg-white border border-forest-300 rounded px-3 py-2">
+        <div className="text-sm text-stone-700 bg-white border border-primary-300 rounded px-3 py-2">
           {lastResult.fm_proposals != null && (
             <div>
               Front-matter scan: <b>{lastResult.fm_proposals}</b> proposal(s) from{' '}
@@ -680,7 +680,7 @@ function RunsList() {
             pending: 'bg-stone-200 text-stone-600',
             scanning: 'bg-blue-100 text-blue-700',
             consolidating: 'bg-purple-100 text-purple-700',
-            completed: 'bg-forest-100 text-forest-700',
+            completed: 'bg-primary-100 text-primary-700',
             failed: 'bg-red-100 text-red-700',
           }[r.status] ?? 'bg-stone-200 text-stone-600';
         return (
@@ -695,7 +695,7 @@ function RunsList() {
             </div>
             <div className="w-full bg-stone-200 rounded h-1.5 mt-2 overflow-hidden">
               <div
-                className={`h-full ${r.failed_docs > 0 ? 'bg-amber-500' : 'bg-forest-500'}`}
+                className={`h-full ${r.failed_docs > 0 ? 'bg-amber-500' : 'bg-primary-500'}`}
                 style={{ width: `${pct}%` }}
               />
             </div>

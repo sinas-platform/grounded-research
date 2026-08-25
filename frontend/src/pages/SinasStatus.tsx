@@ -66,7 +66,7 @@ export default function SinasStatusPage() {
             label="Installed"
             value={
               data.installed ? (
-                <span className="inline-flex items-center gap-2 px-2 py-0.5 rounded bg-forest-100 text-forest-700 text-xs">
+                <span className="inline-flex items-center gap-2 px-2 py-0.5 rounded bg-primary-100 text-primary-700 text-xs">
                   installed
                 </span>
               ) : (

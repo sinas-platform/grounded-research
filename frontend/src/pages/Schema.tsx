@@ -42,7 +42,7 @@ export default function SchemaPage() {
             onClick={() => setTab(t.value)}
             className={`px-4 py-2 text-sm border-b-2 -mb-px transition-colors ${
               tab === t.value
-                ? 'border-forest-600 text-forest-700 font-medium'
+                ? 'border-primary-600 text-primary-700 font-medium'
                 : 'border-transparent text-stone-600 hover:text-stone-900'
             }`}
           >

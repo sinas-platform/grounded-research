@@ -6,7 +6,6 @@ import LoginPage from './pages/Login';
 // Top-level pages
 import DocumentsPage from './pages/Documents';
 import DocumentDetailPage from './pages/DocumentDetail';
-import AnswersPage from './pages/Answers';
 import RunsPage from './pages/Runs';
 import SchemaPage from './pages/Schema';
 import ActivityPage from './pages/Activity';
@@ -19,7 +18,6 @@ import RelationshipsPage from './pages/Relationships';
 import DossierClassesPage from './pages/DossierClasses';
 import PlaybooksPage from './pages/Playbooks';
 import PackagesPage from './pages/Packages';
-import ProposalsPage from './pages/Proposals';
 import EntityReviewPage from './pages/EntityReview';
 import IngestionRunsPage from './pages/IngestionRuns';
 import DiscoveryPage from './pages/Discovery';
@@ -42,12 +40,11 @@ export default function App() {
   return (
     <Routes>
       <Route path="/" element={<Layout />}>
-        <Route index element={<Navigate to="/documents" replace />} />
+        <Route index element={<Navigate to="/runs" replace />} />
 
         {/* Sidebar pages */}
         <Route path="documents" element={<DocumentsPage />} />
         <Route path="documents/:id" element={<DocumentDetailPage />} />
-        <Route path="answers" element={<AnswersPage />} />
         <Route path="runs" element={<RunsPage />} />
         <Route path="schema" element={<SchemaPage />} />
         <Route path="activity" element={<ActivityPage />} />
@@ -60,7 +57,6 @@ export default function App() {
         <Route path="config/dossier-classes" element={<DossierClassesPage />} />
         <Route path="config/playbooks" element={<PlaybooksPage />} />
         <Route path="config/packages" element={<PackagesPage />} />
-        <Route path="review/proposals" element={<ProposalsPage />} />
         <Route path="review/entities" element={<EntityReviewPage />} />
         <Route path="ingestion/runs" element={<IngestionRunsPage />} />
         <Route path="discovery" element={<DiscoveryPage />} />

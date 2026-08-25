@@ -1,14 +1,32 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { Activity, CheckSquare, FileText, LucideIcon, MessageSquare, Network, Play, Sparkles } from 'lucide-react';
+import { Activity, CheckSquare, FileText, LucideIcon, Network, Play, Sparkles } from 'lucide-react';
 import { useAuth } from '@/lib/auth';
+
+// The two orange slices from the Sinas console logo (wordmark dropped —
+// the product name is written next to it in text).
+function SinasMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="75 125 415 325" fill="none" className={className} aria-hidden>
+      <path
+        d="M121.163 240.205C171.757 189.611 251.576 186.054 306.279 229.533L110.492 425.32C67.0129 370.617 70.5696 290.799 121.163 240.205Z"
+        stroke="#E97203"
+        strokeWidth="32"
+      />
+      <path
+        d="M444.837 344.179C495.43 293.585 498.988 213.767 455.508 159.064L259.722 354.85C314.425 398.329 394.243 394.773 444.837 344.179Z"
+        stroke="#E97203"
+        strokeWidth="32"
+      />
+    </svg>
+  );
+}
 
 // Daily work first; the two setup surfaces sit below a divider. Schema and
 // Discovery define the corpus once (and when a new source arrives) — they are
 // not places anyone should be every day.
 const links = [
-  { to: '/documents', label: 'Documents', icon: FileText },
-  { to: '/answers', label: 'Answers', icon: MessageSquare },
   { to: '/runs', label: 'Runs', icon: Play },
+  { to: '/documents', label: 'Documents', icon: FileText },
   { to: '/review/entities', label: 'Entity review', icon: CheckSquare },
   { to: '/activity', label: 'Activity', icon: Activity },
 ];
@@ -31,7 +49,7 @@ function NavItem({
       className={({ isActive }) =>
         `flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors ${
           isActive
-            ? 'bg-forest-50 text-forest-700 font-medium'
+            ? 'bg-primary-50 text-primary-700 font-medium'
             : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
         }`
       }
@@ -45,13 +63,16 @@ function NavItem({
 export function Layout() {
   const { me, signOut } = useAuth();
   return (
-    <div className="min-h-screen flex bg-stone-50">
+    <div className="min-h-screen flex bg-page">
       <aside className="w-60 border-r border-stone-200 bg-white flex flex-col">
         <div className="px-5 pt-6 pb-8">
-          <div className="text-base font-semibold tracking-tight text-forest-700">
-            Sinas Grounded Research
+          <div className="flex items-center gap-2.5">
+            <SinasMark className="h-6 w-7 shrink-0" />
+            <div className="text-base font-semibold tracking-tight text-stone-900">
+              Grounded Research
+            </div>
           </div>
-          <div className="text-[11px] text-stone-400 uppercase tracking-wider mt-0.5">
+          <div className="text-[11px] text-stone-400 uppercase tracking-wider mt-1 pl-[38px]">
             alpha
           </div>
         </div>

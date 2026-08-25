@@ -131,7 +131,7 @@ export default function DocumentDetailPage() {
         description={
           docClass ? (
             <span>
-              Class: <span className="font-mono text-forest-700">{docClass.name}</span>
+              Class: <span className="font-mono text-primary-700">{docClass.name}</span>
               {doc.data?.classification_confidence != null && (
                 <span className="text-stone-400">
                   {' '}· conf {doc.data.classification_confidence.toFixed(2)}
@@ -171,7 +171,7 @@ export default function DocumentDetailPage() {
               onClick={() => setTab(t.value)}
               className={`px-4 py-2 text-sm border-b-2 -mb-px ${
                 tab === t.value
-                  ? 'border-forest-600 text-forest-700 font-medium'
+                  ? 'border-primary-600 text-primary-700 font-medium'
                   : 'border-transparent text-stone-600 hover:text-stone-900'
               }`}
             >
@@ -474,7 +474,7 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
   };
 
   return (
-    <div className="mb-6 p-4 border border-forest-500 bg-forest-50 rounded">
+    <div className="mb-6 p-4 border border-primary-500 bg-primary-50 rounded">
       <div className="text-sm font-medium text-stone-900 mb-2">
         Reprocess this document
       </div>
@@ -497,7 +497,7 @@ function ReprocessPanel({ docId, onClose }: { docId: string; onClose: () => void
       </div>
       <ErrorBanner message={error} />
       {runId ? (
-        <div className="text-sm text-forest-700 mt-2">
+        <div className="text-sm text-primary-700 mt-2">
           Run started — track in{' '}
           <Link to="/ingestion/runs" className="underline">
             Ingestion runs

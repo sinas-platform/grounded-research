@@ -109,7 +109,7 @@ export default function DocumentsPage() {
         actions={
           <button
             onClick={() => fileRef.current?.click()}
-            className="px-3 py-1.5 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"
+            className="px-3 py-1.5 rounded bg-primary-600 text-white text-sm hover:bg-primary-700"
           >
             Upload
           </button>
@@ -136,7 +136,7 @@ export default function DocumentsPage() {
         }}
         className={`mb-3 px-6 py-10 text-center border-2 border-dashed rounded transition-colors ${
           dragOver
-            ? 'border-forest-500 bg-forest-50'
+            ? 'border-primary-500 bg-primary-50'
             : 'border-stone-300 bg-white text-stone-500'
         }`}
       >
@@ -177,7 +177,7 @@ export default function DocumentsPage() {
               <button
                 onClick={() => promoteStaged.mutate()}
                 disabled={promoteStaged.isPending}
-                className="px-3 py-1 text-xs rounded bg-forest-600 text-white hover:bg-forest-700 disabled:opacity-50"
+                className="px-3 py-1 text-xs rounded bg-primary-600 text-white hover:bg-primary-700 disabled:opacity-50"
               >
                 {promoteStaged.isPending ? 'Starting…' : 'Promote staged → run pipeline'}
               </button>
@@ -187,7 +187,7 @@ export default function DocumentsPage() {
       )}
 
       {lastUploaded && (
-        <div className="mb-4 text-sm text-forest-700 bg-forest-50 border border-forest-100 rounded px-3 py-2">
+        <div className="mb-4 text-sm text-primary-700 bg-primary-50 border border-primary-100 rounded px-3 py-2">
           Uploaded <span className="font-mono">{lastUploaded}</span>. Ingestion is running in the
           background — refresh in a few seconds to see it.
         </div>
@@ -203,7 +203,7 @@ export default function DocumentsPage() {
           <Link
             key={d.id}
             to={`/documents/${d.id}`}
-            className="block p-4 border border-stone-200 rounded bg-white hover:border-forest-500"
+            className="block p-4 border border-stone-200 rounded bg-white hover:border-primary-500"
           >
             <div className="flex items-baseline justify-between">
               <div className="font-medium flex items-center gap-2">

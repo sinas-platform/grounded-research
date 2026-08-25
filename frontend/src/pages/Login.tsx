@@ -87,7 +87,7 @@ export default function LoginPage() {
   return (
     <div className="min-h-screen flex items-center justify-center bg-stone-50 px-4">
       <div className="w-full max-w-md p-8 bg-white border border-stone-200 rounded">
-        <div className="text-xl font-semibold text-forest-700 mb-1">Sinas Grounded Research</div>
+        <div className="text-xl font-semibold text-primary-700 mb-1">Sinas Grounded Research</div>
         <div className="text-sm text-stone-500 mb-6">
           {step === 'credentials' ? credentialsHelp : `We sent a code to ${email}.`}
         </div>

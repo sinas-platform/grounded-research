@@ -56,7 +56,11 @@ interface RelationshipProposal {
 }
 
 export default function EntityReviewPage() {
-  const [tab, setTab] = useState<Tab>('proposals');
+  // Deep-linkable: /review/entities#relationships opens that tab directly.
+  const [tab, setTab] = useState<Tab>(() => {
+    const h = window.location.hash.slice(1);
+    return h === 'relationships' || h === 'unresolved' ? h : 'proposals';
+  });
   return (
     <div>
       <PageHeader
@@ -70,7 +74,7 @@ export default function EntityReviewPage() {
             onClick={() => setTab(t)}
             className={`px-4 py-2 text-sm border-b-2 -mb-px transition-colors capitalize ${
               tab === t
-                ? 'border-forest-600 text-forest-700 font-medium'
+                ? 'border-primary-600 text-primary-700 font-medium'
                 : 'border-transparent text-stone-600 hover:text-stone-900'
             }`}
           >
@@ -142,7 +146,7 @@ function ProposalsTab() {
             <div className="flex gap-2">
               <button
                 onClick={() => decide.mutate({ id: p.id, approve: true })}
-                className="px-3 py-1 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"
+                className="px-3 py-1 rounded bg-primary-600 text-white text-sm hover:bg-primary-700"
               >
                 Approve
               </button>
@@ -214,7 +218,7 @@ function RelationshipsTab() {
             <div className="flex gap-2 shrink-0">
               <button
                 onClick={() => decide.mutate({ id: p.id, approve: true })}
-                className="px-3 py-1 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"
+                className="px-3 py-1 rounded bg-primary-600 text-white text-sm hover:bg-primary-700"
               >
                 Approve
               </button>
@@ -331,7 +335,7 @@ function UnresolvedRow({
             onClick={() => {
               if (confirm(`Create new "${mention.mention_text}" in ${typeName}?`)) onPromote();
             }}
-            className="px-3 py-1 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"
+            className="px-3 py-1 rounded bg-primary-600 text-white text-sm hover:bg-primary-700"
           >
             Promote new
           </button>

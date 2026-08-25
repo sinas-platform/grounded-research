@@ -151,7 +151,7 @@ export default function PackagesPage({ embedded = false }: { embedded?: boolean 
           <button
             onClick={() => doImport.mutate()}
             disabled={!yamlText.trim() || doImport.isPending}
-            className="px-3 py-1.5 rounded bg-forest-600 text-white text-sm hover:bg-forest-700 disabled:opacity-50"
+            className="px-3 py-1.5 rounded bg-primary-600 text-white text-sm hover:bg-primary-700 disabled:opacity-50"
           >
             {doImport.isPending ? 'Importing…' : 'Import'}
           </button>

@@ -200,7 +200,7 @@ function NewRunForm({
                 onClick={() => toggleClass(c.id)}
                 className={`px-2 py-1 rounded border text-xs ${
                   classIds.has(c.id)
-                    ? 'border-forest-500 bg-forest-50 text-forest-700'
+                    ? 'border-primary-500 bg-primary-50 text-primary-700'
                     : 'border-stone-300 text-stone-700 hover:bg-stone-100'
                 }`}
               >
@@ -255,7 +255,7 @@ function RunRow({ run }: { run: Run }) {
     {
       pending: 'bg-stone-200 text-stone-600',
       running: 'bg-blue-100 text-blue-700',
-      completed: 'bg-forest-100 text-forest-700',
+      completed: 'bg-primary-100 text-primary-700',
       failed: 'bg-red-100 text-red-700',
       cancelled: 'bg-stone-200 text-stone-500',
     }[run.status] ?? 'bg-stone-200 text-stone-600';
@@ -276,7 +276,7 @@ function RunRow({ run }: { run: Run }) {
       </div>
       <div className="w-full bg-stone-200 rounded h-2 overflow-hidden">
         <div
-          className={`h-full ${run.failed_units > 0 ? 'bg-amber-500' : 'bg-forest-500'}`}
+          className={`h-full ${run.failed_units > 0 ? 'bg-amber-500' : 'bg-primary-500'}`}
           style={{ width: `${pct}%` }}
         />
       </div>

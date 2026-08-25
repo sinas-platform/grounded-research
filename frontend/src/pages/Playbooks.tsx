@@ -50,7 +50,7 @@ export default function PlaybooksPage({ embedded = false }: { embedded?: boolean
         setSelected(null);
         setCreating(true);
       }}
-      className="px-3 py-1.5 rounded bg-forest-600 text-white text-sm hover:bg-forest-700"
+      className="px-3 py-1.5 rounded bg-primary-600 text-white text-sm hover:bg-primary-700"
     >
       New playbook
     </button>
@@ -73,7 +73,7 @@ export default function PlaybooksPage({ embedded = false }: { embedded?: boolean
             onClick={() => setKind(k.value)}
             className={`px-3 py-1.5 rounded text-sm ${
               kind === k.value
-                ? 'bg-forest-100 text-forest-700 font-medium'
+                ? 'bg-primary-100 text-primary-700 font-medium'
                 : 'text-stone-700 hover:bg-stone-100'
             }`}
           >
@@ -93,11 +93,11 @@ export default function PlaybooksPage({ embedded = false }: { embedded?: boolean
               }}
               className={`block w-full text-left p-3 border rounded ${
                 selected === p.name
-                  ? 'border-forest-500 bg-forest-50'
+                  ? 'border-primary-500 bg-primary-50'
                   : 'border-stone-200 bg-white hover:border-stone-300'
               }`}
             >
-              <div className="font-mono text-sm text-forest-700">{p.name}</div>
+              <div className="font-mono text-sm text-primary-700">{p.name}</div>
               {p.description && (
                 <div className="text-xs text-stone-500 mt-1 line-clamp-2">{p.description}</div>
               )}
@@ -218,7 +218,7 @@ function PlaybookEditor({
         <button
           onClick={() => save.mutate()}
           disabled={save.isPending || !name.trim() || !description.trim()}
-          className="px-3 py-1.5 rounded bg-forest-600 text-white text-sm hover:bg-forest-700 disabled:opacity-50"
+          className="px-3 py-1.5 rounded bg-primary-600 text-white text-sm hover:bg-primary-700 disabled:opacity-50"
         >
           {save.isPending ? 'Saving…' : isNew ? 'Create' : 'Save'}
         </button>

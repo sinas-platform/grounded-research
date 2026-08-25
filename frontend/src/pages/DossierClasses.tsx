@@ -82,7 +82,7 @@ export default function DossierClassesPage({ embedded = false }: { embedded?: bo
               }}
               className={`block w-full text-left p-3 border rounded ${
                 selectedId === dc.id
-                  ? 'border-forest-500 bg-forest-50'
+                  ? 'border-primary-500 bg-primary-50'
                   : 'border-stone-200 bg-white hover:border-stone-300'
               }`}
             >

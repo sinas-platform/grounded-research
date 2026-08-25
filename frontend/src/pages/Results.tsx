@@ -30,7 +30,7 @@ export default function ResultsPage() {
               <div
                 className={`text-xs px-2 py-0.5 rounded ${
                   r.status === 'published'
-                    ? 'bg-forest-100 text-forest-700'
+                    ? 'bg-primary-100 text-primary-700'
                     : 'bg-stone-200 text-stone-600'
                 }`}
               >

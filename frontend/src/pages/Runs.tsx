@@ -354,15 +354,19 @@ export default function RunsPage() {
   const [inspected, setInspected] = useState<string | null>(() => hashParam('node'));
   const [previewDocId, setPreviewDocId] = useState<string | null>(null);
   const [question, setQuestion] = useState('');
-  const [mode, setMode] = useState<'retrieval' | 'full'>('retrieval');
+  const [mode, setMode] = useState<'retrieval' | 'full'>('full');
   const [effort, setEffort] = useState<'low' | 'medium' | 'high'>('medium');
   const [replayT, setReplayT] = useState<number | null>(null); // 0..1 while replaying
+  const [listLimit, setListLimit] = useState(25);
 
   const runs = useQuery({
-    queryKey: ['query-runs'],
-    queryFn: () => api<QueryRun[]>('/query-runs?limit=25'),
+    queryKey: ['query-runs', listLimit],
+    queryFn: () => api<QueryRun[]>(`/query-runs?limit=${listLimit}`),
     refetchInterval: 5000,
+    placeholderData: (prev) => prev, // keep the list steady while a longer page loads
   });
+  // The list is full when the server returned as many rows as asked for.
+  const listMaybeTruncated = (runs.data?.length ?? 0) >= listLimit;
 
   const runId = selectedId ?? runs.data?.[0]?.id ?? null;
 
@@ -489,7 +493,7 @@ export default function RunsPage() {
           onChange={(e) => setQuestion(e.target.value)}
           onKeyDown={(e) => { if (e.key === 'Enter' && question.trim().length >= 8) ask.mutate(); }}
           placeholder="Ask a research question…"
-          className="flex-1 border border-stone-300 rounded-md px-3.5 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-forest-100 focus:border-forest-500"
+          className="flex-1 border border-stone-300 rounded-md px-3.5 py-2 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-primary-100 focus:border-primary-500"
         />
         <select value={mode} onChange={(e) => setMode(e.target.value as any)}
           className="border border-stone-300 rounded-md px-2 py-2 text-sm bg-white text-stone-700">
@@ -505,7 +509,7 @@ export default function RunsPage() {
         <button
           onClick={() => ask.mutate()}
           disabled={question.trim().length < 8 || ask.isPending}
-          className="bg-forest-600 hover:bg-forest-700 disabled:opacity-50 text-white rounded-md px-5 py-2 text-sm font-medium"
+          className="bg-primary-600 hover:bg-primary-700 disabled:opacity-50 text-white rounded-md px-5 py-2 text-sm font-medium"
         >
           {ask.isPending ? 'Starting…' : 'Ask'}
         </button>
@@ -521,7 +525,7 @@ export default function RunsPage() {
                 key={r.id}
                 onClick={() => pick(r.id)}
                 className={`w-full text-left p-2.5 border rounded-md bg-white transition-colors ${
-                  r.id === runId ? 'border-forest-500 ring-1 ring-forest-500' : 'border-stone-200 hover:border-stone-300'
+                  r.id === runId ? 'border-primary-500 ring-1 ring-primary-500' : 'border-stone-200 hover:border-stone-300'
                 }`}
               >
                 <div className="text-xs font-medium text-stone-900 line-clamp-2">{r.question}</div>
@@ -536,6 +540,14 @@ export default function RunsPage() {
                 No runs yet — ask something.
               </div>
             )}
+            {listMaybeTruncated && (
+              <button
+                onClick={() => setListLimit((n) => n + 50)}
+                className="w-full text-xs text-primary-700 border border-stone-200 hover:border-primary-500 rounded-md py-1.5 font-medium"
+              >
+                {runs.isFetching ? 'Loading…' : 'Show older runs'}
+              </button>
+            )}
           </div>
         </div>
 
@@ -545,7 +557,7 @@ export default function RunsPage() {
             <div className="flex gap-2 mb-3">
               <button
                 onClick={startReplay}
-                className="text-xs border border-stone-300 rounded px-2.5 py-1 text-forest-700 hover:border-forest-500 font-medium"
+                className="text-xs border border-stone-300 rounded px-2.5 py-1 text-primary-700 hover:border-primary-500 font-medium"
               >
                 {replayT !== null && replayT < 1 ? 'Replaying…' : '▶ Replay'}
               </button>
@@ -553,7 +565,7 @@ export default function RunsPage() {
                 <button
                   onClick={() => synthesize.mutate(run.data!)}
                   disabled={synthesize.isPending}
-                  className="text-xs border border-stone-300 rounded px-2.5 py-1 text-forest-700 hover:border-forest-500 font-medium disabled:opacity-50"
+                  className="text-xs border border-stone-300 rounded px-2.5 py-1 text-primary-700 hover:border-primary-500 font-medium disabled:opacity-50"
                 >
                   {synthesize.isPending ? 'Starting…' : 'Synthesize answer →'}
                 </button>
@@ -601,7 +613,7 @@ export default function RunsPage() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-baseline gap-3 px-5 py-3.5 border-b border-stone-200">
-              <div className="font-mono text-xs text-forest-600">{previewDoc.data?.filename ?? '…'}</div>
+              <div className="font-mono text-xs text-primary-600">{previewDoc.data?.filename ?? '…'}</div>
               <div className="text-sm font-semibold text-stone-900 truncate">{previewDoc.data?.title ?? ''}</div>
               <button
                 onClick={() => setPreviewDocId(null)}
@@ -612,7 +624,7 @@ export default function RunsPage() {
             </div>
             <div className="overflow-y-auto px-5 py-4">
               {previewDoc.data?.summary && (
-                <p className="text-sm text-stone-600 italic border-l-2 border-forest-100 pl-3 mb-4">
+                <p className="text-sm text-stone-600 italic border-l-2 border-primary-100 pl-3 mb-4">
                   {previewDoc.data.summary}
                 </p>
               )}
@@ -633,7 +645,7 @@ export default function RunsPage() {
 function StatusPill({ status }: { status: string }) {
   const cls =
     status === 'published'
-      ? 'bg-forest-100 text-forest-700'
+      ? 'bg-primary-100 text-primary-700'
       : status === 'failed'
         ? 'bg-red-50 text-red-700 border border-red-200'
         : status === 'partial'
@@ -673,7 +685,7 @@ function PartialNote({ tel }: { tel: Record<string, any> }) {
 
 function stateDot(state: StageState) {
   return state === 'done'
-    ? 'bg-forest-500'
+    ? 'bg-primary-500'
     : state === 'active'
       ? 'bg-amber-600 animate-pulse'
       : state === 'error'
@@ -737,7 +749,7 @@ function FlowDiagram({
               className={`text-left border rounded-lg bg-white px-3 py-2 transition-all ${
                 n.wide ? 'w-72' : 'flex-1 min-w-0'
               } ${n.state === 'pending' ? 'border-dashed border-stone-300 opacity-60' : 'border-stone-200'} ${
-                inspected === n.id ? 'ring-2 ring-forest-500' : 'hover:border-forest-500'
+                inspected === n.id ? 'ring-2 ring-primary-500' : 'hover:border-primary-500'
               }`}
             >
               <div className="flex items-center gap-2 text-xs font-semibold text-stone-900 whitespace-nowrap">
@@ -748,14 +760,14 @@ function FlowDiagram({
               {!!n.items?.length && (
                 <div className="mt-1 space-y-0.5">
                   {n.items.slice(0, 4).map((it, i) => (
-                    <div key={i} className="text-[10px] text-stone-500 truncate border-l-2 border-forest-100 pl-1.5">{it}</div>
+                    <div key={i} className="text-[10px] text-stone-500 truncate border-l-2 border-primary-100 pl-1.5">{it}</div>
                   ))}
                   {n.items.length > 4 && (
                     <div className="text-[10px] text-stone-400 pl-1.5">+{n.items.length - 4} more</div>
                   )}
                 </div>
               )}
-              {n.count && <div className="text-[10.5px] text-forest-600 font-medium mt-1">{n.count}</div>}
+              {n.count && <div className="text-[10.5px] text-primary-600 font-medium mt-1">{n.count}</div>}
             </button>
           ))}
         </div>
@@ -817,7 +829,7 @@ function Inspector({
               <button
                 onClick={onResume}
                 disabled={resuming}
-                className="mt-2 text-xs border border-stone-300 rounded px-3 py-1.5 hover:border-forest-500"
+                className="mt-2 text-xs border border-stone-300 rounded px-3 py-1.5 hover:border-primary-500"
               >
                 {resuming ? 'Resuming…' : '↻ Resume run'}
               </button>
@@ -840,7 +852,7 @@ function Inspector({
         </div>
         <Label>Searches run ({plan?.queries?.length ?? tel.retrieval?.queries ?? 0})</Label>
         {(plan?.queries ?? []).map((q, i) => (
-          <div key={i} className="border-l-2 border-forest-100 pl-2.5 py-0.5 mb-1 text-stone-700">{q}</div>
+          <div key={i} className="border-l-2 border-primary-100 pl-2.5 py-0.5 mb-1 text-stone-700">{q}</div>
         ))}
         {!plan?.queries?.length && (
           <div className="text-stone-400 italic text-xs">Not recorded for this run.</div>
@@ -860,7 +872,7 @@ function Inspector({
             <Label>Document classes favoured</Label>
             <div className="flex flex-wrap gap-1">
               {plan.class_boost.map((c) => (
-                <span key={c} className="text-[10.5px] px-1.5 py-0.5 rounded bg-forest-50 text-forest-700">{c}</span>
+                <span key={c} className="text-[10.5px] px-1.5 py-0.5 rounded bg-primary-50 text-primary-700">{c}</span>
               ))}
             </div>
           </>
@@ -884,7 +896,7 @@ function Inspector({
       <>
         <Label>Sub-searches (effort: {run.effort})</Label>
         {subs.map((s) => (
-          <div key={s} className="border-l-2 border-forest-100 pl-2.5 py-0.5 mb-2 text-stone-700">{s}</div>
+          <div key={s} className="border-l-2 border-primary-100 pl-2.5 py-0.5 mb-2 text-stone-700">{s}</div>
         ))}
         {tel.decompose?.completed && (
           <div className="text-xs text-stone-400 italic mt-2">
@@ -900,14 +912,14 @@ function Inspector({
     body = (
       <>
         <Label>Sub-search</Label>
-        <div className="border-l-2 border-forest-100 pl-2.5 text-stone-700 mb-2">{subs[searchIdx]}</div>
+        <div className="border-l-2 border-primary-100 pl-2.5 text-stone-700 mb-2">{subs[searchIdx]}</div>
         {act?.chat_id && <KV k="Agent chat" v={<span className="font-mono text-xs text-stone-500">{act.chat_id.slice(0, 8)}</span>} />}
         <Label>Actions ({act?.actions.length ?? 0})</Label>
         <div className="font-mono text-[11px] leading-relaxed text-stone-500">
           {(act?.actions ?? []).map((a, i) => (
             <div key={i} className="truncate">
               <span className="inline-block w-6 text-stone-300">{i + 1}</span>
-              <span className={a.name.startsWith('add_files') ? 'text-forest-600 font-bold' : 'text-forest-600'}>{a.name}</span>{' '}
+              <span className={a.name.startsWith('add_files') ? 'text-primary-600 font-bold' : 'text-primary-600'}>{a.name}</span>{' '}
               <span className="text-stone-400">{a.args}</span>
             </div>
           ))}
@@ -952,7 +964,7 @@ function Inspector({
             onClick={() => onPreviewDoc(d.document_id)}
             className="w-full text-left flex gap-2 items-baseline py-1 border-b border-stone-100 hover:bg-stone-50"
           >
-            <span className="font-mono text-[10.5px] text-forest-600 shrink-0">{d.filename}</span>
+            <span className="font-mono text-[10.5px] text-primary-600 shrink-0">{d.filename}</span>
             <span className="text-xs text-stone-600 truncate">{d.document_class_name ?? ''}{d.summary ? ` · ${d.summary}` : ''}</span>
           </button>
         ))}
@@ -983,7 +995,7 @@ function Inspector({
             <KV
               k="Verified verbatim"
               v={
-                <span className={ex.passages_verified === ex.passages_proposed ? 'text-forest-700 font-semibold' : 'text-amber-700 font-semibold'}>
+                <span className={ex.passages_verified === ex.passages_proposed ? 'text-primary-700 font-semibold' : 'text-amber-700 font-semibold'}>
                   {ex.passages_verified ?? '—'}
                   {ex.passages_proposed ? ` of ${ex.passages_proposed}` : ''}
                 </span>
@@ -996,7 +1008,7 @@ function Inspector({
             <Label>What the answer set out to establish ({argPlan.length})</Label>
             {argPlan.map((c, i) => (
               <div key={i} className="mb-2">
-                <div className="text-[13px] leading-relaxed text-stone-800 border-l-2 border-forest-100 pl-2.5">
+                <div className="text-[13px] leading-relaxed text-stone-800 border-l-2 border-primary-100 pl-2.5">
                   {c.establishes}
                 </div>
                 {!!c.anchors?.length && (
@@ -1020,7 +1032,7 @@ function Inspector({
           {acts.map((a, i) => (
             <div key={i} className="truncate">
               <span className="inline-block w-6 text-stone-300">{i + 1}</span>
-              <span className="text-forest-600">{a.name}</span> <span className="text-stone-400">{a.args}</span>
+              <span className="text-primary-600">{a.name}</span> <span className="text-stone-400">{a.args}</span>
             </div>
           ))}
           {!acts.length && <div className="text-stone-400 italic">No activity yet…</div>}
@@ -1072,14 +1084,14 @@ function Inspector({
                       title={e.validation_reasoning ?? e.stance}
                       className={`text-[9.5px] font-mono px-1 rounded border ${
                         e.validated
-                          ? 'border-forest-100 bg-forest-50 text-forest-700'
+                          ? 'border-primary-100 bg-primary-50 text-primary-700'
                           : 'border-amber-200 bg-amber-50 text-amber-700'
                       }`}
                     >
                       {i + 1}{e.validated ? '✓' : '?'}
                     </button>
                   ))}
-                  {ok && <span className="text-[9.5px] text-forest-600 font-semibold">verified</span>}
+                  {ok && <span className="text-[9.5px] text-primary-600 font-semibold">verified</span>}
                 </span>
                 {c.rationale && (
                   <div className="mt-1 text-[11.5px] leading-relaxed text-stone-500 border-l-2 border-stone-200 pl-2">

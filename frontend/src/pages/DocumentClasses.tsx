@@ -102,7 +102,7 @@ export default function DocumentClassesPage({ embedded = false }: { embedded?: b
               }}
               className={`block w-full text-left p-3 border rounded ${
                 selectedId === c.id
-                  ? 'border-forest-500 bg-forest-50'
+                  ? 'border-primary-500 bg-primary-50'
                   : 'border-stone-200 bg-white hover:border-stone-300'
               }`}
             >
@@ -430,7 +430,7 @@ function PropertyForm({
   });
 
   return (
-    <div className="p-3 border border-forest-500 bg-forest-50 rounded space-y-2">
+    <div className="p-3 border border-primary-500 bg-primary-50 rounded space-y-2">
       <Field label="Name">
         <input
           value={draft.name}

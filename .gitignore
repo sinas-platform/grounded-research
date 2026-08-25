@@ -25,3 +25,4 @@ backend/app/static/
 .claude/
 
 # Alembic does NOT belong here — versions are tracked
+frontend/tsconfig.tsbuildinfo

@@ -2,6 +2,7 @@ import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
+import { DocumentModal, EvidenceSpan } from '@/components/DocumentViewer';
 
 /* ---------------------------------- types ---------------------------------- */
 
@@ -81,15 +82,6 @@ interface ResultFull {
   filter: { plan?: RetrievalPlan; briefing?: unknown[]; retrieval_first?: boolean };
 }
 
-interface DocumentFull {
-  id: string;
-  filename: string;
-  title: string | null;
-  summary: string | null;
-  content: string;
-  document_class_id: string | null;
-}
-
 /* ------------------------------- stage model ------------------------------- */
 
 type StageState = 'pending' | 'active' | 'done' | 'error';
@@ -115,84 +107,116 @@ function stageOf(tel: Record<string, any>, key: string): StageState {
   return t?.started ? 'active' : 'pending';
 }
 
-/* ------------------------------- replay masking -------------------------------
-   Replays a finished run by re-deriving the view from progressively unmasked
-   real data: stage telemetry appears at its true relative time (scaled to
-   REPLAY_SECONDS), agent actions and documents stream in across their stage
-   windows. No synthetic data — everything shown is the stored run. */
+/* ---------------------------------- replay ----------------------------------
+   Replays a finished run: each stage lights up at the point in the run where
+   it actually finished, scaled to REPLAY_SECONDS.
+
+   Everything shown is stored data, and every boundary below is a timestamp the
+   run recorded. Stages the run never timed are not animated — the earlier
+   version of this drove the replay off `decompose`/`search`/`merge`, and when
+   the pipeline became retrieval-first those keys stopped being written, so the
+   replay ran for 30 seconds against an empty diagram. Deriving the timeline
+   from the same telemetry the diagram reads keeps the two from drifting apart
+   again: if the timestamps are missing, `replayTimeline` returns null and the
+   replay button is not offered at all. */
 
 const REPLAY_SECONDS = 30;
 
+interface ReplayTimeline {
+  t0: number;
+  tEnd: number;
+  retrievalDone: number;
+  draftStart: number;
+  draftDone: number;
+}
+
+/** The run's real stage boundaries, or null when it did not record them. */
+function replayTimeline(run: QueryRun): ReplayTimeline | null {
+  const tel = run.telemetry ?? {};
+  const ms = (iso?: string | null) => (iso ? Date.parse(iso) : NaN);
+  const t0 = ms(run.started_at ?? run.created_at);
+  const retrievalDone = ms(tel.retrieval?.completed);
+  const draftStart = ms(tel.draft?.started);
+  const draftDone = ms(tel.draft?.completed);
+  const tEnd = ms(tel.validate?.published ?? run.completed_at ?? tel.draft?.completed);
+  if (!Number.isFinite(t0) || !Number.isFinite(tEnd) || tEnd <= t0) return null;
+  // A retrieval-only run has no draft; its timeline is just the retrieval.
+  if (!Number.isFinite(retrievalDone)) return null;
+  return {
+    t0,
+    tEnd,
+    retrievalDone,
+    draftStart: Number.isFinite(draftStart) ? draftStart : tEnd,
+    draftDone: Number.isFinite(draftDone) ? draftDone : tEnd,
+  };
+}
+
+/**
+ * The run as it stood `t` (0..1) of the way through, by wall-clock.
+ *
+ * Documents appear when retrieval completed and claims when drafting
+ * completed, because that is the resolution the run recorded — neither
+ * carries per-item timings, and inventing them would show a sequence that
+ * never happened.
+ */
 function maskForReplay(
   run: QueryRun,
   activity: RunActivity | undefined,
   docs: ResultDoc[] | undefined,
   claims: ClaimWithEvidence[] | undefined,
-  t: number, // 0..1 replay progress
+  t: number,
+  tl: ReplayTimeline,
 ): { run: QueryRun; activity?: RunActivity; docs?: ResultDoc[]; claims?: ClaimWithEvidence[] } {
   const tel = run.telemetry ?? {};
-  const t0 = Date.parse(tel.decompose?.started ?? run.created_at);
-  const endIso =
-    tel.validate?.published ?? tel.draft?.completed ?? tel.search?.completed ?? run.created_at;
-  const tEnd = Math.max(Date.parse(endIso), t0 + 1);
-  const frac = (iso?: string) => (iso ? Math.min(Math.max((Date.parse(iso) - t0) / (tEnd - t0), 0), 1) : 1);
+  const asOf = tl.t0 + t * (tl.tEnd - tl.t0);
+  const done = t >= 1;
 
-  const fDecEnd = frac(tel.decompose?.completed);
-  const fSearchEnd = frac(tel.search?.completed);
-  const fDraftEnd = frac(tel.draft?.completed);
+  const retrieved = asOf >= tl.retrievalDone;
+  const extracted = asOf >= tl.draftStart;
+  const drafted = asOf >= tl.draftDone;
 
   const mTel: Record<string, any> = {};
-  if (tel.decompose) {
-    mTel.decompose = t >= fDecEnd ? tel.decompose : { started: tel.decompose.started, max_fanout: tel.decompose.max_fanout };
+  if (tel.retrieval) {
+    // Present but uncompleted reads as the stage running.
+    mTel.retrieval = retrieved ? tel.retrieval : {};
   }
-  if (tel.search && t >= fDecEnd) {
-    mTel.search = t >= fSearchEnd ? tel.search : { started: tel.search.started, results: {} };
+  if (tel.extract && extracted) mTel.extract = tel.extract;
+  if (tel.draft) {
+    if (drafted) mTel.draft = tel.draft;
+    else if (extracted) mTel.draft = { started: tel.draft.started, extract_mode: tel.draft.extract_mode };
   }
-  if (tel.merge && t >= fSearchEnd) mTel.merge = tel.merge;
-  if (tel.draft && t >= fSearchEnd) {
-    mTel.draft = t >= fDraftEnd ? tel.draft : { started: tel.draft.started };
-  }
-  if (tel.validate && t >= fDraftEnd && t >= 0.97) mTel.validate = tel.validate;
-  mTel._replay_elapsed_s = Math.round((t * (tEnd - t0)) / 1000);
+  if (tel.validate && done) mTel.validate = tel.validate;
+  if (tel.partial && done) mTel.partial = tel.partial;
+  mTel._replay_elapsed_s = Math.round((asOf - tl.t0) / 1000);
 
-  const searchSpan = Math.max(fSearchEnd - fDecEnd, 0.01);
-  const searchProgress = Math.min(Math.max((t - fDecEnd) / searchSpan, 0), 1);
+  // Synthesis actions stream across the drafting window (the agent-driven
+  // path records them individually); retrieval-first runs have none.
+  const draftSpan = Math.max(tl.draftDone - tl.draftStart, 1);
+  const draftProgress = Math.min(Math.max((asOf - tl.draftStart) / draftSpan, 0), 1);
   const mActivity: RunActivity | undefined = activity && {
-    searches: activity.searches.map((s) => ({
-      ...s,
-      result_id: t >= fSearchEnd ? s.result_id : null,
-      actions: s.actions.slice(0, Math.floor(s.actions.length * searchProgress)),
-    })),
+    searches: retrieved ? activity.searches : [],
     synthesis: activity.synthesis
       ? {
           ...activity.synthesis,
           actions: activity.synthesis.actions.slice(
             0,
-            Math.floor(
-              activity.synthesis.actions.length *
-                Math.min(Math.max((t - fSearchEnd) / Math.max(fDraftEnd - fSearchEnd, 0.01), 0), 1),
-            ),
+            Math.floor(activity.synthesis.actions.length * draftProgress),
           ),
         }
       : null,
   };
 
-  const mergeReached = t >= fSearchEnd;
-  const mDocs = mergeReached ? docs : docs?.slice(0, Math.floor((docs?.length ?? 0) * searchProgress));
-  const draftProgress = Math.min(Math.max((t - fSearchEnd) / Math.max(fDraftEnd - fSearchEnd, 0.01), 0), 1);
-  const mClaims = t >= 0.97 ? claims : claims?.slice(0, Math.floor((claims?.length ?? 0) * draftProgress));
-
   return {
     run: {
       ...run,
-      status: t >= 1 ? run.status : 'replaying',
+      status: done ? run.status : 'replaying',
       telemetry: mTel,
-      parent_result_id: run.mode === 'synthesis' || mergeReached ? run.parent_result_id : null,
-      answer_id: t >= 0.97 ? run.answer_id : null,
+      parent_result_id: retrieved ? run.parent_result_id : null,
+      answer_id: done ? run.answer_id : null,
     },
     activity: mActivity,
-    docs: mDocs,
-    claims: mClaims,
+    docs: retrieved ? docs : [],
+    claims: drafted ? claims : [],
   };
 }
 
@@ -352,7 +376,9 @@ export default function RunsPage() {
   const qc = useQueryClient();
   const [selectedId, setSelectedId] = useState<string | null>(() => hashParam('run'));
   const [inspected, setInspected] = useState<string | null>(() => hashParam('node'));
-  const [previewDocId, setPreviewDocId] = useState<string | null>(null);
+  // A document opened for reading, plus the cited passage to highlight when
+  // it was opened from a citation rather than the document list.
+  const [preview, setPreview] = useState<{ docId: string; span?: EvidenceSpan | null } | null>(null);
   const [question, setQuestion] = useState('');
   const [mode, setMode] = useState<'retrieval' | 'full'>('full');
   const [effort, setEffort] = useState<'low' | 'medium' | 'high'>('medium');
@@ -407,12 +433,6 @@ export default function RunsPage() {
     refetchInterval: isLive(run.data) ? 5000 : false,
   });
 
-  const previewDoc = useQuery({
-    queryKey: ['doc-preview', previewDocId],
-    queryFn: () => api<DocumentFull>(`/documents/${previewDocId}`),
-    enabled: !!previewDocId,
-  });
-
   const ask = useMutation({
     mutationFn: () =>
       api<QueryRun>('/query-runs', {
@@ -453,6 +473,8 @@ export default function RunsPage() {
   });
 
   // replay clock
+  const timeline = useMemo(() => (run.data ? replayTimeline(run.data) : null), [run.data]);
+  const canReplay = !!timeline && !!run.data && TERMINAL.has(run.data.status);
   const startReplay = () => setReplayT(0);
   useLayoutEffect(() => {
     if (replayT === null || replayT >= 1) return;
@@ -461,11 +483,11 @@ export default function RunsPage() {
   }, [replayT]);
 
   const view = useMemo(() => {
-    if (run.data && replayT !== null && replayT < 1 && TERMINAL.has(run.data.status)) {
-      return maskForReplay(run.data, activity.data, docs.data, claims.data, replayT);
+    if (run.data && timeline && replayT !== null && replayT < 1 && TERMINAL.has(run.data.status)) {
+      return maskForReplay(run.data, activity.data, docs.data, claims.data, replayT, timeline);
     }
     return { run: run.data ?? undefined, activity: activity.data, docs: docs.data, claims: claims.data };
-  }, [run.data, activity.data, docs.data, claims.data, replayT]);
+  }, [run.data, activity.data, docs.data, claims.data, replayT, timeline]);
 
   const plan = result.data?.filter?.plan;
   const graph = useMemo(
@@ -555,12 +577,15 @@ export default function RunsPage() {
         <div className="w-[340px] shrink-0 bg-white border border-stone-200 rounded-lg p-4">
           {run.data && TERMINAL.has(run.data.status) && (
             <div className="flex gap-2 mb-3">
-              <button
-                onClick={startReplay}
-                className="text-xs border border-stone-300 rounded px-2.5 py-1 text-primary-700 hover:border-primary-500 font-medium"
-              >
-                {replayT !== null && replayT < 1 ? 'Replaying…' : '▶ Replay'}
-              </button>
+              {canReplay && (
+                <button
+                  onClick={startReplay}
+                  title="Replay the run at its real relative pace"
+                  className="text-xs border border-stone-300 rounded px-2.5 py-1 text-primary-700 hover:border-primary-500 font-medium"
+                >
+                  {replayT !== null && replayT < 1 ? 'Replaying…' : '▶ Replay'}
+                </button>
+              )}
               {run.data.mode === 'retrieval' && run.data.status === 'published' && run.data.parent_result_id && (
                 <button
                   onClick={() => synthesize.mutate(run.data!)}
@@ -596,45 +621,18 @@ export default function RunsPage() {
               inspected={inspected}
               onResume={() => resume.mutate()}
               resuming={resume.isPending}
-              onPreviewDoc={setPreviewDocId}
+              onPreviewDoc={(docId, span) => setPreview({ docId, span })}
             />
           )}
         </div>
       </div>
 
-      {/* document preview modal */}
-      {previewDocId && (
-        <div
-          className="fixed inset-0 z-50 bg-stone-900/40 flex items-center justify-center p-8"
-          onClick={() => setPreviewDocId(null)}
-        >
-          <div
-            className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div className="flex items-baseline gap-3 px-5 py-3.5 border-b border-stone-200">
-              <div className="font-mono text-xs text-primary-600">{previewDoc.data?.filename ?? '…'}</div>
-              <div className="text-sm font-semibold text-stone-900 truncate">{previewDoc.data?.title ?? ''}</div>
-              <button
-                onClick={() => setPreviewDocId(null)}
-                className="ml-auto text-stone-400 hover:text-stone-900 text-lg leading-none"
-              >
-                ×
-              </button>
-            </div>
-            <div className="overflow-y-auto px-5 py-4">
-              {previewDoc.data?.summary && (
-                <p className="text-sm text-stone-600 italic border-l-2 border-primary-100 pl-3 mb-4">
-                  {previewDoc.data.summary}
-                </p>
-              )}
-              <pre className="whitespace-pre-wrap text-xs leading-relaxed text-stone-700 font-sans">
-                {previewDoc.data ? previewDoc.data.content?.slice(0, 20000) : 'Loading…'}
-                {previewDoc.data && (previewDoc.data.content?.length ?? 0) > 20000 && '\n\n… (truncated preview)'}
-              </pre>
-            </div>
-          </div>
-        </div>
+      {preview && (
+        <DocumentModal
+          docId={preview.docId}
+          span={preview.span}
+          onClose={() => setPreview(null)}
+        />
       )}
     </div>
   );
@@ -787,7 +785,7 @@ function Inspector({
   inspected: string | null;
   onResume: () => void;
   resuming: boolean;
-  onPreviewDoc: (id: string) => void;
+  onPreviewDoc: (id: string, span?: EvidenceSpan | null) => void;
 }) {
   const tel = run.telemetry ?? {};
   const totalActions =
@@ -1080,7 +1078,7 @@ function Inspector({
                   {c.evidence.map((e, i) => (
                     <button
                       key={i}
-                      onClick={() => onPreviewDoc(e.document_id)}
+                      onClick={() => onPreviewDoc(e.document_id, e.span as EvidenceSpan)}
                       title={e.validation_reasoning ?? e.stance}
                       className={`text-[9.5px] font-mono px-1 rounded border ${
                         e.validated

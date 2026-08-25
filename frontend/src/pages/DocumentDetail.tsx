@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
+import { DocumentViewer } from '@/components/DocumentViewer';
 import {
   ErrorBanner,
   PrimaryButton,
@@ -75,11 +76,6 @@ interface Relationship {
   target_id: string;
   confidence: number | null;
   notes: string | null;
-}
-
-interface DocumentContent {
-  content: string;
-  version: number;
 }
 
 interface PartDesc {
@@ -262,13 +258,6 @@ function ContentTab({ docId }: { docId: string }) {
   });
   const latest = versions.data?.length ? versions.data[versions.data.length - 1] : null;
 
-  const content = useQuery({
-    queryKey: ['document-content', docId, latest?.version],
-    queryFn: () =>
-      api<DocumentContent>(`/documents/${docId}/versions/${latest!.version}/content`),
-    enabled: !!latest,
-  });
-
   if (!versions.data) return <div className="text-stone-500">Loading…</div>;
   if (!latest) {
     return (
@@ -282,18 +271,12 @@ function ContentTab({ docId }: { docId: string }) {
       <div className="text-xs text-stone-500 mb-3">
         version {latest.version} · {versions.data.length} total
       </div>
-      {content.isLoading && <div className="text-stone-500">Loading content…</div>}
-      {content.error && (
-        <div className="text-stone-500 text-sm py-12 text-center border border-dashed border-stone-300 rounded">
-          No extracted content for this version. The post-upload function may not have produced
-          markdown (binary file, or MarkItDown failed).
-        </div>
-      )}
-      {content.data && (
-        <pre className="p-4 border border-stone-200 rounded bg-white text-sm whitespace-pre-wrap font-mono overflow-auto max-h-[70vh]">
-          {content.data.content || '(empty)'}
-        </pre>
-      )}
+      {/* Same reader as the run inspector: rendered markdown, paged by line.
+          This used to be the raw text in a <pre>, which also showed only the
+          first 300 lines — the read endpoint's survey default. */}
+      <div className="p-4 border border-stone-200 rounded bg-white overflow-auto max-h-[70vh]">
+        <DocumentViewer docId={docId} />
+      </div>
     </div>
   );
 }

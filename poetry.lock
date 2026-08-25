@@ -1283,14 +1283,14 @@ files = [
 
 [[package]]
 name = "sinas"
-version = "0.2.0"
+version = "0.2.1"
 description = "Python SDK for SINAS - AI Agent Platform"
 optional = false
 python-versions = ">=3.8"
 groups = ["main"]
 files = [
-    {file = "sinas-0.2.0-py3-none-any.whl", hash = "sha256:214a28980be044fd47d28ed1bd73fc417315fe09754d7a6af77e8bd1ec9ee42e"},
-    {file = "sinas-0.2.0.tar.gz", hash = "sha256:06b00069d2a7458941e4cc0a9f6b7870b9d95228d5ea45a4e4ed2cad9bda15d2"},
+    {file = "sinas-0.2.1-py3-none-any.whl", hash = "sha256:bfdc62c81e6f92a0da9bde7428f3ead2925be5e9d20f57426cc2bd88b017a0cb"},
+    {file = "sinas-0.2.1.tar.gz", hash = "sha256:2bcf2c92dc934464a3e68bc58b5ab17daba8b6fe8780f1b0a0d070632170e787"},
 ]
 
 [package.dependencies]
@@ -1742,4 +1742,4 @@ files = [
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "8ced53a80e60d1dee20db9ba586d150b7ff15dd0a7a63a3a5fb7da109ee28ade"
+content-hash = "9b6b16867b2fc13bf94862d5e0be3fb553426958f4bbcc128b9d0acfa7d01e5b"

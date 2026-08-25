@@ -63,11 +63,15 @@ def _expected_version() -> str:
 
 class SinasStatusOut(BaseModel):
     sinas_url: str
+    # Always the current package name. The pre-rename identifier is a
+    # lookup detail; it is not this product's name and never reaches a
+    # user-facing surface — `legacy_record` carries the fact instead.
     package_name: str
     expected_version: str
     installed: bool
     installed_version: str | None
     drift: bool
+    legacy_record: bool = False
     note: str | None = None
 
 
@@ -89,13 +93,13 @@ async def get_sinas_status(
             note="cannot query Sinas — no token available",
         )
 
-    found_as = EXPECTED_PACKAGE_NAME
+    legacy_record = False
     pkg = await mgmt.get_installed_package(caller.sinas_token, EXPECTED_PACKAGE_NAME)
     for legacy in LEGACY_PACKAGE_NAMES:
         if pkg is not None:
             break
         pkg = await mgmt.get_installed_package(caller.sinas_token, legacy)
-        found_as = legacy
+        legacy_record = pkg is not None
 
     if pkg is None:
         return SinasStatusOut(
@@ -111,20 +115,21 @@ async def get_sinas_status(
     installed_version = pkg.get("version") or pkg.get("package", {}).get("version")
     drift = installed_version != expected
     notes = []
-    if found_as != EXPECTED_PACKAGE_NAME:
+    if legacy_record:
         notes.append(
-            f"installed under the pre-rename name {found_as!r}; reinstalling "
-            f"under {EXPECTED_PACKAGE_NAME!r} retires the old record"
+            "registered under a pre-rename record — reinstalling the package "
+            "retires it"
         )
     if drift:
         notes.append("installed version differs from this SGR build")
     return SinasStatusOut(
         sinas_url=settings.sinas_url,
-        package_name=found_as,
+        package_name=EXPECTED_PACKAGE_NAME,
         expected_version=expected,
         installed=True,
         installed_version=installed_version,
         drift=drift,
+        legacy_record=legacy_record,
         note="; ".join(notes) or None,
     )
 

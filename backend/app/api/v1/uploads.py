@@ -1,8 +1,8 @@
-"""Single-file upload — registers directly with Grove, the system of
+"""Single-file upload — registers directly with SGR, the system of
 record. This used to proxy the file into a Sinas collection whose
 post-upload function called back into SGR: an extra hop, a 9.6s-per-file
 function execution, and an identity scheme (collection_file_id) that
-bypassed content-hash dedup. Grove-native now, same write path as bulk."""
+bypassed content-hash dedup. SGR-native now, same write path as bulk."""
 
 from __future__ import annotations
 

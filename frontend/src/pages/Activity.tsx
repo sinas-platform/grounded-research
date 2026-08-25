@@ -53,6 +53,7 @@ interface SinasStatus {
   installed_version: string | null;
   expected_version: string;
   drift: boolean;
+  legacy_record: boolean;
   note: string | null;
 }
 

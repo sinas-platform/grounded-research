@@ -49,6 +49,7 @@ interface RelationshipProposal {
 
 interface SinasStatus {
   installed: boolean;
+  package_name: string;
   installed_version: string | null;
   expected_version: string;
   drift: boolean;
@@ -193,11 +194,12 @@ function DashCard({
 function SinasBanner({ status }: { status: SinasStatus }) {
   if (status.installed && !status.drift) {
     return (
-      <div className="mb-6 flex items-center gap-2 px-4 py-2 rounded-md border border-primary-100 bg-primary-50 text-sm text-primary-800">
-        <CheckCircle2 size={16} />
+      <div className="mb-6 flex items-start gap-2 px-4 py-2 rounded-md border border-primary-100 bg-primary-50 text-sm text-primary-800">
+        <CheckCircle2 size={16} className="mt-0.5 shrink-0" />
         <span>
-          Sinas integration healthy — sinas-grounded-research{' '}
+          Sinas integration healthy — <span className="font-mono">{status.package_name}</span>{' '}
           <span className="font-mono">{status.installed_version}</span> installed.
+          {status.note && <span className="block text-xs text-primary-700/80 mt-0.5">{status.note}.</span>}
         </span>
       </div>
     );

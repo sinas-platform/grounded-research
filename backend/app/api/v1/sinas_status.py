@@ -4,8 +4,10 @@ and at what version? Used by the admin UI to surface drift / missing install.
 
 from __future__ import annotations
 
+import functools
 from pathlib import Path
 
+import yaml
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
 
@@ -16,9 +18,12 @@ from app.services.sinas import Management, get_management
 router = APIRouter(prefix="/sinas-status", tags=["sinas-status"])
 
 EXPECTED_PACKAGE_NAME = "sinas-grounded-research"
-# Keep in lockstep with package/sinas-grounded-research.yaml — the Activity page
-# shows a drift warning when the installed version differs.
-EXPECTED_PACKAGE_VERSION = "0.1.34"
+# Names this package shipped under before. An instance installed pre-rename
+# still carries the old record, and the registry is keyed by exact name — so
+# looking only for the current name reports a working install as missing.
+LEGACY_PACKAGE_NAMES = ("sinas-grove",)
+# Used only when the bundled yaml cannot be read (see _expected_version).
+FALLBACK_PACKAGE_VERSION = "0.1.41"
 
 
 def _bundled_package_path() -> Path | None:
@@ -38,6 +43,24 @@ def _bundled_package_path() -> Path | None:
     return None
 
 
+@functools.lru_cache(maxsize=1)
+def _expected_version() -> str:
+    """The version this build ships, read from the bundled yaml.
+
+    Hand-maintaining a constant here drifted once already (the code said
+    0.1.34 against a 0.1.41 package), turning the drift warning into noise.
+    The yaml is the single source of truth.
+    """
+    path = _bundled_package_path()
+    if path is None:
+        return FALLBACK_PACKAGE_VERSION
+    try:
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return str(doc.get("package", {}).get("version") or FALLBACK_PACKAGE_VERSION)
+    except (yaml.YAMLError, OSError):
+        return FALLBACK_PACKAGE_VERSION
+
+
 class SinasStatusOut(BaseModel):
     sinas_url: str
     package_name: str
@@ -54,23 +77,31 @@ async def get_sinas_status(
     mgmt: Management = Depends(get_management),
 ) -> SinasStatusOut:
     settings = get_settings()
+    expected = _expected_version()
     if caller.sinas_token is None:
         return SinasStatusOut(
             sinas_url=settings.sinas_url,
             package_name=EXPECTED_PACKAGE_NAME,
-            expected_version=EXPECTED_PACKAGE_VERSION,
+            expected_version=expected,
             installed=False,
             installed_version=None,
             drift=False,
             note="cannot query Sinas — no token available",
         )
 
+    found_as = EXPECTED_PACKAGE_NAME
     pkg = await mgmt.get_installed_package(caller.sinas_token, EXPECTED_PACKAGE_NAME)
+    for legacy in LEGACY_PACKAGE_NAMES:
+        if pkg is not None:
+            break
+        pkg = await mgmt.get_installed_package(caller.sinas_token, legacy)
+        found_as = legacy
+
     if pkg is None:
         return SinasStatusOut(
             sinas_url=settings.sinas_url,
             package_name=EXPECTED_PACKAGE_NAME,
-            expected_version=EXPECTED_PACKAGE_VERSION,
+            expected_version=expected,
             installed=False,
             installed_version=None,
             drift=False,
@@ -78,15 +109,23 @@ async def get_sinas_status(
         )
 
     installed_version = pkg.get("version") or pkg.get("package", {}).get("version")
-    drift = installed_version != EXPECTED_PACKAGE_VERSION
+    drift = installed_version != expected
+    notes = []
+    if found_as != EXPECTED_PACKAGE_NAME:
+        notes.append(
+            f"installed under the pre-rename name {found_as!r}; reinstalling "
+            f"under {EXPECTED_PACKAGE_NAME!r} retires the old record"
+        )
+    if drift:
+        notes.append("installed version differs from this SGR build")
     return SinasStatusOut(
         sinas_url=settings.sinas_url,
-        package_name=EXPECTED_PACKAGE_NAME,
-        expected_version=EXPECTED_PACKAGE_VERSION,
+        package_name=found_as,
+        expected_version=expected,
         installed=True,
         installed_version=installed_version,
         drift=drift,
-        note=None if not drift else "installed version differs from this SGR build",
+        note="; ".join(notes) or None,
     )
 
 

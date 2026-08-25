@@ -19,3 +19,45 @@
     font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   }
 }
+
+/* Rendered source documents. Tailwind's preflight strips element styling and
+   this project carries no typography plugin, so the document body — headings,
+   lists, tables, quotes — is styled here once and reused by every viewer. */
+@layer components {
+  .md-body {
+    @apply text-[13.5px] leading-relaxed text-stone-700;
+  }
+  .md-body > :first-child { @apply mt-0; }
+  .md-body h1 { @apply text-lg font-semibold text-stone-900 mt-5 mb-2; }
+  .md-body h2 { @apply text-base font-semibold text-stone-900 mt-5 mb-2; }
+  .md-body h3 { @apply text-sm font-semibold text-stone-900 mt-4 mb-1.5; }
+  .md-body h4, .md-body h5, .md-body h6 {
+    @apply text-[13px] font-semibold text-stone-800 mt-3 mb-1;
+  }
+  .md-body p { @apply my-2; }
+  .md-body ul { @apply list-disc pl-5 my-2 space-y-0.5; }
+  .md-body ol { @apply list-decimal pl-5 my-2 space-y-0.5; }
+  .md-body blockquote {
+    @apply border-l-2 border-stone-300 pl-3 my-2 text-stone-600 italic;
+  }
+  .md-body a { @apply text-primary-700 underline underline-offset-2; }
+  .md-body strong { @apply font-semibold text-stone-900; }
+  .md-body hr { @apply my-4 border-stone-200; }
+  .md-body code {
+    @apply text-[12px] bg-stone-100 rounded px-1 py-0.5 text-stone-800;
+  }
+  .md-body pre {
+    @apply bg-stone-50 border border-stone-200 rounded p-3 my-2 overflow-x-auto;
+  }
+  .md-body pre code { @apply bg-transparent p-0 text-[12px]; }
+  /* Tables are common in these documents and often wide — they scroll in
+     their own container rather than stretching the page. */
+  .md-body table {
+    @apply w-full my-3 text-[12.5px] border-collapse;
+  }
+  .md-body th, .md-body td {
+    @apply border border-stone-200 px-2 py-1 text-left align-top;
+  }
+  .md-body th { @apply bg-stone-50 font-semibold text-stone-800; }
+  .md-body img { @apply max-w-full; }
+}

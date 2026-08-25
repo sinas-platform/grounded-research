@@ -47,6 +47,66 @@ function Markdown({ children }: { children: string }) {
   );
 }
 
+interface FrontMatterEntry {
+  key: string;
+  value: string;
+}
+
+const unquote = (v: string) => v.replace(/^['"]/, '').replace(/['"]$/, '').trim();
+
+/**
+ * Reads the `key: value` block nearly every document in the corpus opens with.
+ *
+ * Handed to a markdown renderer this block is worse than useless: a text line
+ * followed by `---` is a setext heading, so the whole header collapsed into one
+ * bold run-on line. Parsed here instead, and rendered as the document's header.
+ *
+ * Deliberately not a full YAML parser — these blocks are flat `key: value`
+ * pairs whose long values fold across indented continuation lines. Anything it
+ * cannot attribute to a key is dropped rather than guessed at.
+ */
+function parseFrontMatter(lines: string[]): FrontMatterEntry[] {
+  const out: FrontMatterEntry[] = [];
+  for (const raw of lines) {
+    const m = /^([A-Za-z_][\w.-]*):\s*(.*)$/.exec(raw);
+    if (m && !/^\s/.test(raw)) {
+      out.push({ key: m[1], value: unquote(m[2]) });
+    } else if (out.length && raw.trim()) {
+      const last = out[out.length - 1];
+      last.value = `${last.value} ${raw.trim()}`.trim();
+    }
+  }
+  return out.filter((e) => e.value !== '');
+}
+
+function FrontMatterHeader({ entries }: { entries: FrontMatterEntry[] }) {
+  const title = entries.find((e) => e.key.toLowerCase() === 'title');
+  const rest = entries.filter((e) => e !== title);
+  return (
+    <div className="mb-4 pb-3 border-b border-stone-200">
+      {title && (
+        <div className="text-sm font-semibold text-stone-900 leading-snug mb-2">
+          {title.value}
+        </div>
+      )}
+      {rest.length > 0 && (
+        <dl className="flex flex-wrap gap-x-4 gap-y-1">
+          {rest.map((e) => (
+            <div key={e.key} className="flex items-baseline gap-1.5 min-w-0">
+              <dt className="text-[10px] uppercase tracking-wider text-stone-400 shrink-0">
+                {e.key.replace(/_/g, ' ')}
+              </dt>
+              <dd className="text-[11.5px] text-stone-700 font-mono break-words min-w-0">
+                {e.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      )}
+    </div>
+  );
+}
+
 /**
  * Renders a source document as markdown, highlighting a cited line range and
  * scrolling to it.
@@ -107,13 +167,30 @@ export function DocumentViewer({
     // The span's position inside this window, 0-based.
     const startIdx = spanFrom != null ? spanFrom - windowFrom : -1;
     const endIdx = spanTo != null ? spanTo - windowFrom : -1;
-    const visible =
-      startIdx >= 0 && endIdx >= startIdx && startIdx < lines.length;
-    if (!visible) return { before: data.content, highlight: '', after: '' };
+    const spanVisible = startIdx >= 0 && endIdx >= startIdx && startIdx < lines.length;
+
+    // The header block, when this window holds the top of the document. If a
+    // citation reaches into it, leave it in the body so the marked lines stay
+    // where the evidence says they are.
+    let front: FrontMatterEntry[] | null = null;
+    let bodyStart = 0;
+    if (windowFrom === 1 && lines[0]?.trim() === '---') {
+      const close = lines.findIndex((l, i) => i > 0 && l.trim() === '---');
+      if (close > 0 && (!spanVisible || startIdx > close)) {
+        front = parseFrontMatter(lines.slice(1, close));
+        bodyStart = close + 1;
+      }
+    }
+
+    const body = lines.slice(bodyStart);
+    const s = startIdx - bodyStart;
+    const e = endIdx - bodyStart;
+    const showSpan = spanVisible && s >= 0 && e >= s && s < body.length;
     return {
-      before: lines.slice(0, startIdx).join('\n'),
-      highlight: lines.slice(startIdx, endIdx + 1).join('\n'),
-      after: lines.slice(endIdx + 1).join('\n'),
+      front,
+      before: showSpan ? body.slice(0, s).join('\n') : body.join('\n'),
+      highlight: showSpan ? body.slice(s, e + 1).join('\n') : '',
+      after: showSpan ? body.slice(e + 1).join('\n') : '',
     };
   }, [data, spanFrom, spanTo]);
 
@@ -152,6 +229,7 @@ export function DocumentViewer({
 
   return (
     <>
+      {parts?.front && parts.front.length > 0 && <FrontMatterHeader entries={parts.front} />}
       {meta.data?.summary && (
         <p className="text-xs text-stone-600 italic border-l-2 border-primary-100 pl-3 mb-4">
           {meta.data.summary}

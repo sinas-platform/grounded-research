@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
@@ -75,28 +76,77 @@ def _parse(reply: str) -> dict:
     return json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
 
 
+# The corpus map describes the shape of the corpus — entity types with a few
+# example values, document classes, properties. It changes only when documents
+# are ingested, but plan_question() rebuilds it for every question, and the
+# entity half is a full-corpus aggregation. Cache it.
+_CORPUS_MAP_TTL_S = 900
+_corpus_map_cache: tuple[float, str] | None = None
+_corpus_map_lock = asyncio.Lock()
+
+
+def invalidate_corpus_map() -> None:
+    """Drop the cached snapshot — call after ingestion changes the corpus.
+
+    In-process only. A worker that ingests in a different process cannot
+    clear the API process's copy, so _CORPUS_MAP_TTL_S is the real staleness
+    bound; cross-process invalidation would need shared state. Staleness is
+    cheap here — the map lists entity types and example values, so a newly
+    ingested batch shows up a quarter of an hour late in the planner's view
+    of the corpus, not in retrieval itself.
+    """
+    global _corpus_map_cache
+    _corpus_map_cache = None
+
+
 async def build_corpus_map() -> str:
     """Schema snapshot: entity types (frequency-ranked examples), document
-    classes with counts, and per-class properties with example values."""
+    classes with counts, and per-class properties with example values.
+
+    Cached for _CORPUS_MAP_TTL_S; see invalidate_corpus_map().
+    """
+    global _corpus_map_cache
+    now = time.monotonic()
+    cached = _corpus_map_cache
+    if cached and now - cached[0] < _CORPUS_MAP_TTL_S:
+        return cached[1]
+    async with _corpus_map_lock:
+        cached = _corpus_map_cache
+        if cached and time.monotonic() - cached[0] < _CORPUS_MAP_TTL_S:
+            return cached[1]
+        built = await _build_corpus_map_uncached()
+        _corpus_map_cache = (time.monotonic(), built)
+        return built
+
+
+async def _build_corpus_map_uncached() -> str:
     from app.db import AsyncSessionLocal
 
     async with AsyncSessionLocal() as s:
+        # Aggregate entity_mention on its own first (5.2M rows -> ~485k
+        # groups), then join. The previous form joined entity to
+        # entity_mention and grouped the 5.2M-row result, which sorts far
+        # more than it needs to for an answer that is 5 examples per type:
+        # on a real corpus it spilled >1GB of temp files and died on
+        # `temp_file_limit`. Needs ix_entity_mention_entity_id — without it
+        # this is ~100s rather than ~14s, and the old form fails either way.
         et = (await s.execute(text("""
-            WITH freq AS (
+            WITH uses AS (
+              SELECT entity_id, count(*) AS n
+              FROM entity_mention GROUP BY entity_id
+            ), ranked AS (
               SELECT e.entity_type_id, e.canonical_form,
-                     count(m.id) AS uses,
                      row_number() OVER (PARTITION BY e.entity_type_id
-                                        ORDER BY count(m.id) DESC) AS rn
-              FROM entity e LEFT JOIN entity_mention m ON m.entity_id = e.id
+                                        ORDER BY COALESCE(u.n, 0) DESC) AS rn
+              FROM entity e LEFT JOIN uses u ON u.entity_id = e.id
               WHERE e.merged_into_id IS NULL
-              GROUP BY 1, 2)
-            SELECT t.name, count(DISTINCT e.id),
+            )
+            SELECT t.name,
+                   (SELECT count(*) FROM entity e
+                    WHERE e.entity_type_id = t.id AND e.merged_into_id IS NULL),
                    (SELECT array_agg(canonical_form)
-                    FROM freq WHERE entity_type_id = t.id AND rn <= 5)
-            FROM entity_type t
-            LEFT JOIN entity e ON e.entity_type_id = t.id
-                               AND e.merged_into_id IS NULL
-            GROUP BY t.id, t.name ORDER BY 2 DESC"""))).all()
+                    FROM ranked WHERE entity_type_id = t.id AND rn <= 5)
+            FROM entity_type t ORDER BY 2 DESC"""))).all()
         dc = (await s.execute(text("""
             SELECT c.name, count(d.id) FROM document_class c
             LEFT JOIN document d ON d.document_class_id = c.id

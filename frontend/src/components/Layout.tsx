@@ -63,8 +63,11 @@ function NavItem({
 export function Layout() {
   const { me, signOut } = useAuth();
   return (
-    <div className="min-h-screen flex bg-page">
-      <aside className="w-60 border-r border-stone-200 bg-white flex flex-col">
+    // The shell owns the viewport and only the main column scrolls, so the
+    // sidebar — and the account block at its foot — stays put however long a
+    // page gets.
+    <div className="h-screen flex bg-page overflow-hidden">
+      <aside className="w-60 shrink-0 border-r border-stone-200 bg-white flex flex-col">
         <div className="px-5 pt-6 pb-8">
           <div className="flex items-center gap-2.5">
             <SinasMark className="h-6 w-7 shrink-0" />
@@ -76,7 +79,7 @@ export function Layout() {
             alpha
           </div>
         </div>
-        <nav className="flex-1 flex flex-col px-3 gap-0.5">
+        <nav className="flex-1 min-h-0 overflow-y-auto flex flex-col px-3 gap-0.5">
           {links.map(({ to, label, icon: Icon }) => (
             <NavItem key={to} to={to} label={label} Icon={Icon} />
           ))}

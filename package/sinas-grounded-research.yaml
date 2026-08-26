@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grounded-research
-  version: "0.1.42"
+  version: "0.1.43"
   description: >
     Sinas Grounded Research — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -121,8 +121,11 @@ spec:
   # keys, so an installer counts them as reaching outside the package and
   # asks the operator to consent (allowBroadRolePermissions).
   #
-  # Everything is `:own` unless reading is the point: a researcher reads the
-  # whole corpus and everyone's answers, but only ever writes their own.
+  # The corpus is shared; research is not. A question a lawyer asks — and
+  # the sources it returned — discloses the matter they are working on, so
+  # results, answers and dossiers are `:own`. Only the document corpus is
+  # read:all. Admin retains :all for support; revisit if privilege rules
+  # should cover operators too.
   roles:
     - name: sgr-researcher
       description: >
@@ -132,11 +135,11 @@ spec:
         - { key: "sinas.agents/sgr/*.read:all", value: true }
         - { key: "sinas.agents/sgr/*.chat:all", value: true }
         - { key: "sgr.documents.read:all", value: true }
-        - { key: "sgr.results.read:all", value: true }
+        - { key: "sgr.results.read:own", value: true }
         - { key: "sgr.results.write:own", value: true }
-        - { key: "sgr.answers.read:all", value: true }
+        - { key: "sgr.answers.read:own", value: true }
         - { key: "sgr.answers.write:own", value: true }
-        - { key: "sgr.dossiers.read:all", value: true }
+        - { key: "sgr.dossiers.read:own", value: true }
         - { key: "sgr.dossiers.write:own", value: true }
 
     - name: sgr-curator
@@ -149,11 +152,11 @@ spec:
         - { key: "sgr.documents.read:all", value: true }
         - { key: "sgr.documents.write:own", value: true }
         - { key: "sgr.ingestion.write:own", value: true }
-        - { key: "sgr.results.read:all", value: true }
+        - { key: "sgr.results.read:own", value: true }
         - { key: "sgr.results.write:own", value: true }
-        - { key: "sgr.answers.read:all", value: true }
+        - { key: "sgr.answers.read:own", value: true }
         - { key: "sgr.answers.write:own", value: true }
-        - { key: "sgr.dossiers.read:all", value: true }
+        - { key: "sgr.dossiers.read:own", value: true }
         - { key: "sgr.dossiers.write:own", value: true }
 
     - name: sgr-admin

@@ -538,10 +538,11 @@ export default function RunsPage() {
       </div>
 
       <div className="flex gap-4 items-start">
-        {/* recent runs */}
-        <div className="w-56 shrink-0">
-          <div className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-2">Recent runs</div>
-          <div className="space-y-1.5">
+        {/* recent runs — scrolls on its own so the run being inspected stays
+            put no matter how far back the history is loaded */}
+        <div className="w-56 shrink-0 sticky top-0 max-h-[calc(100vh-280px)] flex flex-col">
+          <div className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-2 shrink-0">Recent runs</div>
+          <div className="space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-1">
             {(runs.data ?? []).map((r) => (
               <button
                 key={r.id}
@@ -574,7 +575,7 @@ export default function RunsPage() {
         </div>
 
         {/* diagram */}
-        <div className="w-[340px] shrink-0 bg-white border border-stone-200 rounded-lg p-4">
+        <div className="w-[340px] shrink-0 sticky top-0 max-h-[calc(100vh-280px)] overflow-y-auto bg-white border border-stone-200 rounded-lg p-4">
           {run.data && TERMINAL.has(run.data.status) && (
             <div className="flex gap-2 mb-3">
               {canReplay && (
@@ -610,7 +611,7 @@ export default function RunsPage() {
         </div>
 
         {/* inspector panel */}
-        <div className="flex-1 min-w-0 bg-white border border-stone-200 rounded-lg sticky top-4 max-h-[calc(100vh-120px)] flex flex-col">
+        <div className="flex-1 min-w-0 bg-white border border-stone-200 rounded-lg sticky top-0 max-h-[calc(100vh-280px)] flex flex-col">
           {view.run && (
             <Inspector
               run={view.run}

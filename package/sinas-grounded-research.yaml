@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grounded-research
-  version: "0.1.41"
+  version: "0.1.42"
   description: >
     Sinas Grounded Research — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -103,10 +103,77 @@ spec:
         measured here: keep this on a caching-enabled provider.
       required: true
 
-  # Grove is the system of record: no Sinas collection, no post-upload
+  # SGR is the system of record: no Sinas collection, no post-upload
   # function. Every route registers via SGR's own API (content-hash +
   # source identity dedup); the old collection path keyed identity on
   # collection_file_id and bypassed both.
+
+  # ─────────────────────────────────────────────
+  # Roles — the least-privilege surface for people using SGR
+  #
+  # A package defines roles; it never binds them to anyone. Assigning a
+  # person to a role stays an operator act, so no emailDomain here.
+  #
+  # Two halves to each role. The `sinas.agents/sgr/*` keys let the holder
+  # reach the agents this package installs — without them the first call
+  # of any run 403s. The `sgr.*` keys are SGR's own permission vocabulary,
+  # which its API checks back through Sinas; they are not `sinas.<resource>/`
+  # keys, so an installer counts them as reaching outside the package and
+  # asks the operator to consent (allowBroadRolePermissions).
+  #
+  # Everything is `:own` unless reading is the point: a researcher reads the
+  # whole corpus and everyone's answers, but only ever writes their own.
+  roles:
+    - name: sgr-researcher
+      description: >
+        Ask research questions and read the corpus, the retrieved document
+        sets and the answers. Writes only their own runs and answers.
+      permissions:
+        - { key: "sinas.agents/sgr/*.read:all", value: true }
+        - { key: "sinas.agents/sgr/*.chat:all", value: true }
+        - { key: "sgr.documents.read:all", value: true }
+        - { key: "sgr.results.read:all", value: true }
+        - { key: "sgr.results.write:own", value: true }
+        - { key: "sgr.answers.read:all", value: true }
+        - { key: "sgr.answers.write:own", value: true }
+        - { key: "sgr.dossiers.read:all", value: true }
+        - { key: "sgr.dossiers.write:own", value: true }
+
+    - name: sgr-curator
+      description: >
+        A researcher who also brings documents into the corpus and runs
+        ingestion over them.
+      permissions:
+        - { key: "sinas.agents/sgr/*.read:all", value: true }
+        - { key: "sinas.agents/sgr/*.chat:all", value: true }
+        - { key: "sgr.documents.read:all", value: true }
+        - { key: "sgr.documents.write:own", value: true }
+        - { key: "sgr.ingestion.write:own", value: true }
+        - { key: "sgr.results.read:all", value: true }
+        - { key: "sgr.results.write:own", value: true }
+        - { key: "sgr.answers.read:all", value: true }
+        - { key: "sgr.answers.write:own", value: true }
+        - { key: "sgr.dossiers.read:all", value: true }
+        - { key: "sgr.dossiers.write:own", value: true }
+
+    - name: sgr-admin
+      description: >
+        Configures the corpus itself — document classes, entity and
+        relationship types, playbooks, packages — and may correct any
+        document or answer, not only their own.
+      permissions:
+        - { key: "sinas.agents/sgr/*.read:all", value: true }
+        - { key: "sinas.agents/sgr/*.chat:all", value: true }
+        - { key: "sgr.admin:all", value: true }
+        - { key: "sgr.documents.read:all", value: true }
+        - { key: "sgr.documents.write:all", value: true }
+        - { key: "sgr.ingestion.write:own", value: true }
+        - { key: "sgr.results.read:all", value: true }
+        - { key: "sgr.results.write:own", value: true }
+        - { key: "sgr.answers.read:all", value: true }
+        - { key: "sgr.answers.write:all", value: true }
+        - { key: "sgr.dossiers.read:all", value: true }
+        - { key: "sgr.dossiers.write:own", value: true }
 
   # ─────────────────────────────────────────────
   # Connector — wraps the SGR HTTP API

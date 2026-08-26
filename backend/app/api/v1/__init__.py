@@ -30,9 +30,22 @@ from app.services.sinas import get_sinas_auth
 
 api_router = APIRouter(prefix="/api/v1")
 
-# SDK-provided auth routes: POST /login, /verify-otp, /refresh, /logout, GET /me.
+# SDK-provided auth routes: POST /login, /verify-otp, /refresh, /logout.
 # Mounted under /api/v1/auth — frontend uses /api/v1/auth/login etc.
-api_router.include_router(get_sinas_auth().router, prefix="/auth", tags=["auth"])
+#
+# The SDK's GET /me is deliberately dropped. We mount its router with
+# auto_error=False, and for a credential-less request the SDK hands the route
+# a client it calls "unauthenticated" — but SinasClient's constructor falls
+# back to os.getenv("SINAS_API_KEY"), which is set here as our service
+# identity. The route therefore answers an anonymous caller with the service
+# account's id, email and roles. Our own /api/v1/me (app.api.v1.me) resolves
+# the caller through get_caller and 401s correctly; that is the one the
+# frontend uses.
+_sdk_auth_router = get_sinas_auth().router
+_sdk_auth_router.routes = [
+    r for r in _sdk_auth_router.routes if getattr(r, "path", None) != "/me"
+]
+api_router.include_router(_sdk_auth_router, prefix="/auth", tags=["auth"])
 
 api_router.include_router(health.router)
 api_router.include_router(info.router)

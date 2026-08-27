@@ -20,7 +20,10 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
@@ -262,6 +265,28 @@ async def _tele(run_id: uuid.UUID, stage: str, **detail: Any) -> None:
         t[stage] = entry
         run.telemetry = t
         await session.commit()
+
+
+@asynccontextmanager
+async def _timed(run_id: uuid.UUID, stage: str) -> AsyncIterator[None]:
+    """Record when a stage starts, ends and how long it took.
+
+    Stages recorded their own timings inconsistently — `draft` carried
+    started/completed, `retrieval` only completed, `extract` neither — so a
+    run's telemetry could not say where its wall clock went. On a measured
+    52-minute run the logged model calls accounted for 932s; the remaining
+    ~2,800s sat between them, and nothing persisted said which stage was
+    holding it. `elapsed_s` is written even when the stage raises, because a
+    stage that dies slowly is exactly the one worth timing.
+    """
+    t0 = time.monotonic()
+    await _tele(run_id, stage, started=_iso())
+    try:
+        yield
+    finally:
+        await _tele(
+            run_id, stage, completed=_iso(), elapsed_s=round(time.monotonic() - t0, 1)
+        )
 
 
 def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list[str]:
@@ -695,6 +720,9 @@ async def _extract_passages(
     is then verified against the actual lines — fabricated quotes are dropped,
     so the drafter can only ever see text that exists."""
     sem = asyncio.Semaphore(4)
+    started = time.monotonic()
+    if run_id is not None:
+        await _tele(run_id, "extract", started=_iso())
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
@@ -759,6 +787,8 @@ async def _extract_passages(
             passages_proposed=sum(r.get("proposed", 0) for r in out),
             passages_verified=sum(len(r.get("passages") or []) for r in out),
             extraction_errors=len(errors),
+            completed=_iso(),
+            elapsed_s=round(time.monotonic() - started, 1),
         )
     return out
 
@@ -1676,6 +1706,7 @@ async def _stage_validate_publish(
 ) -> None:
     from app.services.faithfulness import validate_answer_evidence
 
+    await _tele(run_id, "validate", started=_iso())
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         answer_id = run.answer_id
@@ -2073,6 +2104,7 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
         if run.parent_result_id:  # resume: retrieval already stored
             return
     await _mark(run_id, status="retrieving")
+    await _tele(run_id, "retrieval", started=_iso())
     # Between each step, not just at the stage boundary: these are the four
     # billable calls of the stage, and a checkpoint is only worth having
     # where it can still stop the next one from being made.

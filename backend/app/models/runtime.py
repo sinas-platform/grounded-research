@@ -278,6 +278,12 @@ class AnnotationValue(Base, TimestampMixin):
 # ─────────────────────────────────────────────────────────────
 class Relationship(Base, TimestampMixin):
     __tablename__ = "relationship"
+    # Named explicitly rather than index=True: this table's other three indexes
+    # were named in 0001_baseline ("ix_rel_def", "ix_rel_source",
+    # "ix_rel_target"), which is not what SQLAlchemy's default naming produces
+    # from index=True, so create_all and a migrated database already disagree on
+    # those three names. Spelling this one out keeps both paths on one name.
+    __table_args__ = (Index("ix_rel_evidence_doc", "evidence_document_id"),)
 
     id: Mapped[uuid.UUID] = uuid_pk()
     relationship_definition_id: Mapped[uuid.UUID] = mapped_column(

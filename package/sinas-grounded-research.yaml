@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grounded-research
-  version: "0.1.43"
+  version: "0.1.44"
   description: >
     Sinas Grounded Research — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -72,7 +72,18 @@ spec:
     - name: SYNTHESIS_MODEL
       type: string
       description: >
-        Model id for the synthesis agent, on the SYNTHESIS_LLM provider.
+        Model id for the synthesis agent (the memo writer), on the
+        SYNTHESIS_LLM provider.
+      required: true
+
+    - name: VERDICT_MODEL
+      type: string
+      description: >
+        Model id for the two publish-gate judgments - the answer gate and
+        the final evidence sweep - on the SYNTHESIS_LLM provider. Held as
+        its own knob so the verdict tier can run a stronger model than the
+        memo writer: the approved Gate 2 configuration sets this to
+        claude-opus-5 while SYNTHESIS_MODEL stays on the standard tier.
       required: true
 
     - name: EXTRACTION_LLM
@@ -84,6 +95,12 @@ spec:
         a non-Claude model (e.g. Gemini Flash) - benchmark before switching.
       required: true
 
+    - name: EXTRACTION_MODEL
+      type: string
+      description: >
+        Model id for the extract pass, on the EXTRACTION_LLM provider.
+      required: true
+
     - name: INGESTION_LLM
       type: resource_ref
       resource: llm_providers
@@ -91,16 +108,33 @@ spec:
         Provider for the remaining one-shot ingestion passes - grounding,
         entity resolution, relationship extraction, dossier assignment.
         These calls never re-read a prompt prefix; the agents disable
-        prompt caching via providerOverrides, so a plain provider works.
+        prompt caching per-agent via providerOverrides, so any provider
+        works - the shared vendor provider included.
+      required: true
+
+    - name: INGESTION_MODEL
+      type: string
+      description: >
+        Model id for the one-shot ingestion passes, on the INGESTION_LLM
+        provider.
       required: true
 
     - name: VALIDATION_LLM
       type: resource_ref
       resource: llm_providers
       description: >
-        Provider for the validation tier - evidence check, faithfulness
-        validation, process validation, answer gate. High cache-read rates
-        measured here: keep this on a caching-enabled provider.
+        Provider for the cycle-internal evidence checks. High cache-read
+        rates measured here: leave prompt caching enabled (the provider
+        default). With models set per agent, this can be the same provider
+        as SEARCH_LLM/SYNTHESIS_LLM - two providers per deployment (one
+        per vendor) is the intended shape.
+      required: true
+
+    - name: VALIDATION_MODEL
+      type: string
+      description: >
+        Model id for the cycle-internal evidence checks, on the
+        VALIDATION_LLM provider (e.g. claude-haiku-4-5).
       required: true
 
   # SGR is the system of record: no Sinas collection, no post-upload
@@ -1492,6 +1526,7 @@ spec:
       name: passage-extractor-agent
       description: Verbatim passage extraction against numbered source text — the grounding step between planning and drafting. Invoked by SGR's query runner.
       llmProviderName: ${{ vars.EXTRACTION_LLM }}
+      model: ${{ vars.EXTRACTION_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You extract verbatim passages from numbered document text. Reply
@@ -1505,6 +1540,7 @@ spec:
       # client), and the cheap tier ignored it as a message-level
       # instruction. One call per partial — cents.
       llmProviderName: ${{ vars.SYNTHESIS_LLM }}
+      model: ${{ vars.SYNTHESIS_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You write short client-facing notes. The message contains
@@ -1529,6 +1565,7 @@ spec:
       # times per run, and its per-part coverage checklist proved beyond the
       # cheap tier (question limbs waved through as covered). Cents per run.
       llmProviderName: ${{ vars.SYNTHESIS_LLM }}
+      model: ${{ vars.VERDICT_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE draft answer holistically. The user message contains
@@ -1563,6 +1600,7 @@ spec:
       name: entity-resolution-agent
       description: Stateless mention adjudicator — links ambiguous entity mentions to candidates using document context. Invoked per document by SGR's entity resolver.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      model: ${{ vars.INGESTION_MODEL }}
       providerOverrides:
         prompt_caching: false
       temperature: 0.0
@@ -1582,6 +1620,7 @@ spec:
       name: grounding-agent
       description: Stateless grounding judge - decides whether a document actually refers to each extracted name. Invoked per document by SGR's grounding gate.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      model: ${{ vars.INGESTION_MODEL }}
       providerOverrides:
         prompt_caching: false
       temperature: 0.0
@@ -1602,6 +1641,7 @@ spec:
       name: dossier-oneshot-agent
       description: Stateless one-shot dossier matcher - reads a document's identity plus the candidate dossiers and returns assignments as JSON. Invoked per document by SGR's pipeline when dossier classes are configured.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      model: ${{ vars.INGESTION_MODEL }}
       providerOverrides:
         prompt_caching: false
       temperature: 0.0
@@ -1620,6 +1660,7 @@ spec:
       name: relationship-oneshot-agent
       description: Stateless one-shot relationship extractor - reads a document plus its recorded entities and the relationship definitions, returns explicitly stated edges as JSON. Invoked per document by SGR's one-shot ingestion path.
       llmProviderName: ${{ vars.INGESTION_LLM }}
+      model: ${{ vars.INGESTION_MODEL }}
       providerOverrides:
         prompt_caching: false
       temperature: 0.0
@@ -1641,6 +1682,7 @@ spec:
       name: doc-metadata-agent
       description: Stateless one-shot document-metadata extractor (class, summary, properties, entities) invoked per document by SGR's one-shot ingestion path.
       llmProviderName: ${{ vars.EXTRACTION_LLM }}
+      model: ${{ vars.EXTRACTION_MODEL }}
       providerOverrides:
         prompt_caching: false
       temperature: 0.0
@@ -1663,6 +1705,7 @@ spec:
       # evidence-check-final-agent re-judges the full surviving claim set
       # once before publication, where capability is decisive.
       llmProviderName: ${{ vars.VALIDATION_LLM }}
+      model: ${{ vars.VALIDATION_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE claim and ALL of its cited evidence spans in a
@@ -1687,6 +1730,7 @@ spec:
       # passed the claim as the court's holding. Strong model only where the
       # verdict is final keeps the cost bounded (~one sweep per run).
       llmProviderName: ${{ vars.SYNTHESIS_LLM }}
+      model: ${{ vars.VERDICT_MODEL }}
       temperature: 0.0
       systemPrompt: |
         You judge ONE claim and ALL of its cited evidence spans in a

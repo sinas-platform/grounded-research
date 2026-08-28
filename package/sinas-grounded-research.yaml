@@ -9,7 +9,7 @@ metadata:
 
 package:
   name: sinas-grounded-research
-  version: "0.1.44"
+  version: "0.1.45"
   description: >
     Sinas Grounded Research — stateful, multi-agent document indexing and retrieval. The
     runtime is generic; domain knowledge (document classes, properties,
@@ -211,6 +211,35 @@ spec:
         - { key: "sgr.answers.write:all", value: true }
         - { key: "sgr.dossiers.read:all", value: true }
         - { key: "sgr.dossiers.write:own", value: true }
+
+    # ── Service identities (machine roles — bind to API keys, never people) ──
+
+    - name: sgr-service
+      description: >
+        The SGR backend's own identity toward Sinas. Grants exactly what the
+        runtime calls need — invoking the sgr/ agents and managing the sgr/
+        skills — and nothing about results, answers or dossiers: SGR is the
+        system of record for those and enforces access itself. The status
+        endpoint's package-version check needs a non-namespaced packages
+        read this role deliberately omits; on a key holding only this role
+        that check degrades to its fallback rather than widening the grant.
+      permissions:
+        - { key: "sinas.agents/sgr/*.read:all", value: true }
+        - { key: "sinas.agents/sgr/*.chat:all", value: true }
+        - { key: "sinas.skills/sgr/*.read:all", value: true }
+        - { key: "sinas.skills/sgr/*.write:all", value: true }
+
+    - name: sgr-mcp
+      description: >
+        The MCP service's identity toward Sinas: token exchange only. The
+        MCP backend authenticates its caller itself, exchanges that identity
+        for Sinas tokens (POST /auth/token/exchange requires
+        sinas.auth.exchange:all), and every subsequent call rides the
+        caller's own token and roles. Deliberately granted nothing else — a
+        service account that could read results would put every caller
+        behind one identity, and research access must stay per-user.
+      permissions:
+        - { key: "sinas.auth.exchange:all", value: true }
 
   # ─────────────────────────────────────────────
   # Connector — wraps the SGR HTTP API

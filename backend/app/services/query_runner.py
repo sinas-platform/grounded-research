@@ -1225,7 +1225,7 @@ async def _gate_answer(
     # it — so a run was told to use 32025M11936.md, given no line of it, and
     # correctly changed nothing. Each named source becomes a point to ground,
     # which is what causes it to be opened and quoted.
-    stronger = [str(src) for src in (data.get("unused_sources") or [])[:3] if src]
+    stronger = [str(src) for src in (data.get("unused_sources") or [])[:5] if src]
     for src in stronger:
         issues.append(
             "Stronger source unused: " + src + " Use it for the point it speaks "
@@ -1317,10 +1317,22 @@ async def _pre_publish_sweep(
                     .where(AnswerClaim.id == cid))
             await s3.commit()
         await _tele(run_id, "validate", final_sweep_dropped=len(flagged_ids))
+        # A fixable defect in one claim must not demote the whole answer.
+        # The flagged claims are gone — visibly: the drop is recorded and
+        # the numbering keeps the gap — so re-ask the gate whether what
+        # survives still answers the question. If it does, publish; the
+        # partial state is reserved for the corpus genuinely not answering,
+        # not for the repair budget running out one claim short.
+        ok, missing, _issues, correctness, _pts = await _gate_answer(
+            sinas, question, answer_id, run_id)
+        if ok and not correctness:
+            await _tele(run_id, "validate", final_sweep_published_after_drop=True)
+            return True
         raise PartialOutcome(
-            "faithfulness",
-            "final evidence review still found claims asserting more "
-            "than their sources carry — " + " ".join(fb)[:600])
+            "coverage",
+            "after removing claims the final review could not support, the "
+            "surviving claims no longer fully answer the question — "
+            + (missing or " ".join(fb))[:600])
     await _revise_answer(sinas, run_id, answer_id, question, fb,
                          last_attempt=True)
     return False
@@ -1806,12 +1818,20 @@ async def _stage_validate_publish(
                         "the answer could not be made internally consistent — "
                         + " ".join(correctness)[:600])
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
+                # A gap the reviser was already fed once is a gap it could
+                # not close from the corpus. Allowing the declared-gap claim
+                # only on the very last attempt meant the run burned every
+                # cycle trying the impossible and went partial anyway —
+                # partial as "out of retries" instead of "the sources do not
+                # answer this". Second time a point comes back, the honest
+                # abstention is on the table.
+                repeated = not await _gate_point_is_new(run_id, key)
                 await _record_fed(run_id, key)
                 await _revise_answer(
                     sinas, run_id, answer_id, question,
                     correctness + issues,
                     points or ([missing] if missing else []),
-                    last_attempt=gate_cycles <= 1)
+                    last_attempt=gate_cycles <= 1 or repeated)
                 return await _stage_validate_publish(
                     run_id, sinas, gate_cycles - 1)
         # One revision per round, over everything this round found.

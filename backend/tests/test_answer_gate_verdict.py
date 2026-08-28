@@ -104,7 +104,7 @@ async def test_correctness_defects_are_separated_from_quality_issues(gate_env):
         })
     )
     assert any("liability standards" in c for c in correctness)
-    assert any("Stronger source unused" in i for i in issues)
+    assert any("Owed source unused" in i for i in issues)
     # quality issues must never appear in the blocking list
     assert not any("Stronger source unused" in c for c in correctness)
 
@@ -131,7 +131,7 @@ async def test_a_named_stronger_source_becomes_a_point_to_ground(gate_env):
     # the coverage gap comes first: it is what blocks publication, and the
     # number of points revision extracts for is bounded
     assert points[0] == "no market definition is given"
-    assert any("Stronger source unused" in i for i in issues)
+    assert any("Owed source unused" in i for i in issues)
 
 
 @pytest.mark.asyncio

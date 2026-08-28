@@ -30,6 +30,7 @@ from typing import Any
 import httpx
 from sqlalchemy import func, select
 
+from app.services import obligations
 from app.auth import CallerIdentity
 from app.config import get_settings
 from app.db import AsyncSessionLocal
@@ -1225,12 +1226,44 @@ async def _gate_answer(
     # it — so a run was told to use 32025M11936.md, given no line of it, and
     # correctly changed nothing. Each named source becomes a point to ground,
     # which is what causes it to be opened and quoted.
-    stronger = [str(src) for src in (data.get("unused_sources") or [])[:5] if src]
-    for src in stronger:
+    #
+    # And a message alone is not enough either: it lives one round, so a
+    # source could be demanded, cited, and then lost to a later deletion
+    # with nothing owed any more. Every source the gate names goes into the
+    # run's obligation ledger; what is fed below comes from the ledger's
+    # unmet entries — persisting across rounds, reopening if the citing
+    # claim dies — not from this round's gate reply alone.
+    fresh: dict[str, str] = {}
+    for src in (data.get("unused_sources") or []):
+        fn, _, why = str(src).partition(":")
+        if fn.strip():
+            fresh[fn.strip()] = (why.strip() or str(src))[:400]
+            await obligations.record(run_id, fn.strip(), why.strip() or str(src))
+    owed = await obligations.unmet(run_id, answer_id)
+    # This round's parse feeds regardless of ledger state: the ledger adds
+    # persistence across rounds, it must never be a precondition for acting
+    # on what the gate just said.
+    seen = {u["doc"] for u in owed}
+    owed += [{"doc": d, "note": n, "fed": 0}
+             for d, n in fresh.items() if d not in seen]
+    capped = [u for u in owed if u["fed"] >= obligations.MAX_FEEDS]
+    for u in capped:
+        await obligations.waive(
+            run_id, u["doc"],
+            f"not grounded after {u['fed']} revision attempts", by="system")
+    if capped:
+        await _tele(run_id, "validate",
+                    obligations_system_waived=[u["doc"] for u in capped])
+    feed = [u for u in owed if u["fed"] < obligations.MAX_FEEDS][:5]
+    stronger = [f"{u['note']} [obligated document: {u['doc']}]" for u in feed]
+    for u in feed:
         issues.append(
-            "Stronger source unused: " + src + " Use it for the point it speaks "
-            "to (or keep the current citation only if it is genuinely the better fit)."
+            f"Owed source unused: {u['doc']} — {u['note']} Cite it for the "
+            "point it carries, or waive it with a rationale you can only "
+            "give after reading its passages. An obligation neither cited "
+            "nor waived returns every round."
         )
+    await obligations.note_fed(run_id, [u["doc"] for u in feed])
     # every uncovered part is a gap the answer must close, not just one
     missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")
     publishable = bool(data.get("publishable")) and not uncovered
@@ -1454,9 +1487,16 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         if len(why) >= 20 and str(c.get("seq", "")).lstrip("-").isdigit():
             keep.append({"seq": int(c["seq"]), "rationale": why})
 
-    if not (revise or add or drop or keep):
+    waives = []
+    for w in (data.get("waive") or []):
+        if isinstance(w, dict) and str(w.get("doc") or "").strip() \
+                and len(str(w.get("rationale") or "").strip()) >= 20:
+            waives.append({"doc": str(w["doc"]).strip(),
+                           "rationale": str(w["rationale"]).strip()})
+    if not (revise or add or drop or keep or waives):
         return None
-    return {"revise": revise, "add": add, "drop": drop, "keep": keep}
+    return {"revise": revise, "add": add, "drop": drop, "keep": keep,
+            "waive": waives}
 
 
 async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
@@ -1560,6 +1600,11 @@ async def _revise_answer(
         windows: list[tuple[str, int, int, str]] = []
         for i, pt in enumerate(extra_points[:5], start=1):
             anchors, near = await _anchors_for(pt)
+            # An obligated point names its document; the term-scan may rank
+            # it low or miss it. The debt is to THAT document, so it leads.
+            ob = re.search(r"\[obligated document: ([^\]]+)\]", pt)
+            if ob:
+                anchors = [ob.group(1)] + [a for a in anchors if a != ob.group(1)]
             # The term scan already KNOWS where the matching lines sit.
             # Hand the reviser those windows directly — text copied from
             # the stored document, so the quotes are correct by
@@ -1614,6 +1659,11 @@ async def _revise_answer(
         "changes neither the claim nor its evidence. Use it only when you "
         "have read the passages from the named source and they do not carry "
         "the point better — not to avoid the work.\n\n"
+        "A feedback line marked as an OWED source is an obligation, not a "
+        "suggestion: either cite that document in a revised or added claim, "
+        'or list it in "waive" with a rationale you could only give after '
+        "reading its passages. An obligation neither cited nor waived comes "
+        "back every round.\n\n"
         "Give a RATIONALE with every claim you revise, add or keep: ONE "
         "short sentence, at most 20 words — which part of the question it "
         "answers and why this source settles it. Never restate the claim. "
@@ -1635,6 +1685,9 @@ async def _revise_answer(
         '"drop": [<seq>], '
         '"keep": [{"seq": <int>, "rationale": "<why the current citation '
         'stands despite the feedback>"}], '
+        '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
+        'its passages, this OWED document does not carry any point this '
+        'answer needs>"}], '
         '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
         'procedural|conclusion", "rationale": "<why this claim rests on this '
         'source>", "evidence": [{"filename": "...", '
@@ -1646,7 +1699,12 @@ async def _revise_answer(
     )
 
     patch = _parse_patch(reply, allow_abstention=last_attempt)
-    if not patch:
+    if patch:
+        # A waive is a discharge with a recorded reason, not a dropped
+        # message: it is honored even when the rest of the patch is empty.
+        for w in patch.get("waive") or []:
+            await obligations.waive(run_id, w["doc"], w["rationale"])
+    if not patch or not (patch["revise"] or patch["add"] or patch["drop"]):
         await _tele(run_id, "validate", revision_yielded_no_change=True)
         return 0
 

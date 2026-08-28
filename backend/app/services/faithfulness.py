@@ -172,6 +172,24 @@ async def _domain_guidance(cited_classes: set[str] | None = None) -> str:
             "corpus):\n" + "\n\n".join(parts) + "\n\n")
 
 
+def _front_matter_extent(content: str) -> int:
+    """Last line (1-based) of the ingestion-written front-matter block, or 0.
+
+    Ingestion normalizes every document to open with a `---` fenced
+    key:value block. Those lines are the pipeline's own envelope — they
+    identify the document; they are not its text. The boundary is exact
+    because this code's own ingestion wrote it, so no pattern matching and
+    no assumption about the source document is involved.
+    """
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return 0
+    for i in range(1, min(len(lines), 60)):
+        if lines[i].strip() == "---":
+            return i + 1
+    return 0
+
+
 def _span_section(toc: list[dict], line_from: int, line_to: int) -> str:
     """The innermost TOC section containing the span, with its parent —
     computed from the document's own headings. Position inside a document's
@@ -342,12 +360,36 @@ async def validate_answer_evidence(
     errors: list[dict[str, Any]] = []
     by_claim: dict[uuid.UUID, dict[str, Any]] = {}
     toc_cache: dict[int, list[dict]] = {}
+    fm_cache: dict[int, int] = {}
+    pre_verdicts: list[dict[str, Any]] = []
     for ev, claim in rows:
         content = await _content_for(ev)
         if not content:
             errors.append({"evidence_id": ev.id, "error": "no extracted content"})
             continue
         span_text, lf, lt = _slice_span(content, ev.span or {})
+        # Deterministic: a span wholly inside the front-matter envelope is
+        # the document identifying itself, not the document speaking. The
+        # expert reviews found claims resting on exactly these lines — "the
+        # Court heard an appeal", cited to a title block — and the judge
+        # sometimes passed them. A span that merely STARTS in the envelope
+        # and runs into the body is left to the judge: it covers real text.
+        ck = id(content)
+        if ck not in fm_cache:
+            fm_cache[ck] = _front_matter_extent(content)
+        fm_end = fm_cache[ck]
+        s_lf = int((ev.span or {}).get("line_from") or lf)
+        s_lt = int((ev.span or {}).get("line_to") or lt)
+        if fm_end and s_lt <= fm_end:
+            pre_verdicts.append({
+                "evidence_id": ev.id, "validated": False,
+                "reasoning": (
+                    f"span (lines {s_lf}-{s_lt}) lies entirely within the "
+                    f"document's front-matter block (lines 1-{fm_end}), which "
+                    "identifies the document and carries none of its "
+                    "reasoning — it cannot support a claim"),
+            })
+            continue
         # The span's position in the document's own structure, from the
         # deterministic TOC — cached per content object, not per row.
         ck = id(content)
@@ -391,7 +433,7 @@ async def validate_answer_evidence(
                          agent=_FINAL_VALIDATOR_AGENT if final else _VALIDATOR_AGENT)
             for e in by_claim.values()
         ]) if by_claim else []
-    verdicts = [v for group in grouped for v in group]
+    verdicts = pre_verdicts + [v for group in grouped for v in group]
 
     by_id = {ev.id: ev for ev, _ in rows}
     claims_by_ev = {ev.id: c for ev, c in rows}

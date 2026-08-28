@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from functools import lru_cache
+from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +41,23 @@ class Settings(BaseSettings):
     # admin identity via /auth/me. Unused in `sinas` mode (per-user tokens
     # carry their own auth).
     sinas_api_key: str = Field(default="", validation_alias="SINAS_API_KEY")
+
+    # Path to a file holding the same value. Read into `sinas_api_key` at
+    # startup when that is empty, so every consumer keeps reading one field.
+    #
+    # This exists because the key can only be minted by a RUNNING Sinas
+    # instance, so no deployment tool can generate it — it has to be carried in
+    # from outside. Passing it as a literal env var means the value has to sit
+    # in whatever renders the manifest (Pulumi/Helm state, CI config), and
+    # whoever can write there becomes the only person who can rotate it.
+    #
+    # A file lets a platform hand the secret to the container directly —
+    # Kubernetes projected volumes and secret-store CSI drivers, Docker/Compose
+    # secrets, systemd credentials — so the value never enters the deployment
+    # description at all. `_FILE` is the established convention for this
+    # (postgres, mysql and grafana images all use it) and is deliberately
+    # cloud-agnostic: SGR must not depend on any one provider's secret API.
+    sinas_api_key_file: str = Field(default="", validation_alias="SINAS_API_KEY_FILE")
 
     # Bulk-rerun worker concurrency cap. Caps simultaneous agent invocations
     # the runner makes to Sinas. Higher = faster but burns LLM budget faster.
@@ -82,6 +100,35 @@ class Settings(BaseSettings):
     sgr_audience: str = Field(
         default="a researcher", validation_alias="SGR_AUDIENCE"
     )
+
+    @model_validator(mode="after")
+    def _read_api_key_file(self) -> "Settings":
+        """Resolve SINAS_API_KEY_FILE into sinas_api_key.
+
+        The literal env var wins when both are set: an operator overriding a
+        platform-mounted secret is deliberate, and silently preferring the file
+        would make that override look applied while doing nothing.
+
+        A configured-but-unreadable path is fatal rather than a warning. The
+        alternative is booting with an empty key, which fails much later as a
+        401 from Sinas on the first background run — long after the cause is
+        visible, and only under load.
+        """
+        if self.sinas_api_key or not self.sinas_api_key_file:
+            return self
+        try:
+            value = Path(self.sinas_api_key_file).read_text(encoding="utf-8").strip()
+        except OSError as exc:
+            msg = f"SINAS_API_KEY_FILE={self.sinas_api_key_file!r} could not be read: {exc}"
+            raise ValueError(msg) from exc
+        if not value:
+            msg = f"SINAS_API_KEY_FILE={self.sinas_api_key_file!r} is empty"
+            raise ValueError(msg)
+        # Trailing newline is the norm for a mounted secret; strip() above
+        # handles it, because it would otherwise ride into the Authorization
+        # header and be rejected as a malformed token.
+        self.sinas_api_key = value
+        return self
 
     @property
     def cors_origin_list(self) -> list[str]:

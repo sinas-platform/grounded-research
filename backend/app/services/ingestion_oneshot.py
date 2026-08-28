@@ -39,7 +39,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models import Document, DocumentClass, Entity, EntityAlias, EntityMention
-from app.models.config import DocumentClassProperty, EntityType
+from app.models.config import (DocumentClassEntityType,
+                               DocumentClassProperty, EntityType)
 from app.models.runtime import PropertyValue
 from app.services.query_runner import _Sinas
 
@@ -622,9 +623,25 @@ async def oneshot_ingest_document(
     # safety class as the gazetteer scan, and the resolver may re-link it.
     alias_map = {a: (eid, canon) for a, eid, canon in gazetteer}
     type_by_name = {t["name"]: t for t in entity_types}
+    # The domain config declares, per document class, which entity types may
+    # be extracted (document_class_entity_type — e.g. Author only on the
+    # publisher's own content, so judges and officials in decisions are not
+    # indexed as people). The extraction prompt carried this as an
+    # instruction and the instruction did not hold: enforcement is here,
+    # where the mention is persisted. A class that declares no list is
+    # unrestricted — restriction is opt-in per class, so classes added
+    # before their list is written keep working.
+    allowed_type_ids: set | None = None
+    if doc.document_class_id is not None:
+        rows_allowed = (await session.execute(
+            select(DocumentClassEntityType.entity_type_id).where(
+                DocumentClassEntityType.document_class_id
+                == doc.document_class_id))).scalars().all()
+        allowed_type_ids = set(rows_allowed) if rows_allowed else None
     mentions_added = 0
     mentions_unlinked = 0
     filtered_out = 0
+    out_of_scope = 0
     seen_names: set[str] = set()
     for ent in all_entities:
         name = str(ent.get("name") or "").strip()
@@ -639,6 +656,10 @@ async def oneshot_ingest_document(
         span = {"method": "oneshot", "char_start": loc[0], "char_end": loc[1]}
         confidence = float(ent.get("confidence") or 0.8)
         tinfo = type_by_name.get(etype)
+        if (allowed_type_ids is not None and tinfo
+                and tinfo["id"] not in allowed_type_ids):
+            out_of_scope += 1
+            continue
         hit = alias_map.get(name.lower())
         if hit and (hit[0] in already or hit[0] in new_gaz):
             continue  # this entity's presence is already recorded for the doc
@@ -663,6 +684,7 @@ async def oneshot_ingest_document(
     report["entity_mentions_llm"] = mentions_added
     report["entity_mentions_unlinked"] = mentions_unlinked
     report["hallucinations_filtered"] = filtered_out
+    report["type_out_of_scope_for_class"] = out_of_scope
     report["entity_chunks"] = len(chunks)
     if not write:  # evaluation mode: expose the full extracted set
         seen_typed=set()

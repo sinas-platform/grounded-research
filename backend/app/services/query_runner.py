@@ -1138,6 +1138,14 @@ async def _gate_answer(
         'sources do not address a part (an abstention) also COVERS that '
         'part: telling the reader what the sources cannot establish is the '
         'honest answer when the corpus lacks the authority, not a gap.'
+        '\n\nThen read the UNCITED documents in the working set against the '
+        'parts. A part can be covered and still be poorly served: a claim '
+        'rests on commentary or an interim order while the deciding judgment '
+        'sits uncited, or a part is answered thinly while an uncited document '
+        'whose manifest line bears squarely on it holds the mechanism or '
+        'holding the answer lacks. Name such documents in unused_sources — '
+        'coverage alone does not make an unused, plainly better document '
+        'acceptable to leave unread.'
         '\n\nReply ONLY JSON: {"publishable": true|false,'
         ' "parts": [{"asks": "<one thing the question asks>", "covered": '
         'true|false, "gap": "<what is missing, if not covered>"}],'
@@ -1149,7 +1157,7 @@ async def _gate_answer(
 'stages are NOT in tension; when in doubt, null. Or null.>",'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
-        ' "unused_sources": ["<filename>: <why it is plainly more direct or authoritative for a point made than the source cited for it>", ...]}',
+        ' "unused_sources": ["<filename>: <the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>", ...]}',
     )
     # Only the parse is guarded. A wide try around the whole body turns a
     # fault in this function into "the gate had no objection" — which is what

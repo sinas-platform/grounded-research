@@ -305,6 +305,8 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "description": dc.description,
                 "summarization_guidance": dc.summarization_guidance,
                 "classification_hints": dc.classification_hints,
+                "identifier_property": dc.identifier_property,
+                "attribution_cues": list(dc.attribution_cues) or None,
                 "managed_by": ctx.tag,
             },
         )
@@ -848,6 +850,8 @@ async def export_package(
                     "description": dc.description,
                     "summarization_guidance": dc.summarization_guidance,
                     "classification_hints": dc.classification_hints,
+                    "identifier_property": dc.identifier_property,
+                    "attribution_cues": list(dc.attribution_cues or []),
                     "properties": [_export_property(p) for p in props],
                     "entity_types": [et.name for et in links],
                 }

@@ -30,7 +30,7 @@ from typing import Any
 import httpx
 from sqlalchemy import func, select
 
-from app.services import obligations
+from app.services import claim_naming, obligations
 from app.auth import CallerIdentity
 from app.config import get_settings
 from app.db import AsyncSessionLocal
@@ -1597,6 +1597,13 @@ async def _gate_answer(
             "nor waived returns every round."
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
+    # A claim can attribute something to a source and never say which source.
+    # The evidence checker cannot see that: it asks whether stated provenance
+    # is correct, and unstated provenance is not wrong. So it is checked here,
+    # deterministically, and only ever as an issue. The claim is true; it is
+    # written so the reader cannot follow it, which is not grounds to hold an
+    # answer back.
+    issues += await claim_naming.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
     missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")
     publishable = bool(data.get("publishable")) and not uncovered

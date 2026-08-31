@@ -577,19 +577,184 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
 DRAFT_MODE = get_settings().sgr_draft_mode
 
 
-# Upper bound, in characters, on the numbered text of one document handed to
-# the passage extractor.
-#
-# Its provenance is unknown. It arrived as an unnamed parameter default, has
-# never been varied by a caller, carries no unit or comment, and no other
-# character or token budget exists in this codebase to be consistent with. It
-# cannot have been derived from a context window: the extraction model is a
-# deployment variable with no default, so the code does not know which model
-# will read this. Treat it as a number to be justified or replaced, not as a
-# measured limit — the telemetry below exists to say what it currently costs.
+# Upper bound, in characters, on one unit of numbered text handed to the
+# passage extractor. Named and documented in #95; see that comment for its
+# provenance, which is unknown.
 EXTRACT_DOC_CHAR_CAP = 140_000
 
+# Upper bound on extraction calls per claim. Chunking trades a silent loss of
+# a document's tail for calls that cost money, and 26 documents in service
+# need ten chunks or more, one of them 27 — without a bound, a single claim
+# anchored on one of those would make 27 calls. Four covers every document
+# needing four chunks or fewer, which is 1,344 of the 1,632 over the cap; past
+# that the tail is still unread, and `rounds_capped` below says when.
+EXTRACT_MAX_ROUNDS = 4
 
+
+def _numbered_lines(content: str) -> list[str]:
+    """Every line prefixed with its 1-based number.
+
+    Numbering happens once, over the whole document, before any splitting.
+    That is what keeps a line number absolute: chunk boundaries only ever
+    slice this list, so line 4,100 carries the prefix `4100:` whichever
+    chunk it lands in. `_verify_passage` resolves a claimed range by reading
+    those prefixes, so numbering that drifted per chunk would make the
+    anti-fabrication check reject good passages.
+    """
+    return [f"{i + 1}: {line}" for i, line in enumerate(content.splitlines())]
+
+
+def _span_chars(numbered: list[str], line_from: int, line_to: int) -> int:
+    """Length of the joined text for an inclusive 1-based line range."""
+    if line_to < line_from:
+        return 0
+    body = sum(len(numbered[i]) for i in range(line_from - 1, line_to))
+    return body + (line_to - line_from)  # the newlines between them
+
+
+def _toc_starts(toc, total_lines: int) -> list[int]:
+    """Section start lines from a document's table of contents, as split
+    candidates.
+
+    Deliberately reads `line` only and ignores `line_to`. TOC ranges nest —
+    `_close_ranges` ends an entry where the next same-or-higher level starts,
+    so a level-1 entry spans its level-2 children — and treating ranges as
+    content would emit the same lines once per level. Start lines carry the
+    same information for this purpose and cannot double-count: they are just
+    the places the document says a new section begins.
+    """
+    entries = toc if isinstance(toc, list) else (toc or {}).get("entries") or []
+    starts = set()
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        try:
+            n = int(e.get("line"))
+        except (TypeError, ValueError):
+            continue
+        if 1 < n <= total_lines:  # line 1 is the implicit first boundary
+            starts.add(n)
+    return sorted(starts)
+
+
+def _line_windows(numbered: list[str], line_from: int, line_to: int,
+                  cap: int) -> list[tuple[int, int]]:
+    """Split one over-cap span on line boundaries, never mid-line.
+
+    Used for a section that exceeds the cap by itself and for documents whose
+    TOC yielded no usable start lines. A window boundary can fall mid-argument
+    where a section boundary would not, which is the cost of having no
+    structure to follow; it is still the whole document rather than its head.
+    """
+    out: list[tuple[int, int]] = []
+    start = line_from
+    used = 0
+    for n in range(line_from, line_to + 1):
+        one = len(numbered[n - 1])
+        if one > cap:
+            # A single line longer than the whole budget. Close whatever is
+            # open and report the line as dropped: emitting it would blow the
+            # cap, and emitting part of it would be the fragment #95 removed.
+            if n > start:
+                out.append((start, n - 1))
+            start, used = n + 1, 0
+            continue
+        if used and used + 1 + one > cap:
+            out.append((start, n - 1))
+            start, used = n, one
+        else:
+            used = used + (1 if used else 0) + one
+    if start <= line_to and used:
+        out.append((start, line_to))
+    return out
+
+
+def _chunk_numbered(content: str, toc, cap: int) -> tuple[list[dict], dict | None]:
+    """Split a document into cap-sized chunks on section boundaries.
+
+    Returns the chunks and, only in the pathological case below, a record of
+    what could not be represented at all.
+
+    A document that fits returns exactly one chunk holding the same string the
+    uncapped path produced, so the ~28,500 documents under the cap take the
+    path they took before this existed.
+
+    Over the cap, sections are packed greedily up to the cap rather than sent
+    one per call: the corpus averages 85 sections a document and reaches 400,
+    and a call per section would trade a truncation problem for a cost one.
+    """
+    numbered = _numbered_lines(content)
+    total = len(numbered)
+    if total == 0:
+        return [], None
+    joined = "\n".join(numbered)
+    if len(joined) <= cap:
+        return [{"text": joined, "line_from": 1, "line_to": total,
+                 "strategy": "whole"}], None
+
+    starts = _toc_starts(toc, total)
+    strategy = "toc" if starts else "lines"
+
+    # Raw segments between consecutive section starts, with any segment that
+    # exceeds the cap on its own broken into line windows.
+    bounds = [1, *starts, total + 1]
+    segments: list[tuple[int, int]] = []
+    dropped_lines = 0
+    for a, b in zip(bounds, bounds[1:], strict=False):
+        lo, hi = a, b - 1
+        if hi < lo:
+            continue
+        if _span_chars(numbered, lo, hi) <= cap:
+            segments.append((lo, hi))
+        else:
+            windows = _line_windows(numbered, lo, hi, cap)
+            dropped_lines += (hi - lo + 1) - sum(y - x + 1 for x, y in windows)
+            segments.extend(windows)
+
+    # Pack consecutive segments up to the cap.
+    chunks: list[dict] = []
+    cur_from: int | None = None
+    cur_to = 0
+    cur_len = 0
+    for lo, hi in segments:
+        seg = _span_chars(numbered, lo, hi)
+        # Only merge segments that actually abut. A dropped over-cap line
+        # leaves a hole, and a chunk is emitted as the slice from its first
+        # line to its last: merging across the hole would put the dropped
+        # line back and blow the cap it was dropped for.
+        adjacent = cur_from is not None and lo == cur_to + 1
+        if cur_from is not None and (not adjacent or cur_len + 1 + seg > cap):
+            chunks.append({"line_from": cur_from, "line_to": cur_to})
+            cur_from, cur_to, cur_len = lo, hi, seg
+        elif cur_from is None:
+            cur_from, cur_to, cur_len = lo, hi, seg
+        else:
+            cur_to, cur_len = hi, cur_len + 1 + seg
+    if cur_from is not None:
+        chunks.append({"line_from": cur_from, "line_to": cur_to})
+
+    out = [
+        {
+            "text": "\n".join(numbered[c["line_from"] - 1: c["line_to"]]),
+            "line_from": c["line_from"],
+            "line_to": c["line_to"],
+            "strategy": strategy,
+        }
+        for c in chunks
+    ]
+    record = None
+    if dropped_lines:
+        kept = sum(len(c["text"]) for c in out)
+        record = {
+            "numbered_chars": len(joined),
+            "cap": cap,
+            "dropped_chars": len(joined) - kept,
+            "dropped_lines": dropped_lines,
+        }
+    return out, record
+
+# Retained from #95 for its tests and as the single-string capping
+# reference; production extraction now chunks via _chunk_numbered.
 def _number_and_cap(content: str, cap: int) -> tuple[str, dict | None]:
     """Number every line, then cut at the last complete line that still fits.
 
@@ -629,30 +794,36 @@ def _number_and_cap(content: str, cap: int) -> tuple[str, dict | None]:
 
 async def _fetch_numbered(
     filenames: list[str], cap_chars: int = EXTRACT_DOC_CHAR_CAP
-) -> tuple[dict[str, str], list[dict]]:
-    """Numbered content per filename (line-numbered so extraction quotes
-    carry verifiable line refs), capped per document.
+) -> tuple[dict[str, list[dict]], list[dict]]:
+    """Numbered content per filename, split into cap-sized chunks.
 
-    Also returns one record per document that had to be cut. Truncation was
-    silent before: a plain slice, no counter, no log, and the extract stage's
-    telemetry did not mention it. A run whose answer is thin because half its
-    evidence never reached the model now says so.
+    Line-numbered so extraction quotes carry verifiable line refs, and split
+    on section boundaries rather than cut at the cap. A document over the cap
+    used to lose its tail before the extractor saw any of it, so an answer
+    that reached for a secondary source may have done so because a
+    document's relevant passage was never visible.
+
+    Returns chunks per filename, and one record per document that still could
+    not be fully represented — which after this change means only a document
+    carrying a single line longer than the whole budget.
     """
-    out: dict[str, str] = {}
+    out: dict[str, list[dict]] = {}
     truncated: list[dict] = []
     async with AsyncSessionLocal() as session:
         for fn in filenames:
-            content = (
+            row = (
                 await session.execute(
-                    select(DocumentVersion.content_md)
+                    select(DocumentVersion.content_md, Document.toc)
                     .join(Document, Document.current_version_id == DocumentVersion.id)
                     .where(Document.filename == fn)
                 )
-            ).scalar()
-            if not content:
+            ).first()
+            if not row or not row[0]:
                 continue
-            numbered, cut = _number_and_cap(content, cap_chars)
-            out[fn] = numbered
+            chunks, cut = _chunk_numbered(row[0], row[1], cap_chars)
+            if not chunks:
+                continue
+            out[fn] = chunks
             if cut is not None:
                 truncated.append({"filename": fn, **cut})
     return out, truncated
@@ -773,6 +944,38 @@ def _relevant_docs(point: str, corpus_rows: list[dict], take: int = 4) -> list[s
     return [fn for _, _, fn in scored[:take]]
 
 
+def _chunk_telemetry(out: list[dict]) -> dict:
+    """What chunking cost this run, deduplicated by filename.
+
+    A document anchoring several claims is fetched and chunked once per claim,
+    and counting it once per claim would report a corpus property as a run
+    one. `extra_extraction_calls` is the honest cost line: calls made beyond
+    the one each claim would have made before chunking existed.
+    """
+    by_file: dict[str, dict] = {}
+    extra = 0
+    capped = 0
+    for r in out:
+        rows = r.get("chunked") or []
+        for row in rows:
+            by_file[row["filename"]] = row
+            if row["chunks"] > row["read"]:
+                capped += 1
+        if rows:
+            extra += max(row["read"] for row in rows) - 1
+    if not by_file:
+        return {}
+    return {
+        "documents_chunked": len(by_file),
+        "chunks_total": sum(r["chunks"] for r in by_file.values()),
+        "chunked_documents": sorted(
+            by_file.values(), key=lambda r: -r["chunks"]
+        )[:20],
+        "extra_extraction_calls": extra,
+        "rounds_capped": capped,
+    }
+
+
 async def _extract_passages(
     sinas: _Sinas, plan_claims: list[dict], run_id: uuid.UUID | None = None
 ) -> list[dict]:
@@ -790,46 +993,92 @@ async def _extract_passages(
         docs, truncated = await _fetch_numbered(anchors)
         if not docs:
             return {"n": c.get("n"), "passages": [], "proposed": 0, "read": 0,
-                    "truncated": truncated}
-        doc_blob = "\n\n".join(
-            f"=== {fn} ===\n{txt}" for fn, txt in docs.items())
-        async with sem:
-            try:
-                reply = await sinas.invoke(
-                    "sgr/passage-extractor-agent",
-                    "From the numbered documents below, extract the passages "
-                    "that bear on: " + str(c.get("establishes") or "") + "\n"
-                    + (("Focus: " + str(c.get("hint")) + "\n") if c.get("hint") else "")
-                    + 'Reply ONLY JSON: {"passages": [{"filename": "...", '
-                    '"line_from": <int>, "line_to": <int>, "text": "<verbatim '
-                    'quote>"}]} — max 4 passages, each 2-25 lines, text EXACTLY '
-                    "as printed (without the line-number prefixes).\n\n" + doc_blob,
-                )
-                cleaned = reply.strip().strip("`").removeprefix("json").strip()
-                data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
-            except Exception as exc:  # noqa: BLE001
-                # A transport failure is not "this document says nothing".
-                # Swallowing it produced runs that ended `partial` — which
-                # here means the corpus cannot answer the question — when the
-                # real cause was an HTTP 429. Record it so the caller can
-                # tell an empty document from an unreachable one.
-                return {"n": c.get("n"), "passages": [], "proposed": 0,
-                        "read": len(docs), "error": str(exc)[:200],
-                        "truncated": truncated}
-        proposed = (data.get("passages") or [])[:4]
-        good = []
-        for p in proposed:
-            fn = str(p.get("filename") or "")
-            try:
-                lf, lt = int(p.get("line_from")), int(p.get("line_to"))
-            except (TypeError, ValueError):
+                    "truncated": truncated, "chunked": []}
+
+        # One round per chunk depth: round k shows chunk k of every anchor that
+        # has one. A document that fits is one chunk, so a claim anchored only
+        # on documents under the cap makes exactly the one call it made before.
+        depth = max(len(ch) for ch in docs.values())
+        rounds = min(depth, EXTRACT_MAX_ROUNDS)
+        chunked = [
+            {"filename": fn, "chunks": len(ch), "strategy": ch[0]["strategy"],
+             "read": min(len(ch), rounds)}
+            for fn, ch in docs.items() if len(ch) > 1
+        ]
+
+        good: list[dict] = []
+        proposed_total = 0
+        last_error: str | None = None
+        for k in range(rounds):
+            shown = {fn: ch[k] for fn, ch in docs.items() if k < len(ch)}
+            if not shown:
                 continue
-            if fn in docs and _verify_passage(docs[fn], lf, lt, str(p.get("text") or "")):
-                good.append({"filename": fn, "line_from": lf, "line_to": lt,
-                             "text": str(p.get("text"))[:2000]})
+            # The header states the range and the whole, so the model can tell
+            # a section from a document. Without it a chunk reads as the whole
+            # text and "the document does not address X" becomes a conclusion
+            # about the corpus rather than about the part it was handed.
+            doc_blob = "\n\n".join(
+                (f"=== {fn} ===\n{ch['text']}" if ch["strategy"] == "whole"
+                 else f"=== {fn} (lines {ch['line_from']}-{ch['line_to']}) ===\n"
+                      f"{ch['text']}")
+                for fn, ch in shown.items())
+            partial = any(ch["strategy"] != "whole" for ch in shown.values())
+            async with sem:
+                try:
+                    reply = await sinas.invoke(
+                        "sgr/passage-extractor-agent",
+                        "From the numbered documents below, extract the passages "
+                        "that bear on: " + str(c.get("establishes") or "") + "\n"
+                        + (("Focus: " + str(c.get("hint")) + "\n")
+                           if c.get("hint") else "")
+                        + ("Some documents are shown as a numbered section of a "
+                           "longer text, marked with the line range in its header. "
+                           "Judge only what is in front of you: silence in a "
+                           "section is not silence in the document.\n"
+                           if partial else "")
+                        + 'Reply ONLY JSON: {"passages": [{"filename": "...", '
+                        '"line_from": <int>, "line_to": <int>, "text": "<verbatim '
+                        'quote>"}]} — max 4 passages, each 2-25 lines, text EXACTLY '
+                        "as printed (without the line-number prefixes).\n\n"
+                        + doc_blob,
+                    )
+                    cleaned = reply.strip().strip("`").removeprefix("json").strip()
+                    data = json.loads(
+                        cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+                except Exception as exc:  # noqa: BLE001
+                    # A transport failure is not "this document says nothing".
+                    # Swallowing it produced runs that ended `partial` — which
+                    # here means the corpus cannot answer the question — when the
+                    # real cause was an HTTP 429. Record it so the caller can
+                    # tell an empty document from an unreachable one.
+                    last_error = str(exc)[:200]
+                    continue
+            proposed = (data.get("passages") or [])[:4]
+            proposed_total += len(proposed)
+            for p in proposed:
+                fn = str(p.get("filename") or "")
+                try:
+                    lf, lt = int(p.get("line_from")), int(p.get("line_to"))
+                except (TypeError, ValueError):
+                    continue
+                # Verified against the chunk the model was actually shown, not
+                # the whole document: a quote it could not have seen is not
+                # grounded, however true it happens to be.
+                if fn in shown and _verify_passage(
+                    shown[fn]["text"], lf, lt, str(p.get("text") or "")
+                ):
+                    good.append({"filename": fn, "line_from": lf, "line_to": lt,
+                                 "text": str(p.get("text"))[:2000]})
+
+        # Only a failure with nothing to show for it is an error: one bad round
+        # out of several still leaves the claim grounded.
+        if last_error and not good:
+            return {"n": c.get("n"), "passages": [], "proposed": proposed_total,
+                    "read": len(docs), "error": last_error,
+                    "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
-                "passages": good, "proposed": len(proposed),
-                "read": len(docs), "truncated": truncated}
+                "passages": good, "proposed": proposed_total,
+                "read": len(docs), "truncated": truncated, "chunked": chunked}
 
     out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
     errors = [r.get("error") for r in out if r.get("error")]
@@ -871,6 +1120,7 @@ async def _extract_passages(
             lines_dropped=sum(t["dropped_lines"] for t in cut_by_file.values()),
             truncated_documents=sorted(
                 cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
+            **_chunk_telemetry(out),
             completed=_iso(),
             elapsed_s=round(time.monotonic() - started, 1),
         )

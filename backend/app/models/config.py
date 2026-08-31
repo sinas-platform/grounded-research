@@ -25,6 +25,13 @@ class DocumentClass(Base, TimestampMixin):
     summarization_guidance: Mapped[str | None] = mapped_column(Text)
     classification_hints: Mapped[str | None] = mapped_column(Text)
     managed_by: Mapped[str | None] = mapped_column(String(128), index=True)
+    # Naming check configuration. identifier_property names one of this
+    # class's own properties; its value on a document is what a claim has to
+    # carry to count as naming that document. attribution_cues are the words
+    # that mark a claim as attributing rather than describing. A class
+    # declaring neither is not checked.
+    identifier_property: Mapped[str | None] = mapped_column(String(200))
+    attribution_cues: Mapped[list[str] | None] = mapped_column(JSONB)
 
     properties: Mapped[list["DocumentClassProperty"]] = relationship(
         back_populates="document_class", cascade="all, delete-orphan"

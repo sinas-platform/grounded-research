@@ -43,6 +43,12 @@ class PackageDocumentClassEntry(_Strict):
     description: str | None = None
     summarization_guidance: str | None = None
     classification_hints: str | None = None
+    # Naming check: the property whose value identifies a document of this
+    # class, and the words that mark a claim as attributing to it. Declaring
+    # both switches the check on for the class; declaring neither leaves it
+    # off, which is the default.
+    identifier_property: str | None = None
+    attribution_cues: list[str] = Field(default_factory=list)
     properties: list[PackagePropertyEntry] = Field(default_factory=list)
     # entity types attached to this document class, by entity-type name
     entity_types: list[str] = Field(default_factory=list)

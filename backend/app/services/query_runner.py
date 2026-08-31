@@ -577,10 +577,69 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
 DRAFT_MODE = get_settings().sgr_draft_mode
 
 
-async def _fetch_numbered(filenames: list[str], cap_chars: int = 140000) -> dict[str, str]:
+# Upper bound, in characters, on the numbered text of one document handed to
+# the passage extractor.
+#
+# Its provenance is unknown. It arrived as an unnamed parameter default, has
+# never been varied by a caller, carries no unit or comment, and no other
+# character or token budget exists in this codebase to be consistent with. It
+# cannot have been derived from a context window: the extraction model is a
+# deployment variable with no default, so the code does not know which model
+# will read this. Treat it as a number to be justified or replaced, not as a
+# measured limit — the telemetry below exists to say what it currently costs.
+EXTRACT_DOC_CHAR_CAP = 140_000
+
+
+def _number_and_cap(content: str, cap: int) -> tuple[str, dict | None]:
+    """Number every line, then cut at the last complete line that still fits.
+
+    Returns the numbered text and, when it had to be cut, a record of what was
+    lost.
+
+    Cutting on a line boundary rather than mid-string is the point. A slice
+    through a line leaves a fragment still carrying its line number, which the
+    model cannot tell from a complete line: it can then quote the fragment and
+    the quote verifies, because the fragment is genuinely what that line
+    contains as far as anything downstream can see. The document simply ends,
+    with no marker, in the middle of a sentence.
+
+    Nothing here raises the cap or splits the document. The caller loses
+    slightly more text than before, which is the honest direction: what it
+    loses, it now knows about.
+    """
+    lines = content.splitlines()
+    numbered = "\n".join(f"{i+1}: {line}" for i, line in enumerate(lines))
+    if len(numbered) <= cap:
+        return numbered, None
+
+    kept = numbered[:cap]
+    boundary = kept.rfind("\n")
+    # A first line longer than the cap leaves nothing whole to keep. Sending a
+    # fragment would be the failure this function exists to remove, so send
+    # nothing and let the record say the whole document was dropped.
+    kept = kept[:boundary] if boundary > 0 else ""
+    kept_lines = kept.count("\n") + 1 if kept else 0
+    return kept, {
+        "numbered_chars": len(numbered),
+        "cap": cap,
+        "dropped_chars": len(numbered) - len(kept),
+        "dropped_lines": len(lines) - kept_lines,
+    }
+
+
+async def _fetch_numbered(
+    filenames: list[str], cap_chars: int = EXTRACT_DOC_CHAR_CAP
+) -> tuple[dict[str, str], list[dict]]:
     """Numbered content per filename (line-numbered so extraction quotes
-    carry verifiable line refs), capped per document."""
+    carry verifiable line refs), capped per document.
+
+    Also returns one record per document that had to be cut. Truncation was
+    silent before: a plain slice, no counter, no log, and the extract stage's
+    telemetry did not mention it. A run whose answer is thin because half its
+    evidence never reached the model now says so.
+    """
     out: dict[str, str] = {}
+    truncated: list[dict] = []
     async with AsyncSessionLocal() as session:
         for fn in filenames:
             content = (
@@ -592,10 +651,11 @@ async def _fetch_numbered(filenames: list[str], cap_chars: int = 140000) -> dict
             ).scalar()
             if not content:
                 continue
-            lines = content.splitlines()
-            numbered = "\n".join(f"{i+1}: {l}" for i, l in enumerate(lines))
-            out[fn] = numbered[:cap_chars]
-    return out
+            numbered, cut = _number_and_cap(content, cap_chars)
+            out[fn] = numbered
+            if cut is not None:
+                truncated.append({"filename": fn, **cut})
+    return out, truncated
 
 
 def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) -> bool:
@@ -727,9 +787,10 @@ async def _extract_passages(
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
-        docs = await _fetch_numbered(anchors)
+        docs, truncated = await _fetch_numbered(anchors)
         if not docs:
-            return {"n": c.get("n"), "passages": [], "proposed": 0, "read": 0}
+            return {"n": c.get("n"), "passages": [], "proposed": 0, "read": 0,
+                    "truncated": truncated}
         doc_blob = "\n\n".join(
             f"=== {fn} ===\n{txt}" for fn, txt in docs.items())
         async with sem:
@@ -753,7 +814,8 @@ async def _extract_passages(
                 # real cause was an HTTP 429. Record it so the caller can
                 # tell an empty document from an unreachable one.
                 return {"n": c.get("n"), "passages": [], "proposed": 0,
-                        "read": len(docs), "error": str(exc)[:200]}
+                        "read": len(docs), "error": str(exc)[:200],
+                        "truncated": truncated}
         proposed = (data.get("passages") or [])[:4]
         good = []
         for p in proposed:
@@ -767,7 +829,7 @@ async def _extract_passages(
                              "text": str(p.get("text"))[:2000]})
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": len(proposed),
-                "read": len(docs)}
+                "read": len(docs), "truncated": truncated}
 
     out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
     errors = [r.get("error") for r in out if r.get("error")]
@@ -777,10 +839,25 @@ async def _extract_passages(
         raise RuntimeError(
             f"passage extraction failed for all {len(out)} claims — "
             f"first error: {errors[0]}")
+    # Deduplicated by filename: a document anchoring several claims is fetched
+    # and cut once per claim, and counting it once per claim would report a
+    # corpus problem as a run problem. `documents_read` above is deliberately
+    # left as it was, summed per claim, so this is not a ratio of that.
+    cut_by_file: dict[str, dict] = {}
+    for r in out:
+        for t in r.get("truncated") or []:
+            cut_by_file.setdefault(t["filename"], t)
+
     if run_id is not None:
         # The verified/proposed gap is the point of this stage: quotes that
         # did not match the source text never reach the drafter. A gap that
         # stops being small means the extractor is drifting.
+        #
+        # documents_truncated and characters_dropped are the second thing this
+        # stage can be wrong about and could not previously report. A document
+        # over the cap is cut before the model sees any of it, so a thin answer
+        # can be a corpus that never arrived rather than a corpus with nothing
+        # to say. These say which.
         await _tele(
             run_id, "extract",
             claims=len(out),
@@ -788,6 +865,12 @@ async def _extract_passages(
             passages_proposed=sum(r.get("proposed", 0) for r in out),
             passages_verified=sum(len(r.get("passages") or []) for r in out),
             extraction_errors=len(errors),
+            documents_truncated=len(cut_by_file),
+            characters_dropped=sum(
+                t["dropped_chars"] for t in cut_by_file.values()),
+            lines_dropped=sum(t["dropped_lines"] for t in cut_by_file.values()),
+            truncated_documents=sorted(
+                cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
             completed=_iso(),
             elapsed_s=round(time.monotonic() - started, 1),
         )

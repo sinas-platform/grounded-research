@@ -829,12 +829,63 @@ async def _fetch_numbered(
     return out, truncated
 
 
+# Characters that carry a rendering and nothing else. A model copying text
+# correctly still types a straight apostrophe where the source has a
+# typographic one, and drops the soft hyphens that PDF extraction leaves
+# inside hyphenated words. Comparing those literally rejected the quote as
+# fabricated, which is the one thing it demonstrably was not: every
+# character that says something was identical.
+#
+# What is folded is only what has no role but rendering, and every entry is
+# a substitution except one. A substitution keeps the boundary between two
+# tokens; a deletion removes it, and can therefore merge two words into a
+# third that is in neither text. The one deletion carries that weight.
+#
+# Two kinds of character stay out of the map. First, anything that means
+# something in another notation, however it is drawn:
+#   U+2212 is a minus sign, and a passage carrying a formula carries it as
+#     an operator rather than as a dash.
+#   U+2032 and U+2033 are primes: derivatives, minutes, locants.
+#   U+200C and U+200D are orthographic joiners, and deleting one changes
+#     the word.
+# Second, anything with no case behind it. U+200B and U+FEFF are as
+# harmless as the soft hyphen, and are out anyway: neither rescued a
+# passage when measured, and a deletion nobody has watched matter is a
+# claim this code cannot make good on. Either can return with evidence.
+#
+# Deliberately NOT unicodedata NFKC. It folds none of the marks below (it
+# leaves every quote, dash and soft hyphen exactly as it found them), and
+# the classes it does fold include superscript digits, which is one more
+# way for two different footnote references to read alike.
+_QUOTE_MARKS = {
+    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",
+    0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"',
+    0x00AB: '"', 0x00BB: '"',
+}
+_DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015)}
+# The only character deleted rather than replaced: PDF extraction leaves it
+# inside a hyphenated word, nothing draws it, and no copy reproduces it.
+_SOFT_HYPHEN = {0x00AD: None}
+_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
+
+
+def _canonical(text: str) -> str:
+    """Text reduced to what a verbatim quote has to preserve.
+
+    Case, the run-length of whitespace, and the rendering of quotes, dashes
+    and invisible characters all vary between a source and a faithful copy
+    of it. Nothing here removes, adds or reorders a word, a digit or a
+    punctuation mark that separates words, so text that is not in the source
+    still does not match text that is.
+    """
+    folded = (text or "").translate(_RENDERING_VARIANTS)
+    return re.sub(r"\s+", " ", folded).strip().lower()
+
+
 def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) -> bool:
     """Deterministic anti-hallucination: the quoted text must actually occur
-    in the claimed line range (whitespace-normalized containment)."""
-    import re as _re
-
-    want = _re.sub(r"\s+", " ", quoted or "").strip().lower()
+    in the claimed line range (containment, normalized by _canonical)."""
+    want = _canonical(quoted)
     if len(want) < 20:
         return False
     span_lines = []
@@ -846,8 +897,7 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) ->
             continue
         if line_from <= n <= line_to + 2:
             span_lines.append(rest)
-    have = _re.sub(r"\s+", " ", " ".join(span_lines)).strip().lower()
-    return want[:200] in have
+    return want[:200] in _canonical(" ".join(span_lines))
 
 
 async def _content_anchors(

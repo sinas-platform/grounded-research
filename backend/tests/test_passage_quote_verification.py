@@ -28,6 +28,8 @@ LAQUO, RAQUO = "\u00ab", "\u00bb"  # guillemets
 MINUS = "\u2212"  # mathematical operator, not a dash
 PRIME = "\u2032"  # derivative, minute, chemical locant
 ZWNJ = "\u200c"  # orthographic joiner, changes the word
+ZWSP = "\u200b"  # zero-width space; a line-break hint
+BOM = "\ufeff"  # byte-order mark / zero-width no-break space
 
 
 def numbered(*lines: str) -> str:
@@ -48,8 +50,10 @@ SOURCE = numbered(
     f"The margin fell by {MINUS}5 percentage points over the reference period.",
     f"The compound 4,4{PRIME}-methylene is listed in the annex to the decision.",
     f"A zero{ZWNJ}width joiner sits inside a word of this sentence.",
+    f"Costs of{ZWSP} the proceedings are borne by the unsuccessful party.",
+    f"Annex II{BOM} sets out the timetable agreed between the parties.",
 )
-ALL_LINES = (1, 12)
+ALL_LINES = (1, 14)
 
 
 def verify(quote: str, span: tuple[int, int] = ALL_LINES) -> bool:
@@ -169,12 +173,25 @@ def test_an_orthographic_joiner_is_not_removed():
     assert not verify("A zerowidth joiner sits inside a word of this sentence")
 
 
+def test_a_zero_width_space_is_not_removed():
+    """Harmless, and out of the map anyway: a deletion needs a case behind
+    it, and this one has never been watched to matter."""
+    assert not verify("Costs of the proceedings are borne by the unsuccessful")
+
+
+def test_a_byte_order_mark_is_not_removed():
+    """Out for the same reason as the zero-width space, not a safer one: it
+    is a zero-width no-break space, and its position is a convention."""
+    assert not verify("Annex II sets out the timetable agreed between the")
+
+
 def test_the_excluded_characters_stay_out_of_the_fold():
     """Stated once as a fact about the map, so deleting a line from it fails
-    a test instead of silently widening what verifies."""
+    a test instead of silently widening what verifies. The soft hyphen is
+    the only character the fold deletes rather than replaces."""
     from app.services.query_runner import _RENDERING_VARIANTS
 
-    for excluded in (0x2212, 0x2032, 0x2033, 0x200C, 0x200D):
+    for excluded in (0x2212, 0x2032, 0x2033, 0x200C, 0x200D, 0x200B, 0xFEFF):
         assert excluded not in _RENDERING_VARIANTS
 
 

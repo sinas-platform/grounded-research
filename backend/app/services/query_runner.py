@@ -836,16 +836,22 @@ async def _fetch_numbered(
 # fabricated, which is the one thing it demonstrably was not: every
 # character that says something was identical.
 #
-# What is folded is only what has no role but rendering. A character that
-# means something in some other notation stays out of the map even when it
-# is drawn like one that is in it, because folding it would let two texts
-# that differ verify as one:
+# What is folded is only what has no role but rendering, and every entry is
+# a substitution except one. A substitution keeps the boundary between two
+# tokens; a deletion removes it, and can therefore merge two words into a
+# third that is in neither text. The one deletion carries that weight.
+#
+# Two kinds of character stay out of the map. First, anything that means
+# something in another notation, however it is drawn:
 #   U+2212 is a minus sign, and a passage carrying a formula carries it as
-#     an operator, not as a dash.
-#   U+2032 and U+2033 are primes: derivatives, minutes, chemical locants.
-#   U+200C and U+200D are orthographic joiners, which change words.
-# Each of those was measured against the passages this check rejects, and
-# none of them rescued one, so they are out on evidence as well.
+#     an operator rather than as a dash.
+#   U+2032 and U+2033 are primes: derivatives, minutes, locants.
+#   U+200C and U+200D are orthographic joiners, and deleting one changes
+#     the word.
+# Second, anything with no case behind it. U+200B and U+FEFF are as
+# harmless as the soft hyphen, and are out anyway: neither rescued a
+# passage when measured, and a deletion nobody has watched matter is a
+# claim this code cannot make good on. Either can return with evidence.
 #
 # Deliberately NOT unicodedata NFKC. It folds none of the marks below (it
 # leaves every quote, dash and soft hyphen exactly as it found them), and
@@ -857,8 +863,10 @@ _QUOTE_MARKS = {
     0x00AB: '"', 0x00BB: '"',
 }
 _DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015)}
-_INVISIBLE = dict.fromkeys((0x00AD, 0x200B, 0xFEFF))
-_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_INVISIBLE}
+# The only character deleted rather than replaced: PDF extraction leaves it
+# inside a hyphenated word, nothing draws it, and no copy reproduces it.
+_SOFT_HYPHEN = {0x00AD: None}
+_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
 
 
 def _canonical(text: str) -> str:

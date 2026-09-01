@@ -72,8 +72,49 @@ QUESTION: {question}"""
 
 
 def _parse(reply: str) -> dict:
-    cleaned = reply.strip().strip("`").removeprefix("json").strip()
-    return json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+    """The planner's reply as JSON, or JSONDecodeError naming what broke."""
+    cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end <= start:
+        raise json.JSONDecodeError("no JSON object in reply", cleaned or "", 0)
+    return json.loads(cleaned[start:end + 1])
+
+
+def _repair_prompt(exc: json.JSONDecodeError, reply: str) -> str:
+    """Ask for the same content again, valid this time.
+
+    Same shape as the drafter's repair in query_runner: name what broke, say
+    how to avoid it, and hand back the reply being repaired. One prompt for
+    both planning rounds, because both ask for a flat object of string lists
+    and neither has a field the other lacks a rule for.
+    """
+    return (
+        "Your previous reply was not valid JSON: " + str(exc)[:200]
+        + '. Send the same content again as strictly valid JSON. Escape every '
+        'quotation mark inside a string as \\", use no line breaks inside a '
+        "string, and reply with the JSON object alone."
+        "\n\nPREVIOUS REPLY:\n" + (reply or "")[:60000]
+    )
+
+
+async def _invoke_json(sinas, agent: str, prompt: str) -> dict:
+    """Invoke and parse, with one repair attempt on a malformed reply.
+
+    Planning is the first call of a run and the cheapest to redo, and until
+    it parses nothing downstream can start: a lost quotation mark ended runs
+    before retrieval had read anything. The drafter already retries once for
+    the same reason at the other end of the pipeline; this is that, applied
+    where the loss is total rather than partial.
+
+    A second failure raises, as it does there. A planner that cannot answer
+    in the shape asked for twice is not a transient fault to paper over, and
+    the run must say so rather than proceed on an empty plan.
+    """
+    reply = await sinas.invoke(agent, prompt)
+    try:
+        return _parse(reply)
+    except json.JSONDecodeError as exc:
+        return _parse(await sinas.invoke(agent, _repair_prompt(exc, reply)))
 
 
 # The corpus map describes the shape of the corpus — entity types with a few
@@ -239,8 +280,8 @@ async def plan_question(
     # both `_run_cost_usd` and the cost cap that reads it.
     sinas = _Sinas(run_id=run_id)
     corpus_map = await build_corpus_map()
-    r1 = _parse(await sinas.invoke(PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question, domain=_domain_prefix())))
+    r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
+        corpus_map=corpus_map, question=question, domain=_domain_prefix()))
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
@@ -249,8 +290,8 @@ async def plan_question(
         f"- id={m['id']} [{m['type']}] {m['value']!r} ({m['docs']} docs)"
         for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
     ) or "(no matches — rely on websearch queries)"
-    r2 = _parse(await sinas.invoke(PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question)))
+    r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
+        matches=match_lines, question=question))
     anchors = [a for a in (r2.get("anchor_entity_ids") or [])
                if a in all_matches]
     # determinism: model's picks unioned with the strongest matches, and

@@ -1572,23 +1572,14 @@ async def _gate_answer(
         if fn.strip():
             fresh[fn.strip()] = (why.strip() or str(src))[:400]
             await obligations.record(run_id, fn.strip(), why.strip() or str(src))
-    owed = await obligations.unmet(run_id, answer_id)
-    # This round's parse feeds regardless of ledger state: the ledger adds
-    # persistence across rounds, it must never be a precondition for acting
-    # on what the gate just said. But "the ledger is unavailable" and "the
-    # ledger deliberately left this out" are different, and treating the
-    # second as the first revives retired obligations: a waived document is
-    # absent from `unmet` by design, and adding it back put it in front of the
-    # reviser again every round. It also came back with a hard-coded fed of 0,
-    # so the MAX_FEEDS cap read that instead of the ledger's count and never
-    # fired — which is where entries with fed above the cap came from.
-    known = await obligations.known(run_id)
-    seen = {u["doc"] for u in owed}
-    owed += [
-        {"doc": d, "note": n, "fed": int((known.get(d) or {}).get("fed") or 0)}
-        for d, n in fresh.items()
-        if d not in seen and not (known.get(d) or {}).get("waived")
-    ]
+    # What is owed this round is the ledger's to decide, this round's findings
+    # included. Asking what was owed and then appending whatever had not come
+    # back read an absence as "no opinion", and an entry is withheld for three
+    # different reasons: waived, already cited, or unreadable. Only the last is
+    # no opinion; the other two are decisions, and adding over them put retired
+    # and satisfied obligations back in front of the reviser at a count the cap
+    # could not act on.
+    owed = await obligations.to_feed(run_id, answer_id, fresh)
     capped = [u for u in owed if u["fed"] >= obligations.MAX_FEEDS]
     for u in capped:
         await obligations.waive(

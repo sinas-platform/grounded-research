@@ -36,7 +36,7 @@ def test_a_waive_without_a_real_rationale_is_ignored():
 def test_the_gate_feeds_obligations_and_marks_them():
     assert "Owed source unused" in SRC
     assert "[obligated document:" in SRC
-    assert "obligations.record" in SRC and "obligations.unmet" in SRC
+    assert "obligations.record" in SRC and "obligations.to_feed" in SRC
 
 
 def test_the_reviser_contract_offers_the_waive_path():

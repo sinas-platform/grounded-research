@@ -115,16 +115,67 @@ async def waive(run_id: uuid.UUID, doc: str, rationale: str,
         await _store(run_id, entries)
 
 
-@_best_effort(dict)
-async def known(run_id: uuid.UUID) -> dict[str, dict[str, Any]]:
-    """Every entry the ledger holds, whatever its state.
+async def to_feed(
+    run_id: uuid.UUID, answer_id: uuid.UUID, fresh: dict[str, str]
+) -> list[dict[str, Any]]:
+    """What the reviser should be shown this round: the ledger's live debts and
+    this round's findings, decided here rather than by the caller.
 
-    `unmet` answers "what is still owed"; this answers "what does the ledger
-    know". A caller adding entries of its own needs the second: an entry
-    absent from `unmet` may be absent because it was waived or satisfied, and
-    treating that as "the ledger has no opinion" revives it.
+    The caller used to ask `unmet` what was owed and then append anything it
+    had just been told that `unmet` had not returned. That reads an absence as
+    "the ledger has no opinion", and the ledger withholds an entry for three
+    different reasons: it was waived, it is already cited, or it could not be
+    read. Only the third means no opinion. The first two are decisions, and
+    re-adding over them put a retired or a satisfied obligation back in front
+    of the reviser, at a hard-coded count the cap could not act on.
+
+    Deciding here rather than in the caller also makes it one read. Two
+    best-effort reads could disagree — the first succeeding and the second
+    not — and the guard would be silently absent for that round.
+
+    A read that fails still feeds this round's findings, which is the pre-
+    ledger behaviour the ledger must degrade to rather than fail into: with no
+    entries, nothing is known to be waived or cited, so `fresh` passes through
+    exactly as it did before any of this existed.
     """
-    return await _load(run_id)
+    try:
+        entries = await _load(run_id)
+        cited = await _cited(answer_id)
+    except Exception:  # noqa: BLE001
+        _log.warning("obligation ledger to_feed read failed", exc_info=True)
+        entries, cited = {}, set()
+
+    def _live(doc: str) -> bool:
+        e = entries.get(doc) or {}
+        return not e.get("waived") and doc not in cited
+
+    out = [
+        {"doc": d, "note": e.get("note") or "", "fed": int(e.get("fed") or 0)}
+        for d, e in entries.items() if _live(d)
+    ]
+    seen = {u["doc"] for u in out}
+    out += [
+        {"doc": d, "note": n,
+         "fed": int((entries.get(d) or {}).get("fed") or 0)}
+        for d, n in fresh.items() if d not in seen and _live(d)
+    ]
+    return out
+
+
+async def _cited(answer_id: uuid.UUID) -> set[str]:
+    """Documents a surviving claim cites. Computed, never stored: a claim
+    deleted by a later stage silently reopens the debt."""
+    async with AsyncSessionLocal() as session:
+        return set(
+            (
+                await session.execute(
+                    select(Document.filename)
+                    .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
+                    .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+                    .where(AnswerClaim.answer_id == answer_id)
+                )
+            ).scalars().all()
+        )
 
 
 @_best_effort(list)

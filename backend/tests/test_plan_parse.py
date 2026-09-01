@@ -287,3 +287,31 @@ async def test_a_run_without_an_id_still_repairs():
     run to record against."""
     stub = _Stub("{}", '{"websearch_queries": []}')
     assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS) == {"websearch_queries": []}
+
+
+# ── _require is safe on a non-object ─────────────────────────────────────────
+#
+# Nothing reaches it today that is not a dict: `_parse` slices from the first
+# brace to the last, so it returns an object or raises. These cover the
+# function on its own terms rather than relying on that.
+
+
+def test_a_null_reply_is_rejected_not_a_type_error():
+    with pytest.raises(ValueError, match="not a JSON object"):
+        _require(None, _ROUND1_FIELDS)
+
+
+def test_a_number_reply_is_rejected_not_a_type_error():
+    with pytest.raises(ValueError, match="not a JSON object"):
+        _require(7, _ROUND1_FIELDS)
+
+
+def test_an_array_reply_is_rejected_not_a_type_error():
+    with pytest.raises(ValueError, match="not a JSON object"):
+        _require([{"named_entities": []}], _ROUND1_FIELDS)
+
+
+def test_the_rejection_names_the_type_that_came_back():
+    with pytest.raises(ValueError) as e:
+        _require([], _ROUND2_FIELDS)
+    assert "list" in str(e.value)

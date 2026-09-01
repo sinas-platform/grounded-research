@@ -100,7 +100,19 @@ def _require(data: dict, fields: tuple[str, ...]) -> dict:
     Presence is the test, not content. A field the round asked for, holding
     an empty list, is an answer: the planner looked and found nothing. A
     reply carrying none of them has not answered.
+
+    The type check makes this safe on its own. Nothing reaches it today that
+    is not a dict, because `_parse` slices from the first brace to the last
+    before parsing and so returns an object or raises. That is a property of
+    the only caller rather than of this function, and a later caller, or a
+    simpler `_parse`, would turn `f in data` into a TypeError that escapes the
+    repair path. Raising ValueError keeps a non-object on the same route as
+    every other unusable reply.
     """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"planner reply is a {type(data).__name__}, not a JSON object"
+        )
     if not any(f in data for f in fields):
         raise ValueError(
             "planner reply answered none of " + ", ".join(fields)

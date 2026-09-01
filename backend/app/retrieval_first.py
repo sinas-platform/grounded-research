@@ -114,11 +114,10 @@ def _repair_prompt(exc: ValueError, reply: str, prompt: str) -> str:
 
     Shaped after the drafter's repair in query_runner, which names what broke,
     says how to avoid it and hands back the reply being repaired, with the
-    original prompt added, which the drafter does not need and this does.
-    The drafter
-    repairs a reply that always contains its claims, so "send them again" has
-    a referent; a planner reply can be empty or prose, and then a repair
-    prompt without the question asks for the correction of nothing.
+    original prompt added, which the drafter does not need and this does. The
+    drafter repairs a reply that always contains its claims, so "send them
+    again" has a referent; a planner reply can be empty or prose, and then a
+    repair prompt without the question asks for the correction of nothing.
 
     One prompt serves both rounds: both ask for a flat object of string lists
     and neither has a field the other lacks a rule for.
@@ -134,7 +133,14 @@ def _repair_prompt(exc: ValueError, reply: str, prompt: str) -> str:
     )
 
 
-async def _invoke_json(sinas, agent: str, prompt: str, fields: tuple[str, ...]) -> dict:
+async def _invoke_json(
+    sinas,
+    agent: str,
+    prompt: str,
+    fields: tuple[str, ...],
+    run_id: uuid.UUID | None = None,
+    where: str = "",
+) -> dict:
     """Invoke, parse and check, with one repair attempt on either failure.
 
     Planning is the first call of a run and the cheapest to redo, and until
@@ -151,11 +157,20 @@ async def _invoke_json(sinas, agent: str, prompt: str, fields: tuple[str, ...]) 
 
     A second failure raises, as it does in the drafter. A planner that cannot
     answer the round twice is not a transient fault to paper over.
+
+    A repair is recorded as `plan_reparse`, beside the drafter's
+    `draft_reparse`: a retry that leaves no trace is one nobody can count, and
+    the call log shows only that a round cost two calls instead of one.
     """
     reply = await sinas.invoke(agent, prompt)
     try:
         return _require(_parse(reply), fields)
     except ValueError as exc:
+        if run_id is not None:
+            from app.services.query_runner import _tele
+
+            await _tele(run_id, "retrieval",
+                        plan_reparse=f"{where}: {str(exc)[:200]}".lstrip(": "))
         repaired = await sinas.invoke(agent, _repair_prompt(exc, reply, prompt))
         return _require(_parse(repaired), fields)
 
@@ -325,7 +340,7 @@ async def plan_question(
     corpus_map = await build_corpus_map()
     r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
         corpus_map=corpus_map, question=question, domain=_domain_prefix()),
-        _ROUND1_FIELDS)
+        _ROUND1_FIELDS, run_id, "round 1")
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
@@ -335,7 +350,8 @@ async def plan_question(
         for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question), _ROUND2_FIELDS)
+        matches=match_lines, question=question),
+        _ROUND2_FIELDS, run_id, "round 2")
     anchors = [a for a in (r2.get("anchor_entity_ids") or [])
                if a in all_matches]
     # determinism: model's picks unioned with the strongest matches, and

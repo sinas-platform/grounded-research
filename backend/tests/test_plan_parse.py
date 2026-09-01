@@ -8,6 +8,9 @@ Run from the backend directory: `python -m pytest tests/test_plan_parse.py`
 """
 
 import json
+import sys
+import types
+from contextlib import contextmanager
 
 import pytest
 from app.retrieval_first import (
@@ -227,3 +230,60 @@ def test_repair_prompt_includes_both_the_request_and_the_reply():
     assert "THE REQUEST" in prompt
     assert "PREVIOUS REPLY:" in prompt
     assert "BAD REPLY" in prompt
+
+
+# ── the repair leaves a record ───────────────────────────────────────────────
+#
+# `_invoke_json` imports `_tele` from query_runner inside the except branch,
+# and query_runner needs the private SDK. A stub module under that name keeps
+# these tests importable without it, which is the point of the local import.
+
+
+@contextmanager
+def _capture_tele():
+    written = []
+
+    async def fake_tele(run_id, stage, **detail):
+        written.append((run_id, stage, detail))
+
+    stub_module = types.ModuleType("app.services.query_runner")
+    stub_module._tele = fake_tele
+    previous = sys.modules.get("app.services.query_runner")
+    sys.modules["app.services.query_runner"] = stub_module
+    try:
+        yield written
+    finally:
+        if previous is None:
+            del sys.modules["app.services.query_runner"]
+        else:
+            sys.modules["app.services.query_runner"] = previous
+
+
+@pytest.mark.asyncio
+async def test_a_repair_is_recorded_against_the_run():
+    """Without this the only trace is that a round cost two calls instead of
+    one, which is an inference rather than a record."""
+    with _capture_tele() as written:
+        stub = _Stub("{}", '{"websearch_queries": []}')
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS, "run-1", "round 1")
+    assert len(written) == 1
+    run_id, stage, detail = written[0]
+    assert (run_id, stage) == ("run-1", "retrieval")
+    assert "round 1" in detail["plan_reparse"]
+    assert "answered none of" in detail["plan_reparse"]
+
+
+@pytest.mark.asyncio
+async def test_nothing_is_recorded_when_the_first_reply_is_good():
+    with _capture_tele() as written:
+        stub = _Stub('{"websearch_queries": ["a"]}')
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS, "run-1", "round 1")
+    assert written == []
+
+
+@pytest.mark.asyncio
+async def test_a_run_without_an_id_still_repairs():
+    """The planner is callable outside a run, from the CLI, where there is no
+    run to record against."""
+    stub = _Stub("{}", '{"websearch_queries": []}')
+    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS) == {"websearch_queries": []}

@@ -397,6 +397,22 @@ async def plan_question(
     queries = list(dict.fromkeys(
         [str(q) for q in (r1.get("websearch_queries") or [])]
         + [str(q) for q in (r2.get("websearch_queries") or [])]))[:14]
+    # A plan with nothing in it is not a plan. Both rounds can answer every
+    # field and still leave nothing to retrieve with, because a field may
+    # legitimately be empty: a question naming no entities yields an empty
+    # `named_entities`, and that is an answer. What is not an answer is every
+    # field empty at once. Retrieval then matches nothing, the briefing is
+    # empty, and the run goes on to publish over no documents; nothing
+    # downstream refuses it.
+    #
+    # Checked here rather than per round, because the rounds combine: round 1
+    # may offer no queries where round 2 does, and either round's matches can
+    # carry the anchors. Only after both is there a plan to judge.
+    if not anchors and not queries:
+        raise ValueError(
+            "planning produced no anchors and no queries: nothing to retrieve "
+            "with"
+        )
     return {"anchors": anchors,
             "anchor_names": {a: all_matches[a]["value"] for a in anchors},
             "queries": queries,

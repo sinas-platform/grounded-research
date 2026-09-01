@@ -378,3 +378,34 @@ def test_round_2_is_unchanged_any_one_field_suffices():
 def test_round_2_still_rejects_an_object_answering_nothing():
     with pytest.raises(ValueError, match="answered none of"):
         _require({"thoughts": "unsure"}, _ROUND2_GROUPS)
+
+
+# ── a plan with nothing in it is not a plan ──────────────────────────────────
+#
+# `plan_question` needs a client and a corpus, so these cover the condition it
+# applies rather than the function. Both rounds can answer every field and
+# still leave nothing to retrieve with.
+
+
+def _plan_is_usable(anchors, queries):
+    """The condition plan_question raises on, as it is written there."""
+    return bool(anchors or queries)
+
+
+def test_a_plan_with_neither_anchors_nor_queries_is_rejected():
+    assert not _plan_is_usable([], [])
+
+
+def test_anchors_alone_are_enough():
+    """The graph channel can carry a question on its own."""
+    assert _plan_is_usable(["e1"], [])
+
+
+def test_queries_alone_are_enough():
+    """So can the text channel, which is what a question naming no entities
+    is left with."""
+    assert _plan_is_usable([], ["a query"])
+
+
+def test_both_present_is_usable():
+    assert _plan_is_usable(["e1"], ["a query"])

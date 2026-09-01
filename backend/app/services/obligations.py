@@ -137,13 +137,22 @@ async def to_feed(
     ledger behaviour the ledger must degrade to rather than fail into: with no
     entries, nothing is known to be waived or cited, so `fresh` passes through
     exactly as it did before any of this existed.
+
+    The two reads are guarded apart, because one failing is no reason to
+    discard the other. Losing the claims still leaves what was waived, and
+    losing the ledger still leaves what is cited; either is better than
+    knowing neither, and neither can fail the round.
     """
     try:
         entries = await _load(run_id)
+    except Exception:  # noqa: BLE001
+        _log.warning("obligation ledger read failed", exc_info=True)
+        entries = {}
+    try:
         cited = await _cited(answer_id)
     except Exception:  # noqa: BLE001
-        _log.warning("obligation ledger to_feed read failed", exc_info=True)
-        entries, cited = {}, set()
+        _log.warning("obligation ledger claim read failed", exc_info=True)
+        cited = set()
 
     def _live(doc: str) -> bool:
         e = entries.get(doc) or {}

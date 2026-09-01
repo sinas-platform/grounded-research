@@ -150,3 +150,23 @@ async def test_an_unreadable_claim_set_still_feeds_this_round(ledger):
 async def test_a_failed_read_does_not_fail_the_round(ledger):
     ledger["raise_on"] = "entries"
     assert await feed() == []
+
+
+@pytest.mark.asyncio
+async def test_losing_the_ledger_keeps_what_is_cited(ledger):
+    """One read failing is no reason to discard the other. Without the
+    entries, a document a surviving claim cites is still not owed."""
+    ledger["raise_on"] = "entries"
+    ledger["cited"] = {"cited.md"}
+    got = await feed({"cited.md": "why", "new.md": "why"})
+    assert docs(got) == ["new.md"]
+
+
+@pytest.mark.asyncio
+async def test_losing_the_claims_keeps_what_is_waived(ledger):
+    """And without the claims, a waived document is still retired. Knowing one
+    of the two beats knowing neither."""
+    ledger["raise_on"] = "cited"
+    ledger["entries"] = {"waived.md": entry(waived={"by": "reviser", "rationale": "r"})}
+    got = await feed({"waived.md": "why", "new.md": "why"})
+    assert docs(got) == ["new.md"]

@@ -71,6 +71,14 @@ Reply ONLY JSON:
 QUESTION: {question}"""
 
 
+# What each planning round must come back having answered. Presence of any
+# one of them, empty or not, distinguishes a planner that looked from a reply
+# that never engaged with the request.
+_ROUND1_FIELDS = ("named_entities", "value_probes", "seed_cases",
+                  "websearch_queries")
+_ROUND2_FIELDS = ("anchor_entity_ids", "websearch_queries", "class_boost")
+
+
 def _parse(reply: str) -> dict:
     """The planner's reply as JSON, or JSONDecodeError naming what broke."""
     cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
@@ -80,41 +88,76 @@ def _parse(reply: str) -> dict:
     return json.loads(cleaned[start:end + 1])
 
 
-def _repair_prompt(exc: json.JSONDecodeError, reply: str) -> str:
+def _require(data: dict, fields: tuple[str, ...]) -> dict:
+    """The reply must answer the round, not merely parse.
+
+    `{}` is valid JSON and an empty plan. Nothing downstream rejects one:
+    anchors and queries default to empty lists, retrieval then matches
+    nothing, and the run publishes an empty result rather than reporting that
+    planning failed. It is the "semantic verdict" failure the argument planner
+    already guards against for its own call.
+
+    Presence is the test, not content. A field the round asked for, holding
+    an empty list, is an answer: the planner looked and found nothing. A
+    reply carrying none of them has not answered.
+    """
+    if not any(f in data for f in fields):
+        raise ValueError(
+            "planner reply answered none of " + ", ".join(fields)
+            + "; got keys: " + (", ".join(sorted(data)) or "(none)")
+        )
+    return data
+
+
+def _repair_prompt(exc: ValueError, reply: str, prompt: str) -> str:
     """Ask for the same content again, valid this time.
 
-    Same shape as the drafter's repair in query_runner: name what broke, say
-    how to avoid it, and hand back the reply being repaired. One prompt for
-    both planning rounds, because both ask for a flat object of string lists
+    Shaped after the drafter's repair in query_runner, which names what broke,
+    says how to avoid it and hands back the reply being repaired, with the
+    original prompt added, which the drafter does not need and this does.
+    The drafter
+    repairs a reply that always contains its claims, so "send them again" has
+    a referent; a planner reply can be empty or prose, and then a repair
+    prompt without the question asks for the correction of nothing.
+
+    One prompt serves both rounds: both ask for a flat object of string lists
     and neither has a field the other lacks a rule for.
     """
     return (
-        "Your previous reply was not valid JSON: " + str(exc)[:200]
-        + '. Send the same content again as strictly valid JSON. Escape every '
-        'quotation mark inside a string as \\", use no line breaks inside a '
-        "string, and reply with the JSON object alone."
-        "\n\nPREVIOUS REPLY:\n" + (reply or "")[:60000]
+        "Your previous reply could not be used: " + str(exc)[:200]
+        + '. Answer the request below again as strictly valid JSON. Escape '
+        'every quotation mark inside a string as \\", use no line breaks '
+        "inside a string, include every field the request names, and reply "
+        "with the JSON object alone."
+        "\n\nORIGINAL REQUEST:\n" + (prompt or "")[:40000]
+        + "\n\nPREVIOUS REPLY:\n" + (reply or "")[:20000]
     )
 
 
-async def _invoke_json(sinas, agent: str, prompt: str) -> dict:
-    """Invoke and parse, with one repair attempt on a malformed reply.
+async def _invoke_json(sinas, agent: str, prompt: str, fields: tuple[str, ...]) -> dict:
+    """Invoke, parse and check, with one repair attempt on either failure.
 
     Planning is the first call of a run and the cheapest to redo, and until
-    it parses nothing downstream can start: a lost quotation mark ended runs
+    it answers nothing downstream can start: a lost quotation mark ended runs
     before retrieval had read anything. The drafter already retries once for
     the same reason at the other end of the pipeline; this is that, applied
     where the loss is total rather than partial.
 
-    A second failure raises, as it does there. A planner that cannot answer
-    in the shape asked for twice is not a transient fault to paper over, and
-    the run must say so rather than proceed on an empty plan.
+    `fields` is what makes the retry safe. Without it a repair is free to
+    reply `{}`, which parses, and a loud failure becomes a quiet empty
+    answer. The check runs on both attempts, not only the repaired one, so a
+    first-attempt `{}` is now repaired too rather than flowing through as it
+    does today.
+
+    A second failure raises, as it does in the drafter. A planner that cannot
+    answer the round twice is not a transient fault to paper over.
     """
     reply = await sinas.invoke(agent, prompt)
     try:
-        return _parse(reply)
-    except json.JSONDecodeError as exc:
-        return _parse(await sinas.invoke(agent, _repair_prompt(exc, reply)))
+        return _require(_parse(reply), fields)
+    except ValueError as exc:
+        repaired = await sinas.invoke(agent, _repair_prompt(exc, reply, prompt))
+        return _require(_parse(repaired), fields)
 
 
 # The corpus map describes the shape of the corpus — entity types with a few
@@ -281,7 +324,8 @@ async def plan_question(
     sinas = _Sinas(run_id=run_id)
     corpus_map = await build_corpus_map()
     r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question, domain=_domain_prefix()))
+        corpus_map=corpus_map, question=question, domain=_domain_prefix()),
+        _ROUND1_FIELDS)
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
@@ -291,7 +335,7 @@ async def plan_question(
         for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question))
+        matches=match_lines, question=question), _ROUND2_FIELDS)
     anchors = [a for a in (r2.get("anchor_entity_ids") or [])
                if a in all_matches]
     # determinism: model's picks unioned with the strongest matches, and

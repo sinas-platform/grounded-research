@@ -115,6 +115,18 @@ async def waive(run_id: uuid.UUID, doc: str, rationale: str,
         await _store(run_id, entries)
 
 
+@_best_effort(dict)
+async def known(run_id: uuid.UUID) -> dict[str, dict[str, Any]]:
+    """Every entry the ledger holds, whatever its state.
+
+    `unmet` answers "what is still owed"; this answers "what does the ledger
+    know". A caller adding entries of its own needs the second: an entry
+    absent from `unmet` may be absent because it was waived or satisfied, and
+    treating that as "the ledger has no opinion" revives it.
+    """
+    return await _load(run_id)
+
+
 @_best_effort(list)
 async def unmet(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[dict[str, Any]]:
     """Obligations neither waived nor satisfied, oldest first.

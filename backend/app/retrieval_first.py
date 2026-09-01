@@ -71,9 +71,143 @@ Reply ONLY JSON:
 QUESTION: {question}"""
 
 
+# What each planning round must come back having answered, as groups: the
+# reply must carry at least one field from every group.
+#
+# Round 1's four fields are not four of a kind. Three of them feed the graph
+# channel — they resolve to entity matches, which become the anchors retrieval
+# traverses from — and the fourth feeds the text channel. Losing one of the
+# three costs nothing, because the other two still produce matches and the
+# anchor list is topped up deterministically from the strongest of them.
+# Losing all three leaves no matches at all, so there are no anchors and no
+# fallback to top up from, and the graph channel is gone while the reply still
+# looks answered. That is the case worth failing on, and it is why this is a
+# group and not four separate demands.
+#
+# Round 2 stays a single group. Its anchors survive an omission through the
+# same deterministic top-up, and its queries are unioned with round 1's, so no
+# one field carries a channel alone.
+#
+# Presence is the test, not content. A question naming no entities properly
+# yields an empty `named_entities`, and a question needing no reranking an
+# empty `class_boost`; both are answers. Demanding every field would turn a
+# legitimate plan for an abstract question into a failed run.
+_ROUND1_GROUPS = (
+    ("value_probes", "named_entities", "seed_cases"),
+    ("websearch_queries",),
+)
+_ROUND2_GROUPS = (("anchor_entity_ids", "websearch_queries", "class_boost"),)
+
+
 def _parse(reply: str) -> dict:
-    cleaned = reply.strip().strip("`").removeprefix("json").strip()
-    return json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+    """The planner's reply as JSON, or JSONDecodeError naming what broke."""
+    cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+    start, end = cleaned.find("{"), cleaned.rfind("}")
+    if start < 0 or end <= start:
+        raise json.JSONDecodeError("no JSON object in reply", cleaned or "", 0)
+    return json.loads(cleaned[start:end + 1])
+
+
+def _require(data: dict, groups: tuple[tuple[str, ...], ...]) -> dict:
+    """The reply must answer the round, not merely parse.
+
+    `{}` is valid JSON and an empty plan. Nothing downstream rejects one:
+    anchors and queries default to empty lists, retrieval then matches
+    nothing, and the run publishes an empty result rather than reporting that
+    planning failed. It is the "semantic verdict" failure the argument planner
+    already guards against for its own call.
+
+    Presence is the test, not content. A field the round asked for, holding
+    an empty list, is an answer: the planner looked and found nothing. A
+    group answered by none of its fields has not been answered at all, and
+    each group stands for one retrieval channel, so losing a whole group is
+    losing a way into the corpus rather than one probe among several.
+
+    The type check makes this safe on its own. Nothing reaches it today that
+    is not a dict, because `_parse` slices from the first brace to the last
+    before parsing and so returns an object or raises. That is a property of
+    the only caller rather than of this function, and a later caller, or a
+    simpler `_parse`, would turn `f in data` into a TypeError that escapes the
+    repair path. Raising ValueError keeps a non-object on the same route as
+    every other unusable reply.
+    """
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"planner reply is a {type(data).__name__}, not a JSON object"
+        )
+    for group in groups:
+        if not any(f in data for f in group):
+            raise ValueError(
+                "planner reply answered none of " + ", ".join(group)
+                + "; got keys: " + (", ".join(sorted(data)) or "(none)")
+            )
+    return data
+
+
+def _repair_prompt(exc: ValueError, reply: str, prompt: str) -> str:
+    """Ask for the same content again, valid this time.
+
+    Shaped after the drafter's repair in query_runner, which names what broke,
+    says how to avoid it and hands back the reply being repaired, with the
+    original prompt added, which the drafter does not need and this does. The
+    drafter repairs a reply that always contains its claims, so "send them
+    again" has a referent; a planner reply can be empty or prose, and then a
+    repair prompt without the question asks for the correction of nothing.
+
+    One prompt serves both rounds: both ask for a flat object of string lists
+    and neither has a field the other lacks a rule for.
+    """
+    return (
+        "Your previous reply could not be used: " + str(exc)[:200]
+        + '. Answer the request below again as strictly valid JSON. Escape '
+        'every quotation mark inside a string as \\", use no line breaks '
+        "inside a string, include every field the request names, and reply "
+        "with the JSON object alone."
+        "\n\nORIGINAL REQUEST:\n" + (prompt or "")[:40000]
+        + "\n\nPREVIOUS REPLY:\n" + (reply or "")[:20000]
+    )
+
+
+async def _invoke_json(
+    sinas,
+    agent: str,
+    prompt: str,
+    groups: tuple[tuple[str, ...], ...],
+    run_id: uuid.UUID | None = None,
+    where: str = "",
+) -> dict:
+    """Invoke, parse and check, with one repair attempt on either failure.
+
+    Planning is the first call of a run and the cheapest to redo, and until
+    it answers nothing downstream can start: a lost quotation mark ended runs
+    before retrieval had read anything. The drafter already retries once for
+    the same reason at the other end of the pipeline; this is that, applied
+    where the loss is total rather than partial.
+
+    `groups` is what makes the retry safe. Without it a repair is free to
+    reply `{}`, which parses, and a loud failure becomes a quiet empty
+    answer. The check runs on both attempts, not only the repaired one, so a
+    first-attempt `{}` is now repaired too rather than flowing through as it
+    does today.
+
+    A second failure raises, as it does in the drafter. A planner that cannot
+    answer the round twice is not a transient fault to paper over.
+
+    A repair is recorded as `plan_reparse`, beside the drafter's
+    `draft_reparse`: a retry that leaves no trace is one nobody can count, and
+    the call log shows only that a round cost two calls instead of one.
+    """
+    reply = await sinas.invoke(agent, prompt)
+    try:
+        return _require(_parse(reply), groups)
+    except ValueError as exc:
+        if run_id is not None:
+            from app.services.query_runner import _tele
+
+            await _tele(run_id, "retrieval",
+                        plan_reparse=f"{where}: {str(exc)[:200]}".lstrip(": "))
+        repaired = await sinas.invoke(agent, _repair_prompt(exc, reply, prompt))
+        return _require(_parse(repaired), groups)
 
 
 # The corpus map describes the shape of the corpus — entity types with a few
@@ -239,8 +373,9 @@ async def plan_question(
     # both `_run_cost_usd` and the cost cap that reads it.
     sinas = _Sinas(run_id=run_id)
     corpus_map = await build_corpus_map()
-    r1 = _parse(await sinas.invoke(PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question, domain=_domain_prefix())))
+    r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
+        corpus_map=corpus_map, question=question, domain=_domain_prefix()),
+        _ROUND1_GROUPS, run_id, "round 1")
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
@@ -249,8 +384,9 @@ async def plan_question(
         f"- id={m['id']} [{m['type']}] {m['value']!r} ({m['docs']} docs)"
         for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
     ) or "(no matches — rely on websearch queries)"
-    r2 = _parse(await sinas.invoke(PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question)))
+    r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
+        matches=match_lines, question=question),
+        _ROUND2_GROUPS, run_id, "round 2")
     anchors = [a for a in (r2.get("anchor_entity_ids") or [])
                if a in all_matches]
     # determinism: model's picks unioned with the strongest matches, and
@@ -261,6 +397,22 @@ async def plan_question(
     queries = list(dict.fromkeys(
         [str(q) for q in (r1.get("websearch_queries") or [])]
         + [str(q) for q in (r2.get("websearch_queries") or [])]))[:14]
+    # A plan with nothing in it is not a plan. Both rounds can answer every
+    # field and still leave nothing to retrieve with, because a field may
+    # legitimately be empty: a question naming no entities yields an empty
+    # `named_entities`, and that is an answer. What is not an answer is every
+    # field empty at once. Retrieval then matches nothing, the briefing is
+    # empty, and the run goes on to publish over no documents; nothing
+    # downstream refuses it.
+    #
+    # Checked here rather than per round, because the rounds combine: round 1
+    # may offer no queries where round 2 does, and either round's matches can
+    # carry the anchors. Only after both is there a plan to judge.
+    if not anchors and not queries:
+        raise ValueError(
+            "planning produced no anchors and no queries: nothing to retrieve "
+            "with"
+        )
     return {"anchors": anchors,
             "anchor_names": {a: all_matches[a]["value"] for a in anchors},
             "queries": queries,

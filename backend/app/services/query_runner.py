@@ -396,6 +396,49 @@ async def _stage_discovery(run_id: uuid.UUID, sinas: _Sinas) -> None:
     await _tele(run_id, "discovery", fired=_iso(), chat_id=chat)
 
 
+# How far down the ranking a retrieved document must be accounted for. Five,
+# and the number comes from the feed cap rather than from coverage.
+#
+# Coverage would argue for more. Across 195 published runs the rank of a cited
+# document has a median of 12, and the top five holds only 31% of where
+# citations land; thirty would be needed for 76%. But a bounded number of
+# obligations reach the reviser per round, and the gate alone already raises
+# six to nine. Measured at each candidate: five adds 2.9 per run and so never
+# fills a round's width on its own, ten adds 6.9 and would on 81% of runs.
+# The queue does drain — over 56 obligations in seven runs every one was fed
+# at least once — so this is not about entries starving. It is about how much
+# of each round these take from the gate's own findings, which reach the rest
+# of the ranking and do that part well.
+#
+# So this is a narrow deterministic net over the part of the ranking the gate
+# judges least consistently, not a broad one. The long tail stays the gate's
+# work, and it does that part well.
+TOP_RANK_OBLIGATION_N = 5
+
+# Said plainly, because the reviser decides between citing and waiving and the
+# two kinds of finding deserve different weight. The gate's note argues why a
+# document matters; this one can only report where it ranked and that nothing
+# used it.
+TOP_RANK_NOTE = (
+    "among the top retrieved documents for this question and cited by no "
+    "surviving claim. This is a ranking fact, not a judgement that the "
+    "document is on point: read it and either cite it or waive it with the "
+    "reason it does not bear on the question."
+)
+
+
+def _unaccounted_top(mrows: list[dict], cited: set[str]) -> list[dict]:
+    """Retrieved above the cut and cited by nothing that survived.
+
+    `mrows` arrives in rank order, so position is the rank and no second query
+    is needed. Pure, so the rule can be read and tested without a run.
+    """
+    return [
+        r for r in mrows[:TOP_RANK_OBLIGATION_N]
+        if r.get("filename") and r["filename"] not in cited
+    ]
+
+
 async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
     """Per result document, in rank order: what the deployment's config
     derives about it — class, annotation values (issuing body, authority
@@ -1571,7 +1614,34 @@ async def _gate_answer(
         fn, _, why = str(src).partition(":")
         if fn.strip():
             fresh[fn.strip()] = (why.strip() or str(src))[:400]
-            await obligations.record(run_id, fn.strip(), why.strip() or str(src))
+    # The top of the ranking is accounted for whatever the gate says. Replaying
+    # one run's gate exchange six times on identical input named the decisive
+    # source four times and missed it twice, and the misses were at the top:
+    # the first two or three names it returns are stable, the rest fluctuate.
+    # A rank is no judgement about a document, so this cannot replace the gate,
+    # which reaches the whole ranking; it takes the coin flip out of the part
+    # the gate is least consistent about.
+    #
+    # Recorded before the gate's own, deliberately, because the top deserves
+    # the first attempt rather than because it would otherwise starve. `unmet`
+    # feeds oldest first and a bounded number reach the reviser each round, but
+    # the queue drains as obligations are cited or waived: measured over 56
+    # obligations in seven runs, every one was fed at least once and none went
+    # unfed. What earns these the front of the queue is that the gate's
+    # judgement is least reliable exactly here, four times in six on identical
+    # input, so this is the part worth attempting first.
+    #
+    # Where the gate named the same document, its note is kept. `record` keeps
+    # the first note, and the gate's says why the document matters where this
+    # rule can only say where it ranked.
+    top_unaccounted = [r["filename"] for r in _unaccounted_top(mrows, cited)]
+    for fn in top_unaccounted:
+        note = fresh.get(fn) or TOP_RANK_NOTE
+        fresh.setdefault(fn, note)
+        await obligations.record(run_id, fn, note)
+    for fn, note in fresh.items():
+        if fn not in top_unaccounted:
+            await obligations.record(run_id, fn, note)
     owed = await obligations.unmet(run_id, answer_id)
     # This round's parse feeds regardless of ledger state: the ledger adds
     # persistence across rounds, it must never be a precondition for acting

@@ -94,3 +94,34 @@ def test_the_note_says_what_kind_of_finding_this_is():
 def test_the_note_offers_both_ways_out():
     assert "cite it" in TOP_RANK_NOTE
     assert "waive it" in TOP_RANK_NOTE
+
+
+# ── what has already been retired ────────────────────────────────────────────
+
+
+def test_a_waived_document_is_not_raised_again():
+    """A waiver is the reviser deciding not to cite, so the document stays
+    uncited and stays above the cut. Reading only rank and citation would
+    raise it again every round for the rest of the run."""
+    got = _unaccounted_top(rows("a", "b", "c"), set(), {"b"})
+    assert [r["filename"] for r in got] == ["a", "c"]
+
+
+def test_waived_and_cited_are_both_accounted_for():
+    got = _unaccounted_top(rows("a", "b", "c"), {"a"}, {"b"})
+    assert [r["filename"] for r in got] == ["c"]
+
+
+def test_all_retired_or_cited_raises_nothing():
+    assert _unaccounted_top(rows("a", "b"), {"a"}, {"b"}) == []
+
+
+def test_a_waiver_below_the_cut_changes_nothing_above_it():
+    got = _unaccounted_top(rows("a", "b", "c", "d", "e", "f"), set(), {"f"})
+    assert [r["filename"] for r in got] == ["a", "b", "c", "d", "e"]
+
+
+def test_the_waived_set_defaults_to_empty():
+    """Callers that have no ledger to consult still get the rule."""
+    got = _unaccounted_top(rows("a"), set())
+    assert [r["filename"] for r in got] == ["a"]

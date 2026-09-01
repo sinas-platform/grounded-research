@@ -427,15 +427,28 @@ TOP_RANK_NOTE = (
 )
 
 
-def _unaccounted_top(mrows: list[dict], cited: set[str]) -> list[dict]:
-    """Retrieved above the cut and cited by nothing that survived.
+def _unaccounted_top(
+    mrows: list[dict], cited: set[str], waived: set[str] = frozenset()
+) -> list[dict]:
+    """Retrieved above the cut, cited by nothing that survived, not retired.
 
     `mrows` arrives in rank order, so position is the rank and no second query
     is needed. Pure, so the rule can be read and tested without a run.
+
+    A waived document is skipped, and the omission is the whole reason the
+    parameter exists: a waiver is the reviser deciding not to cite, so the
+    document stays uncited and stays above the cut, and a rule reading only
+    rank and citation would raise it again on every round for the rest of the
+    run. The gate's own path has the same hazard through the fallback that
+    feeds this round's findings, but reaches it only when the model happens to
+    name a waived document again; a rank is not a judgement, so this rule
+    would reach it every time.
     """
     return [
         r for r in mrows[:TOP_RANK_OBLIGATION_N]
-        if r.get("filename") and r["filename"] not in cited
+        if r.get("filename")
+        and r["filename"] not in cited
+        and r["filename"] not in waived
     ]
 
 
@@ -1634,7 +1647,11 @@ async def _gate_answer(
     # Where the gate named the same document, its note is kept. `record` keeps
     # the first note, and the gate's says why the document matters where this
     # rule can only say where it ranked.
-    top_unaccounted = [r["filename"] for r in _unaccounted_top(mrows, cited)]
+    ledger = await obligations.known(run_id)
+    retired = {d for d, e in ledger.items() if (e or {}).get("waived")}
+    top_unaccounted = [
+        r["filename"] for r in _unaccounted_top(mrows, cited, retired)
+    ]
     for fn in top_unaccounted:
         note = fresh.get(fn) or TOP_RANK_NOTE
         fresh.setdefault(fn, note)

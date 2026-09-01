@@ -25,6 +25,9 @@ LDQUO, RDQUO = "\u201c", "\u201d"  # double quotation marks
 EM_DASH, EN_DASH = "\u2014", "\u2013"
 SOFT_HYPHEN = "\u00ad"  # invisible; PDF hyphenation
 LAQUO, RAQUO = "\u00ab", "\u00bb"  # guillemets
+MINUS = "\u2212"  # mathematical operator, not a dash
+PRIME = "\u2032"  # derivative, minute, chemical locant
+ZWNJ = "\u200c"  # orthographic joiner, changes the word
 
 
 def numbered(*lines: str) -> str:
@@ -42,8 +45,11 @@ SOURCE = numbered(
     "The file shall be preserved by the authority.450 Regulation 1 provides",
     "that information obtained may be used only for the stated purpose.",
     f"The {LAQUO}stated purpose{RAQUO} is the subject matter of the decision.",
+    f"The margin fell by {MINUS}5 percentage points over the reference period.",
+    f"The compound 4,4{PRIME}-methylene is listed in the annex to the decision.",
+    f"A zero{ZWNJ}width joiner sits inside a word of this sentence.",
 )
-ALL_LINES = (1, 9)
+ALL_LINES = (1, 12)
 
 
 def verify(quote: str, span: tuple[int, int] = ALL_LINES) -> bool:
@@ -144,6 +150,32 @@ def test_empty_and_missing_text_fail():
 
 def test_an_empty_source_range_accepts_nothing():
     assert not _verify_passage("", 1, 9, "The authority may not rely on a document")
+
+
+def test_a_mathematical_minus_is_not_a_hyphen():
+    """A minus is an operator. Folding it to a hyphen would verify a quote
+    that does not say what the source says."""
+    assert not verify("The margin fell by -5 percentage points over the")
+
+
+def test_a_prime_is_not_an_apostrophe():
+    """Primes mark derivatives, minutes and chemical locants. They are drawn
+    like a quotation mark and do not mean one."""
+    assert not verify("The compound 4,4'-methylene is listed in the annex")
+
+
+def test_an_orthographic_joiner_is_not_removed():
+    """Unlike a soft hyphen, a zero-width joiner is part of the word."""
+    assert not verify("A zerowidth joiner sits inside a word of this sentence")
+
+
+def test_the_excluded_characters_stay_out_of_the_fold():
+    """Stated once as a fact about the map, so deleting a line from it fails
+    a test instead of silently widening what verifies."""
+    from app.services.query_runner import _RENDERING_VARIANTS
+
+    for excluded in (0x2212, 0x2032, 0x2033, 0x200C, 0x200D):
+        assert excluded not in _RENDERING_VARIANTS
 
 
 # -- the normalization itself ------------------------------------------------

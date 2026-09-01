@@ -829,25 +829,35 @@ async def _fetch_numbered(
     return out, truncated
 
 
-# Characters that carry no content, only a rendering. A model copying text
+# Characters that carry a rendering and nothing else. A model copying text
 # correctly still types a straight apostrophe where the source has a
 # typographic one, and drops the soft hyphens that PDF extraction leaves
 # inside hyphenated words. Comparing those literally rejected the quote as
 # fabricated, which is the one thing it demonstrably was not: every
 # character that says something was identical.
 #
-# Deliberately NOT unicodedata NFKC. NFKC changes none of the marks below
-# (it leaves every quote, dash and soft hyphen exactly as it found them),
-# and the classes it does fold include superscript digits, which is the one
-# fold that could make two different footnote references read alike. It
-# would add the risk without addressing the problem.
+# What is folded is only what has no role but rendering. A character that
+# means something in some other notation stays out of the map even when it
+# is drawn like one that is in it, because folding it would let two texts
+# that differ verify as one:
+#   U+2212 is a minus sign, and a passage carrying a formula carries it as
+#     an operator, not as a dash.
+#   U+2032 and U+2033 are primes: derivatives, minutes, chemical locants.
+#   U+200C and U+200D are orthographic joiners, which change words.
+# Each of those was measured against the passages this check rejects, and
+# none of them rescued one, so they are out on evidence as well.
+#
+# Deliberately NOT unicodedata NFKC. It folds none of the marks below (it
+# leaves every quote, dash and soft hyphen exactly as it found them), and
+# the classes it does fold include superscript digits, which is one more
+# way for two different footnote references to read alike.
 _QUOTE_MARKS = {
-    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'", 0x2032: "'",
-    0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"', 0x2033: '"',
+    0x2018: "'", 0x2019: "'", 0x201A: "'", 0x201B: "'",
+    0x201C: '"', 0x201D: '"', 0x201E: '"', 0x201F: '"',
     0x00AB: '"', 0x00BB: '"',
 }
-_DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015, 0x2212)}
-_INVISIBLE = dict.fromkeys((0x00AD, 0x200B, 0x200C, 0x200D, 0xFEFF))
+_DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015)}
+_INVISIBLE = dict.fromkeys((0x00AD, 0x200B, 0xFEFF))
 _RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_INVISIBLE}
 
 

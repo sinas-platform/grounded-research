@@ -71,12 +71,32 @@ Reply ONLY JSON:
 QUESTION: {question}"""
 
 
-# What each planning round must come back having answered. Presence of any
-# one of them, empty or not, distinguishes a planner that looked from a reply
-# that never engaged with the request.
-_ROUND1_FIELDS = ("named_entities", "value_probes", "seed_cases",
-                  "websearch_queries")
-_ROUND2_FIELDS = ("anchor_entity_ids", "websearch_queries", "class_boost")
+# What each planning round must come back having answered, as groups: the
+# reply must carry at least one field from every group.
+#
+# Round 1's four fields are not four of a kind. Three of them feed the graph
+# channel — they resolve to entity matches, which become the anchors retrieval
+# traverses from — and the fourth feeds the text channel. Losing one of the
+# three costs nothing, because the other two still produce matches and the
+# anchor list is topped up deterministically from the strongest of them.
+# Losing all three leaves no matches at all, so there are no anchors and no
+# fallback to top up from, and the graph channel is gone while the reply still
+# looks answered. That is the case worth failing on, and it is why this is a
+# group and not four separate demands.
+#
+# Round 2 stays a single group. Its anchors survive an omission through the
+# same deterministic top-up, and its queries are unioned with round 1's, so no
+# one field carries a channel alone.
+#
+# Presence is the test, not content. A question naming no entities properly
+# yields an empty `named_entities`, and a question needing no reranking an
+# empty `class_boost`; both are answers. Demanding every field would turn a
+# legitimate plan for an abstract question into a failed run.
+_ROUND1_GROUPS = (
+    ("value_probes", "named_entities", "seed_cases"),
+    ("websearch_queries",),
+)
+_ROUND2_GROUPS = (("anchor_entity_ids", "websearch_queries", "class_boost"),)
 
 
 def _parse(reply: str) -> dict:
@@ -88,7 +108,7 @@ def _parse(reply: str) -> dict:
     return json.loads(cleaned[start:end + 1])
 
 
-def _require(data: dict, fields: tuple[str, ...]) -> dict:
+def _require(data: dict, groups: tuple[tuple[str, ...], ...]) -> dict:
     """The reply must answer the round, not merely parse.
 
     `{}` is valid JSON and an empty plan. Nothing downstream rejects one:
@@ -99,7 +119,9 @@ def _require(data: dict, fields: tuple[str, ...]) -> dict:
 
     Presence is the test, not content. A field the round asked for, holding
     an empty list, is an answer: the planner looked and found nothing. A
-    reply carrying none of them has not answered.
+    group answered by none of its fields has not been answered at all, and
+    each group stands for one retrieval channel, so losing a whole group is
+    losing a way into the corpus rather than one probe among several.
 
     The type check makes this safe on its own. Nothing reaches it today that
     is not a dict, because `_parse` slices from the first brace to the last
@@ -113,11 +135,12 @@ def _require(data: dict, fields: tuple[str, ...]) -> dict:
         raise ValueError(
             f"planner reply is a {type(data).__name__}, not a JSON object"
         )
-    if not any(f in data for f in fields):
-        raise ValueError(
-            "planner reply answered none of " + ", ".join(fields)
-            + "; got keys: " + (", ".join(sorted(data)) or "(none)")
-        )
+    for group in groups:
+        if not any(f in data for f in group):
+            raise ValueError(
+                "planner reply answered none of " + ", ".join(group)
+                + "; got keys: " + (", ".join(sorted(data)) or "(none)")
+            )
     return data
 
 
@@ -149,7 +172,7 @@ async def _invoke_json(
     sinas,
     agent: str,
     prompt: str,
-    fields: tuple[str, ...],
+    groups: tuple[tuple[str, ...], ...],
     run_id: uuid.UUID | None = None,
     where: str = "",
 ) -> dict:
@@ -161,7 +184,7 @@ async def _invoke_json(
     the same reason at the other end of the pipeline; this is that, applied
     where the loss is total rather than partial.
 
-    `fields` is what makes the retry safe. Without it a repair is free to
+    `groups` is what makes the retry safe. Without it a repair is free to
     reply `{}`, which parses, and a loud failure becomes a quiet empty
     answer. The check runs on both attempts, not only the repaired one, so a
     first-attempt `{}` is now repaired too rather than flowing through as it
@@ -176,7 +199,7 @@ async def _invoke_json(
     """
     reply = await sinas.invoke(agent, prompt)
     try:
-        return _require(_parse(reply), fields)
+        return _require(_parse(reply), groups)
     except ValueError as exc:
         if run_id is not None:
             from app.services.query_runner import _tele
@@ -184,7 +207,7 @@ async def _invoke_json(
             await _tele(run_id, "retrieval",
                         plan_reparse=f"{where}: {str(exc)[:200]}".lstrip(": "))
         repaired = await sinas.invoke(agent, _repair_prompt(exc, reply, prompt))
-        return _require(_parse(repaired), fields)
+        return _require(_parse(repaired), groups)
 
 
 # The corpus map describes the shape of the corpus — entity types with a few
@@ -352,7 +375,7 @@ async def plan_question(
     corpus_map = await build_corpus_map()
     r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
         corpus_map=corpus_map, question=question, domain=_domain_prefix()),
-        _ROUND1_FIELDS, run_id, "round 1")
+        _ROUND1_GROUPS, run_id, "round 1")
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
@@ -363,7 +386,7 @@ async def plan_question(
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
         matches=match_lines, question=question),
-        _ROUND2_FIELDS, run_id, "round 2")
+        _ROUND2_GROUPS, run_id, "round 2")
     anchors = [a for a in (r2.get("anchor_entity_ids") or [])
                if a in all_matches]
     # determinism: model's picks unioned with the strongest matches, and

@@ -14,8 +14,8 @@ from contextlib import contextmanager
 
 import pytest
 from app.retrieval_first import (
-    _ROUND1_FIELDS,
-    _ROUND2_FIELDS,
+    _ROUND1_GROUPS,
+    _ROUND2_GROUPS,
     _invoke_json,
     _parse,
     _repair_prompt,
@@ -104,26 +104,31 @@ def test_repair_prompt_survives_an_empty_reply():
 
 @pytest.mark.asyncio
 async def test_a_valid_reply_costs_one_call():
-    stub = _Stub('{"websearch_queries": ["a"]}')
-    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS) == {
-        "websearch_queries": ["a"]
+    stub = _Stub('{"named_entities": [], "websearch_queries": ["a"]}')
+    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS) == {
+        "named_entities": [],
+        "websearch_queries": ["a"],
     }
     assert len(stub.prompts) == 1
 
 
 @pytest.mark.asyncio
 async def test_a_malformed_reply_is_retried_once_and_succeeds():
-    stub = _Stub('{"websearch_queries": ["a" "b"]}', '{"websearch_queries": ["a", "b"]}')
-    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS) == {
-        "websearch_queries": ["a", "b"]
+    stub = _Stub(
+        '{"named_entities": [], "websearch_queries": ["a" "b"]}',
+        '{"named_entities": [], "websearch_queries": ["a", "b"]}',
+    )
+    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS) == {
+        "named_entities": [],
+        "websearch_queries": ["a", "b"],
     }
     assert len(stub.prompts) == 2
 
 
 @pytest.mark.asyncio
 async def test_the_retry_carries_the_repair_prompt_not_the_original():
-    stub = _Stub("not json at all", '{"websearch_queries": []}')
-    await _invoke_json(stub, "agent", "ORIGINAL PROMPT", _ROUND1_FIELDS)
+    stub = _Stub("not json at all", '{"named_entities": [], "websearch_queries": ["a"]}')
+    await _invoke_json(stub, "agent", "ORIGINAL PROMPT", _ROUND1_GROUPS)
     assert stub.prompts[0] == "ORIGINAL PROMPT"
     assert "could not be used" in stub.prompts[1]
     assert "not json at all" in stub.prompts[1]
@@ -135,15 +140,15 @@ async def test_a_second_failure_raises_rather_than_planning_on_nothing():
     plan would read downstream as 'the corpus supports nothing'."""
     stub = _Stub("still not json", "and still not")
     with pytest.raises(json.JSONDecodeError):
-        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS)
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS)
     assert len(stub.prompts) == 2
 
 
 @pytest.mark.asyncio
 async def test_there_is_no_third_attempt():
-    stub = _Stub("bad", "worse", '{"websearch_queries": []}')
+    stub = _Stub("bad", "worse", '{"named_entities": [], "websearch_queries": ["a"]}')
     with pytest.raises(json.JSONDecodeError):
-        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS)
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS)
     assert len(stub.replies) == 1
 
 
@@ -153,29 +158,29 @@ async def test_there_is_no_third_attempt():
 def test_a_field_the_round_asked_for_is_an_answer_even_when_empty():
     """An empty list is the planner reporting it found nothing, which is a
     result. Only a reply engaging with none of the fields has not answered."""
-    data = {"websearch_queries": []}
-    assert _require(data, _ROUND1_FIELDS) is data
+    data = {"named_entities": [], "websearch_queries": []}
+    assert _require(data, _ROUND1_GROUPS) is data
 
 
 def test_any_one_of_the_round_fields_suffices():
-    assert _require({"class_boost": ["x"]}, _ROUND2_FIELDS)
+    assert _require({"class_boost": ["x"]}, _ROUND2_GROUPS)
 
 
 def test_an_empty_object_is_rejected():
     """`{}` parses and would become an empty plan that retrieval turns into an
     empty published answer."""
     with pytest.raises(ValueError, match="answered none of"):
-        _require({}, _ROUND1_FIELDS)
+        _require({}, _ROUND1_GROUPS)
 
 
 def test_an_object_of_unrelated_keys_is_rejected():
     with pytest.raises(ValueError, match="answered none of"):
-        _require({"thoughts": "I am not sure"}, _ROUND2_FIELDS)
+        _require({"thoughts": "I am not sure"}, _ROUND2_GROUPS)
 
 
 def test_the_rejection_names_the_fields_and_what_came_back():
     with pytest.raises(ValueError) as e:
-        _require({"other": 1}, _ROUND2_FIELDS)
+        _require({"other": 1}, _ROUND2_GROUPS)
     assert "anchor_entity_ids" in str(e.value)
     assert "other" in str(e.value)
 
@@ -187,9 +192,10 @@ def test_the_rejection_names_the_fields_and_what_came_back():
 async def test_an_empty_object_is_repaired_rather_than_accepted():
     """The failure this closes: without the check the repair may answer `{}`,
     turning a loud planning failure into a quiet empty result."""
-    stub = _Stub("{}", '{"websearch_queries": ["a"]}')
-    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS) == {
-        "websearch_queries": ["a"]
+    stub = _Stub("{}", '{"named_entities": [], "websearch_queries": ["a"]}')
+    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS) == {
+        "named_entities": [],
+        "websearch_queries": ["a"],
     }
     assert len(stub.prompts) == 2
 
@@ -200,7 +206,7 @@ async def test_a_first_attempt_empty_object_is_repaired_not_passed_through():
     open regardless of the retry."""
     stub = _Stub("{}", "{}")
     with pytest.raises(ValueError, match="answered none of"):
-        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS)
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS)
     assert len(stub.prompts) == 2
 
 
@@ -208,7 +214,7 @@ async def test_a_first_attempt_empty_object_is_repaired_not_passed_through():
 async def test_a_repair_that_answers_nothing_raises():
     stub = _Stub("not json", "{}")
     with pytest.raises(ValueError):
-        await _invoke_json(stub, "agent", "PROMPT", _ROUND2_FIELDS)
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND2_GROUPS)
 
 
 # ── the repair prompt carries the request ────────────────────────────────────
@@ -218,8 +224,11 @@ async def test_a_repair_that_answers_nothing_raises():
 async def test_the_repair_prompt_carries_the_original_request():
     """A prose-only reply leaves nothing to repair from, so the repair has to
     carry the question or it asks for the correction of nothing."""
-    stub = _Stub("I cannot help with that", '{"named_entities": []}')
-    await _invoke_json(stub, "agent", "THE ORIGINAL REQUEST", _ROUND1_FIELDS)
+    stub = _Stub(
+        "I cannot help with that",
+        '{"named_entities": [], "websearch_queries": []}',
+    )
+    await _invoke_json(stub, "agent", "THE ORIGINAL REQUEST", _ROUND1_GROUPS)
     assert "THE ORIGINAL REQUEST" in stub.prompts[1]
     assert "I cannot help with that" in stub.prompts[1]
 
@@ -264,8 +273,8 @@ async def test_a_repair_is_recorded_against_the_run():
     """Without this the only trace is that a round cost two calls instead of
     one, which is an inference rather than a record."""
     with _capture_tele() as written:
-        stub = _Stub("{}", '{"websearch_queries": []}')
-        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS, "run-1", "round 1")
+        stub = _Stub("{}", '{"named_entities": [], "websearch_queries": ["a"]}')
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS, "run-1", "round 1")
     assert len(written) == 1
     run_id, stage, detail = written[0]
     assert (run_id, stage) == ("run-1", "retrieval")
@@ -276,8 +285,8 @@ async def test_a_repair_is_recorded_against_the_run():
 @pytest.mark.asyncio
 async def test_nothing_is_recorded_when_the_first_reply_is_good():
     with _capture_tele() as written:
-        stub = _Stub('{"websearch_queries": ["a"]}')
-        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS, "run-1", "round 1")
+        stub = _Stub('{"named_entities": [], "websearch_queries": ["a"]}')
+        await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS, "run-1", "round 1")
     assert written == []
 
 
@@ -285,8 +294,11 @@ async def test_nothing_is_recorded_when_the_first_reply_is_good():
 async def test_a_run_without_an_id_still_repairs():
     """The planner is callable outside a run, from the CLI, where there is no
     run to record against."""
-    stub = _Stub("{}", '{"websearch_queries": []}')
-    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_FIELDS) == {"websearch_queries": []}
+    stub = _Stub("{}", '{"named_entities": [], "websearch_queries": ["a"]}')
+    assert await _invoke_json(stub, "agent", "PROMPT", _ROUND1_GROUPS) == {
+        "named_entities": [],
+        "websearch_queries": ["a"],
+    }
 
 
 # ── _require is safe on a non-object ─────────────────────────────────────────
@@ -298,20 +310,71 @@ async def test_a_run_without_an_id_still_repairs():
 
 def test_a_null_reply_is_rejected_not_a_type_error():
     with pytest.raises(ValueError, match="not a JSON object"):
-        _require(None, _ROUND1_FIELDS)
+        _require(None, _ROUND1_GROUPS)
 
 
 def test_a_number_reply_is_rejected_not_a_type_error():
     with pytest.raises(ValueError, match="not a JSON object"):
-        _require(7, _ROUND1_FIELDS)
+        _require(7, _ROUND1_GROUPS)
 
 
 def test_an_array_reply_is_rejected_not_a_type_error():
     with pytest.raises(ValueError, match="not a JSON object"):
-        _require([{"named_entities": []}], _ROUND1_FIELDS)
+        _require([{"named_entities": []}], _ROUND1_GROUPS)
 
 
 def test_the_rejection_names_the_type_that_came_back():
     with pytest.raises(ValueError) as e:
-        _require([], _ROUND2_FIELDS)
+        _require([], _ROUND2_GROUPS)
     assert "list" in str(e.value)
+
+
+# ── the groups are channels, not four of a kind ──────────────────────────────
+
+
+def test_round_1_losing_all_three_matching_fields_fails():
+    """The three resolve to entity matches, which become the anchors retrieval
+    traverses from. With none of them there are no matches, no anchors, and no
+    fallback to top up from: the graph channel is gone while the reply still
+    looks answered."""
+    with pytest.raises(ValueError, match="value_probes"):
+        _require({"websearch_queries": ["a"]}, _ROUND1_GROUPS)
+
+
+def test_round_1_losing_one_matching_field_passes():
+    """The other two still produce matches, so nothing is lost."""
+    assert _require(
+        {"value_probes": [], "seed_cases": [], "websearch_queries": []},
+        _ROUND1_GROUPS,
+    )
+
+
+def test_round_1_losing_two_matching_fields_passes():
+    assert _require({"seed_cases": ["x"], "websearch_queries": []}, _ROUND1_GROUPS)
+
+
+def test_round_1_losing_the_text_channel_fails():
+    with pytest.raises(ValueError, match="websearch_queries"):
+        _require({"named_entities": ["x"]}, _ROUND1_GROUPS)
+
+
+def test_empty_lists_pass_because_presence_is_the_test():
+    """A question naming no entities properly yields an empty list, and a
+    question needing no reranking an empty class_boost. Both are answers."""
+    assert _require(
+        {"named_entities": [], "value_probes": [], "seed_cases": [], "websearch_queries": []},
+        _ROUND1_GROUPS,
+    )
+
+
+def test_round_2_is_unchanged_any_one_field_suffices():
+    """Its anchors survive an omission through the deterministic top-up and
+    its queries are unioned with round 1's, so no field carries a channel
+    alone."""
+    for field in ("anchor_entity_ids", "websearch_queries", "class_boost"):
+        assert _require({field: []}, _ROUND2_GROUPS)
+
+
+def test_round_2_still_rejects_an_object_answering_nothing():
+    with pytest.raises(ValueError, match="answered none of"):
+        _require({"thoughts": "unsure"}, _ROUND2_GROUPS)

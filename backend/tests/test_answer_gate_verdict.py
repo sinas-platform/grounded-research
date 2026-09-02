@@ -80,14 +80,19 @@ async def test_not_publishable_blocks(gate_env):
 @pytest.mark.asyncio
 async def test_uncovered_part_blocks_even_when_judge_says_publishable(gate_env):
     ok, missing, _issues, _corr, uncovered = await _gate(
-        json.dumps({
-            "publishable": True,
-            "parts": [
-                {"asks": "what the conditions are", "covered": True},
-                {"asks": "whether it is mandatory", "covered": False,
-                 "gap": "nothing addresses whether the step is mandatory"},
-            ],
-        })
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [
+                    {"asks": "what the conditions are", "covered": True},
+                    {
+                        "asks": "whether it is mandatory",
+                        "covered": False,
+                        "gap": "nothing addresses whether the step is mandatory",
+                    },
+                ],
+            }
+        )
     )
     assert ok is False
     assert uncovered == ["nothing addresses whether the step is mandatory"]
@@ -97,11 +102,13 @@ async def test_uncovered_part_blocks_even_when_judge_says_publishable(gate_env):
 @pytest.mark.asyncio
 async def test_correctness_defects_are_separated_from_quality_issues(gate_env):
     _ok, _missing, issues, correctness, _unc = await _gate(
-        json.dumps({
-            "publishable": True,
-            "tension": "claims 1 and 6 state different liability standards",
-            "unused_sources": ["C-89-11P.md: the judgment on the point in claim 3"],
-        })
+        json.dumps(
+            {
+                "publishable": True,
+                "tension": "claims 1 and 6 state different liability standards",
+                "unused_sources": ["C-89-11P.md: the judgment on the point in claim 3"],
+            }
+        )
     )
     assert any("liability standards" in c for c in correctness)
     assert any("Owed source unused" in i for i in issues)
@@ -119,13 +126,22 @@ async def test_a_named_stronger_source_becomes_a_point_to_ground(gate_env):
     ignoring the gate.
     """
     _ok, _missing, issues, _corr, points = await _gate(
-        json.dumps({
-            "publishable": True,
-            "parts": [{"asks": "which market definition applies",
-                       "covered": False, "gap": "no market definition is given"}],
-            "unused_sources": ["32025M11936.md: records the decision defining "
-                               "the market, more authoritative than m11936.md"],
-        })
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [
+                    {
+                        "asks": "which market definition applies",
+                        "covered": False,
+                        "gap": "no market definition is given",
+                    }
+                ],
+                "unused_sources": [
+                    "32025M11936.md: records the decision defining "
+                    "the market, more authoritative than m11936.md"
+                ],
+            }
+        )
     )
     assert any("32025M11936.md" in p for p in points), points
     # the coverage gap comes first: it is what blocks publication, and the
@@ -143,6 +159,108 @@ async def test_unparseable_reply_passes_but_is_recorded(gate_env):
     assert gate_env["validate"]["gate_unparseable"]
 
 
+@pytest.mark.asyncio
+async def test_the_decomposition_is_recorded(gate_env):
+    """uncovered names the parts the gate failed. It cannot show a part the
+    gate never wrote down, and that is the case nobody can currently count."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [
+                    {"asks": "what the conditions are", "covered": True},
+                    {
+                        "asks": "whether it is mandatory",
+                        "covered": False,
+                        "gap": "nothing addresses whether the step is mandatory",
+                    },
+                ],
+            }
+        )
+    )
+    recorded = gate_env["validate"]["gate_parts"]
+    assert [p["asks"] for p in recorded] == [
+        "what the conditions are",
+        "whether it is mandatory",
+    ]
+    assert [p["covered"] for p in recorded] == [True, False]
+    assert recorded[1]["gap"].startswith("nothing addresses")
+
+
+@pytest.mark.asyncio
+async def test_a_thin_decomposition_is_visible(gate_env):
+    """The failure this exists to expose: one part enumerated for a question
+    that asks three things. Coverage passes, gate_redraft is empty, and only
+    the recorded decomposition shows why."""
+    ok, missing, _issues, _corr, _unc = await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "what the conditions are", "covered": True}],
+            }
+        )
+    )
+    assert ok is True
+    assert missing == ""
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_with_no_parts_records_an_empty_list(gate_env):
+    """Recorded even when there is nothing to record, so the absence is a
+    value in the data rather than a missing key indistinguishable from a run
+    that predates this."""
+    await _gate(json.dumps({"publishable": True}))
+    assert gate_env["validate"]["gate_parts"] == []
+
+
+@pytest.mark.asyncio
+async def test_covered_is_stored_as_a_boolean(gate_env):
+    """The check reads it as truthiness, so the record has to agree with the
+    check rather than with the reply."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "a", "covered": "yes"}, {"asks": "b", "covered": 0}],
+            }
+        )
+    )
+    assert [p["covered"] for p in gate_env["validate"]["gate_parts"]] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_what_is_recorded_is_what_the_check_judged(gate_env):
+    """A part that is not an object is dropped before the check sees it, so
+    it is absent from the record too. The record is the check's input."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": ["not an object", {"asks": "a real part", "covered": True}],
+            }
+        )
+    )
+    recorded = gate_env["validate"]["gate_parts"]
+    assert len(recorded) == 1
+    assert recorded[0]["asks"] == "a real part"
+
+
+@pytest.mark.asyncio
+async def test_long_text_is_bounded(gate_env):
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "x" * 900, "covered": False, "gap": "y" * 900}],
+            }
+        )
+    )
+    part = gate_env["validate"]["gate_parts"][0]
+    assert len(part["asks"]) == 300
+    assert len(part["gap"]) == 300
+
+
 def test_the_verdict_is_returned_from_outside_any_broad_try():
     """The shape that hid the bug: the whole gate body sat inside one
     `try: ... except Exception: return True`, so a NameError in it was
@@ -155,16 +273,21 @@ def test_the_verdict_is_returned_from_outside_any_broad_try():
 
     guarded = {
         id(node)
-        for t in ast.walk(fn) if isinstance(t, ast.Try)
-        if any(isinstance(h.type, ast.Name) and h.type.id == "Exception"
-               for h in t.handlers)
-        for stmt in t.body for node in ast.walk(stmt)
+        for t in ast.walk(fn)
+        if isinstance(t, ast.Try)
+        if any(
+            isinstance(h.type, ast.Name) and h.type.id == "Exception"
+            for h in t.handlers
+        )
+        for stmt in t.body
+        for node in ast.walk(stmt)
     }
     verdicts = [
-        n for n in ast.walk(fn)
-        if isinstance(n, ast.Return) and isinstance(n.value, ast.Tuple)
-        and any(isinstance(e, ast.Name) and e.id == "publishable"
-                for e in n.value.elts)
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Return)
+        and isinstance(n.value, ast.Tuple)
+        and any(isinstance(e, ast.Name) and e.id == "publishable" for e in n.value.elts)
     ]
     assert verdicts, "the gate no longer returns a publishable verdict"
     for r in verdicts:

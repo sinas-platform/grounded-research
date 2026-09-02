@@ -1570,6 +1570,29 @@ async def _gate_answer(
         for x in parts if not x.get("covered")
     ]
     uncovered = [u for u in uncovered if u]
+    # The decomposition the check ran on, recorded because nothing else
+    # carries it. `uncovered` names the parts the gate judged and failed; it
+    # says nothing about the parts the gate never wrote down, and a part that
+    # was never written down cannot be uncovered. So an answer that leaves a
+    # limb of the question untouched publishes with an empty gate_redraft and
+    # looks, in telemetry, exactly like an answer that covers everything.
+    #
+    # This changes none of that. It makes the difference countable, which has
+    # to come first: whether the decomposition needs constraining depends on
+    # how often it is thin, and there is currently no way to ask. Truncation
+    # was counted for a release before the chunking that answered it was
+    # written, for the same reason.
+    #
+    # What is stored is the list after the isinstance filter above, which is
+    # what the check actually judged, not the raw field of the reply. And it
+    # is overwritten per cycle, like gate_redraft and gate_issues beside it,
+    # so the three line up: what survives is the verdict that decided the run.
+    await _tele(run_id, "validate", gate_parts=[
+        {"asks": str(x.get("asks") or "")[:300],
+         "covered": bool(x.get("covered")),
+         "gap": str(x.get("gap") or "")[:300]}
+        for x in parts
+    ])
 
     issues: list[str] = []
     # Correctness defects make the answer wrong or incoherent, and must be

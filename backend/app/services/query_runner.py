@@ -1445,7 +1445,8 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
 
 
 async def _record_gate_cycle(
-    run_id: uuid.UUID, *, parts: list[dict], unparseable: str | None = None
+    run_id: uuid.UUID, *, parts: list[dict],
+    reparse: str | None = None, unparseable: str | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -1458,6 +1459,15 @@ async def _record_gate_cycle(
     followed the moment a fourth key appeared. So every path records the
     whole outcome through here, and a cycle inherits nothing.
 
+    The third key arrived and this is it: `gate_reparse` is carried in a
+    local from where the repair happens to the one write at the end, rather
+    than written where it occurs. A cycle that needed a repair and then
+    parsed records both facts together, and a cycle that needed none clears
+    it. Writing it where it happens would leave it behind exactly as the two
+    defects above did. The cost is that a transport failure inside the repair
+    loses the marker, which buys one write to keep correct instead of two to
+    keep in step.
+
     A cycle can be followed by another because `_pre_publish_sweep` returns
     False after feeding a repair cycle and the caller re-enters the validate
     loop, which is what makes the staleness reachable rather than theoretical.
@@ -1468,7 +1478,8 @@ async def _record_gate_cycle(
     because the key is always present. These are truthiness fields. The one
     consumer in the tree reads them that way already.
     """
-    await _tele(run_id, "validate", gate_parts=parts, gate_unparseable=unparseable)
+    await _tele(run_id, "validate", gate_parts=parts,
+                gate_reparse=reparse, gate_unparseable=unparseable)
 
 
 def _gate_json(reply: str) -> dict:
@@ -1701,6 +1712,7 @@ async def _gate_answer(
     # fault in this function into "the gate had no objection" — which is what
     # happened here for three hours — so everything after the parse runs
     # unguarded and fails the run loudly if it is broken.
+    reparse: str | None = None
     try:
         data = _gate_json(reply)
     except ValueError as exc:
@@ -1719,7 +1731,7 @@ async def _gate_answer(
         # verdict is malformed rather than absent, so "send it again,
         # valid" has a referent, and the gate's prompt is the largest in
         # the run and not worth resending.
-        await _tele(run_id, "validate", gate_reparse=str(exc)[:200])
+        reparse = str(exc)[:200]
         reply = await sinas.invoke(
             "sgr/answer-gate-agent",
             "Your previous reply was not valid JSON: " + str(exc)[:200]
@@ -1739,7 +1751,8 @@ async def _gate_answer(
             # key keeps its name so runs that took this path before and
             # after the change are one query, but it now marks a run that
             # stopped rather than one that shipped.
-            await _record_gate_cycle(run_id, parts=[], unparseable=str(exc2)[:200])
+            await _record_gate_cycle(run_id, parts=[], reparse=reparse,
+                                     unparseable=str(exc2)[:200])
             raise PartialOutcome(
                 "coverage",
                 "the completeness review could not be read, twice, so "
@@ -1799,7 +1812,7 @@ async def _gate_answer(
     # what the check actually judged, not the raw field of the reply. And it
     # is overwritten per cycle, like gate_redraft and gate_issues beside it,
     # so the three line up: what survives is the verdict that decided the run.
-    await _record_gate_cycle(run_id, parts=[
+    await _record_gate_cycle(run_id, reparse=reparse, parts=[
         {"asks": str(x.get("asks") or "")[:300],
          "covered": bool(x.get("covered")),
          "gap": str(x.get("gap") or "")[:300]}

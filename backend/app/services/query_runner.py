@@ -1557,7 +1557,19 @@ async def _gate_answer(
         # An unparseable verdict must never block publication of a fully
         # validated answer. But treating it as a pass silently is how a
         # broken gate looks exactly like a clean one, so it is recorded.
-        await _tele(run_id, "validate", gate_unparseable=str(exc)[:200])
+        #
+        # gate_parts is written here too, empty, because the gate runs once
+        # per validation cycle and _tele merges: without this, a cycle that
+        # parsed leaves its decomposition behind and the next cycle's
+        # unreadable verdict inherits it, so the record would name parts for
+        # a verdict that produced none. Empty is not a guess about what the
+        # reply held. The record is the check's input, and on this path the
+        # parse failed before the check had one. It reads unambiguously
+        # beside gate_unparseable: empty alone is a verdict that parsed and
+        # enumerated nothing, empty with this key is one that could not be
+        # read at all.
+        await _tele(run_id, "validate",
+                    gate_unparseable=str(exc)[:200], gate_parts=[])
         return True, "(gate verdict unparseable — treated as pass)", [], [], []
 
     # Coverage is judged per part. One holistic verdict let an answer

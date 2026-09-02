@@ -215,6 +215,30 @@ async def test_a_verdict_with_no_parts_records_an_empty_list(gate_env):
 
 
 @pytest.mark.asyncio
+async def test_an_unreadable_verdict_does_not_inherit_the_previous_decomposition(
+    gate_env,
+):
+    """The gate runs once per validation cycle and telemetry merges, so a
+    cycle that parsed leaves its decomposition behind. Without an empty write
+    on the unreadable path, the next cycle's verdict would be recorded with
+    parts it never produced, and the record would be wrong in exactly the
+    case it exists to expose."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "what the conditions are", "covered": True}],
+            }
+        )
+    )
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+
+    await _gate("I cannot judge this.")
+    assert gate_env["validate"]["gate_parts"] == []
+    assert gate_env["validate"]["gate_unparseable"]
+
+
+@pytest.mark.asyncio
 async def test_covered_is_stored_as_a_boolean(gate_env):
     """The check reads it as truthiness, so the record has to agree with the
     check rather than with the reply."""

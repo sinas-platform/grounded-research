@@ -2138,6 +2138,20 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             "waive": waives}
 
 
+def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
+    """Split the reviser's additions into those the answer has room for and
+    the count refused, given `live` claims already in it.
+
+    Pure, and separate, because the refusal is silent everywhere else: an
+    answer at MAX_CLAIMS takes nothing, the reviser is not told, and the run
+    continues as though the claim had been written. Returning the refused
+    count is what lets the caller record a cap hit instead of recording an
+    addition that never happened.
+    """
+    room = max(0, MAX_CLAIMS - live)
+    return adds[:room], len(adds) - min(len(adds), room)
+
+
 async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
     for sp in spans[:4]:
         doc = (await session.execute(
@@ -2349,6 +2363,10 @@ async def _revise_answer(
 
     by_seq = {c.sequence: c for c, *_ in rows}
     touched = 0
+    # Bound before the add block, which does not run when the patch adds
+    # nothing; the telemetry below reads both either way.
+    admitted: list[dict] = []
+    add_dropped_at_cap = 0
     async with AsyncSessionLocal() as session:
         for seq in patch["drop"]:
             claim = by_seq.get(seq)
@@ -2383,7 +2401,8 @@ async def _revise_answer(
             nxt = ((await session.execute(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id))).scalar() or 0) + 1
-            for item in patch["add"][:max(0, MAX_CLAIMS - live)]:
+            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live)
+            for item in admitted:
                 row = AnswerClaim(answer_id=answer_id, sequence=nxt,
                                   claim_text=item["text"][:4000],
                                   rationale=(item.get("rationale") or "")[:2000]
@@ -2406,13 +2425,19 @@ async def _revise_answer(
                 row.rationale = item["rationale"][:2000]
         await session.commit()
 
+    # `added` counts rows written, not rows asked for. It used to be
+    # len(patch["add"]), so a patch whose additions were all refused at the
+    # cap recorded the same number as one where every addition landed, and
+    # the two were indistinguishable afterwards. `add_dropped_at_cap` carries
+    # the difference; the two sum to what the reviser proposed.
     await _tele(run_id, "validate",
                 revision={"claims": len(by_claim), "revised": len(patch["revise"]),
                           "kept_with_reason": len(patch.get("keep") or []),
                           "abstentions": sum(
-                              1 for a in patch["add"]
+                              1 for a in admitted
                               if a.get("type") == "abstention"),
-                          "dropped": len(patch["drop"]), "added": len(patch["add"]),
+                          "dropped": len(patch["drop"]), "added": len(admitted),
+                          "add_dropped_at_cap": add_dropped_at_cap,
                           "untouched": len(by_claim) - touched,
                           "feedback_items": len(feedback)})
     return touched

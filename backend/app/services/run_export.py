@@ -14,14 +14,22 @@ field paths are a CONTRACT:
     /question                     plain text
     /outcome/status               "published" | "partial" | ...
     /outcome/partial              {cause, note} or null
+    /outcome/error                string or null — why a failed run failed
     /claims/N/{seq,text,type,rationale}
     /claims/N/evidence/M/{filename,line_from,line_to,passage}
     /retrieval/N/{rank,filename,class,cited}
     /quality_issues               list of strings
     /generated_at, /produced_by
 
-Additions are fine; renaming or moving any of these is a breaking change
-and bumps the schema string.
+There is deliberately no top-level answer field: the ordered claims
+sequence IS the answer, stable by contract. Additions are fine; renaming
+or moving any of these is a breaking change and bumps the schema string.
+
+Cancelled runs are not exported by the selection helpers: a cancellation
+is an operator abort with nothing reviewable, and an empty document is
+indistinguishable from a broken export. Failed runs export only when
+named explicitly by id, carrying /outcome/error so the reader sees a
+failure rather than an absence.
 
 `question_id` is the run's `reference` — the caller-supplied identifier
 that reruns of the same logical question share. A run without one exports
@@ -133,6 +141,7 @@ async def export_run(session, run: QueryRun) -> dict[str, Any]:
             "partial": ({"cause": partial.get("cause"),
                          "note": partial.get("message") or partial.get("note")}
                         if isinstance(partial, dict) else None),
+            "error": run.error or None,
         },
         "claims": claims_out,
         "retrieval": retrieval_out,
@@ -160,6 +169,12 @@ async def select_runs(
     stmt = select(QueryRun).where(visible)
     if run_ids:
         stmt = stmt.where(QueryRun.id.in_(run_ids))
+    else:
+        # Bulk selections carry only reviewable outcomes. A cancelled run is
+        # an operator abort with nothing to judge; a failed one is a fault
+        # report — both reachable by naming the run id explicitly, never
+        # swept into a round's export by a tag.
+        stmt = stmt.where(QueryRun.status.notin_(["cancelled", "failed"]))
     if tag:
         stmt = stmt.where(QueryRun.tags.contains([tag]))
     if reference:

@@ -2138,6 +2138,24 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             "waive": waives}
 
 
+def _cycle_key(existing: dict, prefix: str) -> str:
+    """The next per-cycle telemetry key, `prefix_1` upward.
+
+    `_tele` merges by key and cannot delete, so a stage that writes the same
+    key every cycle keeps only its last one. `round_N` already avoids that by
+    numbering; this is the same trick for stages whose loop has no counter of
+    its own to number by.
+    """
+    return f"{prefix}_{sum(1 for k in existing if k.startswith(prefix + '_')) + 1}"
+
+
+async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        entry = ((run.telemetry if run is not None else None) or {}).get(stage) or {}
+    return _cycle_key(entry, prefix)
+
+
 def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
     """Split the reviser's additions into those the answer has room for and
     the count refused, given `live` claims already in it.
@@ -2427,19 +2445,28 @@ async def _revise_answer(
 
     # `added` counts rows written, not rows asked for. It used to be
     # len(patch["add"]), so a patch whose additions were all refused at the
-    # cap recorded the same number as one where every addition landed, and
-    # the two were indistinguishable afterwards. `add_dropped_at_cap` carries
-    # the difference; the two sum to what the reviser proposed.
-    await _tele(run_id, "validate",
-                revision={"claims": len(by_claim), "revised": len(patch["revise"]),
-                          "kept_with_reason": len(patch.get("keep") or []),
-                          "abstentions": sum(
-                              1 for a in admitted
-                              if a.get("type") == "abstention"),
-                          "dropped": len(patch["drop"]), "added": len(admitted),
-                          "add_dropped_at_cap": add_dropped_at_cap,
-                          "untouched": len(by_claim) - touched,
-                          "feedback_items": len(feedback)})
+    # cap recorded the same number as one where every addition landed.
+    # `add_dropped_at_cap` carries the difference; the two sum to what the
+    # reviser proposed.
+    #
+    # And one key per cycle, like round_N. Recording the right number was not
+    # enough on its own: a single `revision` key kept only the last cycle, so
+    # a run that revised four times threw away three cycles of adds, drops and
+    # cap refusals before anyone could read them. Measured on three runs that
+    # each reached the cap, every one reported add_dropped_at_cap = 0, because
+    # the cycle that survived was not the cycle that hit it. Numbering is what
+    # makes this a history instead of a last-write.
+    cycle = await _next_cycle_key(run_id, "validate", "revision")
+    await _tele(run_id, "validate", **{
+        cycle: {
+            "claims": len(by_claim), "revised": len(patch["revise"]),
+            "kept_with_reason": len(patch.get("keep") or []),
+            "abstentions": sum(1 for a in admitted
+                               if a.get("type") == "abstention"),
+            "dropped": len(patch["drop"]), "added": len(admitted),
+            "add_dropped_at_cap": add_dropped_at_cap,
+            "untouched": len(by_claim) - touched,
+            "feedback_items": len(feedback)}})
     return touched
 
 

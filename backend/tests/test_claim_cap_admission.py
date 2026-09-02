@@ -13,7 +13,7 @@ Run from the backend directory:
 `python -m pytest tests/test_claim_cap_admission.py`
 """
 
-from app.services.query_runner import MAX_CLAIMS, _admit_adds
+from app.services.query_runner import MAX_CLAIMS, _admit_adds, _cycle_key
 
 
 def adds(n: int) -> list[dict]:
@@ -83,3 +83,50 @@ def test_nothing_requested_refuses_nothing():
     """An empty patch must not read as a cap hit."""
     assert _admit_adds([], live=MAX_CLAIMS) == ([], 0)
     assert _admit_adds([], live=0) == ([], 0)
+
+
+# -- numbering the cycles ----------------------------------------------------
+#
+# Recording the right number was not enough. `_tele` merges by key, so a single
+# `revision` key kept only the last cycle, and on three runs that each reached
+# the cap every one reported add_dropped_at_cap = 0: the surviving cycle was
+# not the cycle that hit it. These tests are about the numbering that fixes it.
+
+
+def test_the_first_cycle_is_one():
+    assert _cycle_key({}, "revision") == "revision_1"
+
+
+def test_each_cycle_takes_the_next_number():
+    seen = {}
+    for expected in ("revision_1", "revision_2", "revision_3"):
+        key = _cycle_key(seen, "revision")
+        assert key == expected
+        seen[key] = {}
+
+
+def test_other_keys_in_the_stage_do_not_shift_the_count():
+    """The validate stage holds round_N, gate_parts, fed_points and more in
+    the same dict. Only the prefix being numbered may count."""
+    entry = {"round_1": {}, "round_2": {}, "started": "t", "gate_parts": [],
+             "revision_1": {}}
+    assert _cycle_key(entry, "revision") == "revision_2"
+
+
+def test_the_prefix_is_matched_with_its_separator():
+    """`revision` and `revisionfoo` are not cycles of `revision_`. Counting
+    them would skip a number and leave a gap that reads as a lost cycle."""
+    entry = {"revision": {}, "revisionfoo": {}}
+    assert _cycle_key(entry, "revision") == "revision_1"
+
+
+def test_a_legacy_single_key_run_starts_at_one():
+    """Runs recorded before the numbering carry a bare `revision`. A resumed
+    one must not collide with it, and must not be numbered as though a cycle
+    had already been recorded under the new scheme."""
+    assert _cycle_key({"revision": {"added": 2}}, "revision") == "revision_1"
+
+
+def test_the_same_helper_serves_another_prefix():
+    entry = {"revision_1": {}, "revision_2": {}}
+    assert _cycle_key(entry, "sweep") == "sweep_1"

@@ -1511,6 +1511,90 @@ def _gate_json(reply: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("gate verdict was not an object")
     return data
+async def _split_question(sinas: _Sinas, question: str) -> list[str]:
+    """The distinct things the question asks, or [] if that cannot be read.
+
+    Its own call, on the question alone. The gate used to do this inside its
+    verdict, where the question is a fraction of a percent of a prompt whose
+    bulk is the claims and the working set, and the instruction to split
+    arrives after all of it. So the split moved with the answer: over the
+    cycles of one run the same question was read as four parts and then
+    three; in another as two, three, two, three; in a third a fifth part
+    appeared that the question does not ask but the draft happened to
+    contain, and was then marked covered. A part that stops being listed
+    stops being checked, and nothing says so.
+
+    Splitting needs none of that. What a question asks is a property of the
+    question; judging coverage is what needs the answer, so only the second
+    half keeps the large prompt.
+
+    One repair, as the drafter does with its own reply. An empty return is
+    the caller's signal to fall back to splitting inside the verdict, which
+    is the behaviour this replaces: a run must not fail because an
+    improvement could not be applied.
+    """
+    prompt = (
+        "QUESTION:\n" + question
+        + "\n\nSplit the question into the distinct things it asks. A question "
+        "asking what the conditions are, whether a regulation applies and "
+        "whether a step is mandatory asks three things, not one. Split on "
+        "what is asked, not on how the sentence is punctuated: one sentence "
+        "can ask two things, and two sentences can ask one. Do not answer "
+        "any of them, and do not add anything the question does not ask."
+        '\n\nReply ONLY JSON: {"parts": ["<one thing the question asks>", ...]}'
+    )
+    reply = await sinas.invoke("sgr/answer-gate-agent", prompt)
+    for attempt in (0, 1):
+        try:
+            cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+            start, end = cleaned.find("{"), cleaned.rfind("}")
+            if start < 0 or end <= start:
+                raise ValueError("no JSON object in reply")
+            raw = json.loads(cleaned[start:end + 1]).get("parts")
+            if not isinstance(raw, list) or not raw:
+                raise ValueError("no parts in reply")
+            # Only strings. str() on a dict is a non-empty string, so without
+            # this an object in the list becomes a question part that binds
+            # every later cycle. Dropping it silently would be worse: a lost
+            # part is the defect this whole change exists to stop, so an
+            # element that is not a part makes the reply unusable and the
+            # repair below runs.
+            got = [x.strip() for x in raw if isinstance(x, str) and x.strip()]
+            if len(got) != len(raw):
+                raise ValueError("a part was not a non-empty string")
+            return got[:8]
+        except Exception as exc:  # noqa: BLE001
+            if attempt:
+                _log.warning("question split unreadable twice: %s", exc)
+                return []
+            reply = await sinas.invoke(
+                "sgr/answer-gate-agent",
+                "Your previous reply was not valid JSON: " + str(exc)[:200]
+                + ". Send the same split again as strictly valid JSON, the "
+                "object alone.\n\nPREVIOUS REPLY:\n" + (reply or "")[:8000])
+    return []
+
+
+async def _question_parts(
+    sinas: _Sinas, run_id: uuid.UUID, question: str
+) -> list[str]:
+    """The run's decomposition, split once and reused by every later cycle.
+
+    Computed on the first gate cycle rather than as a pipeline stage: all
+    three call sites already carry the run id, so no signature moves, and a
+    resumed run reads what the first one wrote. State lives in telemetry,
+    the obligation ledger's precedent: no migration, survives a restart,
+    one writer per run.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = ((run.telemetry or {}).get("validate") or {}).get("question_parts")
+    if isinstance(stored, list) and stored:
+        return [str(x) for x in stored]
+    parts = await _split_question(sinas, question)
+    if parts:
+        await _tele(run_id, "validate", question_parts=parts)
+    return parts
 
 
 async def _gate_answer(
@@ -1571,6 +1655,10 @@ async def _gate_answer(
         f"{r['summary'].replace(chr(10), ' ')[:200]}"
         for r in mrows
     ) or "(working set unavailable)"
+    # The decomposition is fixed for the run and judged here, not derived
+    # here. An empty list means the split could not be read twice, and the
+    # prompt falls back to deriving it, which is the behaviour this replaces.
+    fixed = await _question_parts(sinas, run_id, run_question)
     reply = await sinas.invoke(
         "sgr/answer-gate-agent",
         "QUESTION:\n" + run_question
@@ -1579,10 +1667,15 @@ async def _gate_answer(
           "in the numbering are expected and are not a defect — there is no "
           "claim missing from this list):\n" + claims
         + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
-        + '\n\nFirst split the QUESTION into the distinct things it asks — '
-        'a question asking what the conditions are, whether a regulation '
-        'applies, and whether a step is mandatory asks three things, not one. '
-        'Judge each separately against the claims. A part is COVERED when '
+        + (('\n\nPARTS OF THE QUESTION (fixed for this run; judge'
+            ' each against the claims, and do not add, merge or drop'
+            ' one):\n'
+            + "\n".join(f'  {i}. {a}' for i, a in enumerate(fixed, 1)))
+           if fixed else
+           '\n\nFirst split the QUESTION into the distinct things it asks: '
+           'a question asking what the conditions are, whether a regulation '
+           'applies, and whether a step is mandatory asks three things, not one.')
+        + '\n\nJudge each part separately against the claims. A part is COVERED when '
         'the claims answer it either way: claims that rebut the premise of '
         'the question with grounds — the question asks about liability '
         'without fault, the claims establish fault is always required — '
@@ -1600,9 +1693,12 @@ async def _gate_answer(
         'coverage alone does not make an unused, plainly better document '
         'acceptable to leave unread.'
         '\n\nReply ONLY JSON: {"publishable": true|false,'
-        ' "parts": [{"asks": "<one thing the question asks>", "covered": '
-        'true|false, "gap": "<what is missing, if not covered>"}],'
-        ' "missing": "<if not publishable: what the claims fail to deliver on>",'
+        + (' "parts": [{"n": <the number of the part above>, "covered": '
+           'true|false, "gap": "<what is missing, if not covered>"}],'
+           if fixed else
+           ' "parts": [{"asks": "<one thing the question asks>", "covered": '
+           'true|false, "gap": "<what is missing, if not covered>"}],')
+        + ' "missing": "<if not publishable: what the claims fail to deliver on>",'
         ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
         ' "tension": "<ONLY a pair of claims that CANNOT BOTH BE TRUE — quote the '
 'two incompatible propositions verbatim. Claims that restate the same rule, '
@@ -1668,7 +1764,32 @@ async def _gate_answer(
     # addressing two of a question's three parts publish, and named one
     # gap at a time when it failed — so revision fixed them one cycle
     # each, or the run ran out of cycles first.
-    parts = [x for x in (data.get("parts") or []) if isinstance(x, dict)]
+    if fixed:
+        # The list is what the runner asked about, not what came back. A
+        # verdict naming a part outside it is dropped, and a part it does not
+        # name is uncovered rather than assumed: those two rules are what make
+        # a fixed decomposition binding instead of advisory. Without them the
+        # drift returns through the verdict, which is how a part the question
+        # does not ask was once added and immediately marked covered.
+        seen: dict[int, dict] = {}
+        for x in (data.get("parts") or []):
+            if not isinstance(x, dict):
+                continue
+            try:
+                n = int(x.get("n"))
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= len(fixed):
+                seen.setdefault(n, x)
+        parts = [
+            {"asks": a, "covered": bool((seen.get(n) or {}).get("covered")),
+             "gap": str((seen.get(n) or {}).get("gap") or "").strip()
+                    or ("" if n in seen else
+                        "the review returned no verdict for this part")}
+            for n, a in enumerate(fixed, start=1)
+        ]
+    else:
+        parts = [x for x in (data.get("parts") or []) if isinstance(x, dict)]
     uncovered = [
         str(x.get("gap") or x.get("asks") or "").strip()
         for x in parts if not x.get("covered")

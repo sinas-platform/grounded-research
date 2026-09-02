@@ -36,7 +36,7 @@ from app.retrieval_first import BENCH, _files_for, _load_gold
 
 def _similarity(a: str, b: str) -> float:
     """Token overlap. The gold standard phrases a question in its own words
-    ("We are advising on a food-delivery platform acquisition...") while the
+    ("We are advising on an airline merger...") while the
     approved question that was actually run is worded differently, so exact
     matching finds nothing."""
     ta = {w for w in a.lower().split() if len(w) > 4}

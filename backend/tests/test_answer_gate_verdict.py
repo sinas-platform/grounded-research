@@ -226,6 +226,170 @@ async def test_both_attempts_are_recorded(gate_env):
     assert gate_env["validate"]["gate_unparseable"]
 
 
+@pytest.mark.asyncio
+async def test_the_decomposition_is_recorded(gate_env):
+    """uncovered names the parts the gate failed. It cannot show a part the
+    gate never wrote down, and that is the case nobody can currently count."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [
+                    {"asks": "what the conditions are", "covered": True},
+                    {
+                        "asks": "whether it is mandatory",
+                        "covered": False,
+                        "gap": "nothing addresses whether the step is mandatory",
+                    },
+                ],
+            }
+        )
+    )
+    recorded = gate_env["validate"]["gate_parts"]
+    assert [p["asks"] for p in recorded] == [
+        "what the conditions are",
+        "whether it is mandatory",
+    ]
+    assert [p["covered"] for p in recorded] == [True, False]
+    assert recorded[1]["gap"].startswith("nothing addresses")
+
+
+@pytest.mark.asyncio
+async def test_a_thin_decomposition_is_visible(gate_env):
+    """The failure this exists to expose: one part enumerated for a question
+    that asks three things. Coverage passes, gate_redraft is empty, and only
+    the recorded decomposition shows why."""
+    ok, missing, _issues, _corr, _unc = await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "what the conditions are", "covered": True}],
+            }
+        )
+    )
+    assert ok is True
+    assert missing == ""
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_verdict_with_no_parts_records_an_empty_list(gate_env):
+    """Recorded even when there is nothing to record, so the absence is a
+    value in the data rather than a missing key indistinguishable from a run
+    that predates this."""
+    await _gate(json.dumps({"publishable": True}))
+    assert gate_env["validate"]["gate_parts"] == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_verdict_does_not_inherit_the_previous_decomposition(
+    gate_env,
+):
+    """The gate runs once per validation cycle and telemetry merges, so a
+    cycle that parsed leaves its decomposition behind. Without an empty write
+    on the unreadable path, the next cycle's verdict would be recorded with
+    parts it never produced, and the record would be wrong in exactly the
+    case it exists to expose."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "what the conditions are", "covered": True}],
+            }
+        )
+    )
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+
+    # Under the merged repair flow (#102), a twice-unreadable verdict raises
+    # rather than passing — the staleness property is asserted on what was
+    # recorded before the raise.
+    with pytest.raises(qr.PartialOutcome):
+        await _gate("I cannot judge this.")
+    assert gate_env["validate"]["gate_parts"] == []
+    assert gate_env["validate"]["gate_unparseable"]
+
+
+@pytest.mark.asyncio
+async def test_a_readable_verdict_does_not_inherit_the_previous_failure(gate_env):
+    """The mirror of the case above, and reachable for the same reason: a
+    cycle can be followed by another when the pre-publish sweep feeds a
+    repair and the caller re-enters the loop. Without the whole outcome
+    being written each cycle, the record would say the gate produced no
+    verdict when the one that decided the run parsed fine."""
+    with pytest.raises(qr.PartialOutcome):
+        await _gate("I cannot judge this.")
+    assert gate_env["validate"]["gate_unparseable"]
+
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "what the conditions are", "covered": True}],
+            }
+        )
+    )
+    assert gate_env["validate"]["gate_unparseable"] is None
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_absent_key_is_written_null_not_omitted(gate_env):
+    """Null rather than omitted is what makes the clearing work at all, since
+    telemetry merges and cannot delete. The cost is that key-existence tests
+    stop discriminating, so these are truthiness fields."""
+    await _gate(json.dumps({"publishable": True, "parts": []}))
+    assert "gate_unparseable" in gate_env["validate"]
+    assert gate_env["validate"]["gate_unparseable"] is None
+    assert not gate_env["validate"]["gate_unparseable"]
+
+
+@pytest.mark.asyncio
+async def test_covered_is_stored_as_a_boolean(gate_env):
+    """The check reads it as truthiness, so the record has to agree with the
+    check rather than with the reply."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "a", "covered": "yes"}, {"asks": "b", "covered": 0}],
+            }
+        )
+    )
+    assert [p["covered"] for p in gate_env["validate"]["gate_parts"]] == [True, False]
+
+
+@pytest.mark.asyncio
+async def test_what_is_recorded_is_what_the_check_judged(gate_env):
+    """A part that is not an object is dropped before the check sees it, so
+    it is absent from the record too. The record is the check's input."""
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": ["not an object", {"asks": "a real part", "covered": True}],
+            }
+        )
+    )
+    recorded = gate_env["validate"]["gate_parts"]
+    assert len(recorded) == 1
+    assert recorded[0]["asks"] == "a real part"
+
+
+@pytest.mark.asyncio
+async def test_long_text_is_bounded(gate_env):
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "x" * 900, "covered": False, "gap": "y" * 900}],
+            }
+        )
+    )
+    part = gate_env["validate"]["gate_parts"][0]
+    assert len(part["asks"]) == 300
+    assert len(part["gap"]) == 300
+
+
 def test_the_verdict_is_returned_from_outside_any_broad_try():
     """The shape that hid the bug: the whole gate body sat inside one
     `try: ... except Exception: return True`, so a NameError in it was

@@ -1444,6 +1444,33 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     return answer_id
 
 
+async def _record_gate_cycle(
+    run_id: uuid.UUID, *, parts: list[dict], unparseable: str | None = None
+) -> None:
+    """One write per gate cycle, covering every key a cycle can set.
+
+    The gate runs once per validation cycle and telemetry merges by key, so
+    a key written by one cycle and not by the next is read as belonging to
+    the next. That produced two defects in mirror image: a decomposition
+    surviving an unreadable verdict, and an unreadable verdict surviving a
+    decomposition. Both came from the same shape, two exit paths each
+    writing the subset of keys it knew about, and a third would have
+    followed the moment a fourth key appeared. So every path records the
+    whole outcome through here, and a cycle inherits nothing.
+
+    A cycle can be followed by another because `_pre_publish_sweep` returns
+    False after feeding a repair cycle and the caller re-enters the validate
+    loop, which is what makes the staleness reachable rather than theoretical.
+
+    A key that did not happen is written null rather than omitted, and that
+    has a consequence worth stating: once this ships,
+    `telemetry->'validate' ? 'gate_unparseable'` is true for every run,
+    because the key is always present. These are truthiness fields. The one
+    consumer in the tree reads them that way already.
+    """
+    await _tele(run_id, "validate", gate_parts=parts, gate_unparseable=unparseable)
+
+
 def _gate_json(reply: str) -> dict:
     """The gate's verdict as an object, or ValueError naming what broke.
 
@@ -1616,7 +1643,7 @@ async def _gate_answer(
             # key keeps its name so runs that took this path before and
             # after the change are one query, but it now marks a run that
             # stopped rather than one that shipped.
-            await _tele(run_id, "validate", gate_unparseable=str(exc2)[:200])
+            await _record_gate_cycle(run_id, parts=[], unparseable=str(exc2)[:200])
             raise PartialOutcome(
                 "coverage",
                 "the completeness review could not be read, twice, so "
@@ -1634,6 +1661,29 @@ async def _gate_answer(
         for x in parts if not x.get("covered")
     ]
     uncovered = [u for u in uncovered if u]
+    # The decomposition the check ran on, recorded because nothing else
+    # carries it. `uncovered` names the parts the gate judged and failed; it
+    # says nothing about the parts the gate never wrote down, and a part that
+    # was never written down cannot be uncovered. So an answer that leaves a
+    # limb of the question untouched publishes with an empty gate_redraft and
+    # looks, in telemetry, exactly like an answer that covers everything.
+    #
+    # This changes none of that. It makes the difference countable, which has
+    # to come first: whether the decomposition needs constraining depends on
+    # how often it is thin, and there is currently no way to ask. Truncation
+    # was counted for a release before the chunking that answered it was
+    # written, for the same reason.
+    #
+    # What is stored is the list after the isinstance filter above, which is
+    # what the check actually judged, not the raw field of the reply. And it
+    # is overwritten per cycle, like gate_redraft and gate_issues beside it,
+    # so the three line up: what survives is the verdict that decided the run.
+    await _record_gate_cycle(run_id, parts=[
+        {"asks": str(x.get("asks") or "")[:300],
+         "covered": bool(x.get("covered")),
+         "gap": str(x.get("gap") or "")[:300]}
+        for x in parts
+    ])
 
     issues: list[str] = []
     # Correctness defects make the answer wrong or incoherent, and must be

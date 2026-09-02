@@ -8,8 +8,8 @@ gate that objected from a gate that had crashed.
 These tests exercise `_gate_answer` against a fake Sinas with the DB reads
 stubbed, and assert the three things that were silently lost: a not-
 publishable verdict blocks, an uncovered part of the question blocks even
-when the judge says publishable, and a genuinely unparseable reply still
-passes — but says so in telemetry.
+when the judge says publishable, and a reply that cannot be read is repaired
+once and then stops the run rather than passing it.
 
 Run from the backend directory:
 `python -m pytest tests/test_answer_gate_verdict.py`
@@ -150,12 +150,79 @@ async def test_a_named_stronger_source_becomes_a_point_to_ground(gate_env):
     assert any("Owed source unused" in i for i in issues)
 
 
+class _SequenceSinas:
+    """Replies in order, so a repair can be answered differently from the
+    reply it repairs. The last reply is repeated if asked again."""
+
+    def __init__(self, *replies):
+        self.replies = list(replies)
+        self.calls = []
+
+    async def invoke(self, agent, message):
+        self.calls.append((agent, message))
+        return self.replies[min(len(self.calls) - 1, len(self.replies) - 1)]
+
+
+async def _gate_seq(sinas):
+    return await qr._gate_answer(sinas, "Q?", uuid.uuid4(), uuid.uuid4())
+
+
+VALID = json.dumps({"publishable": False, "missing": "no conclusion is drawn"})
+
+
 @pytest.mark.asyncio
-async def test_unparseable_reply_passes_but_is_recorded(gate_env):
-    ok, missing, issues, correctness, uncovered = await _gate("I cannot judge this.")
-    assert ok is True
-    assert "unparseable" in missing
-    assert (issues, correctness, uncovered) == ([], [], [])
+async def test_a_reply_that_cannot_be_read_is_repaired_once(gate_env):
+    """The drafter repairs its own malformed reply; this is that, on the one
+    call that decides whether an answer is publishable."""
+    sinas = _SequenceSinas("I cannot judge this.", VALID)
+    ok, missing, _issues, _corr, _unc = await _gate_seq(sinas)
+    assert len(sinas.calls) == 2
+    assert ok is False
+    assert missing == "no conclusion is drawn"
+    assert gate_env["validate"]["gate_reparse"]
+
+
+@pytest.mark.asyncio
+async def test_the_repair_asks_the_gate_and_carries_the_previous_reply(gate_env):
+    sinas = _SequenceSinas("I cannot judge this.", VALID)
+    await _gate_seq(sinas)
+    agent, prompt = sinas.calls[1]
+    assert agent == "sgr/answer-gate-agent"
+    assert "I cannot judge this." in prompt
+    assert "valid JSON" in prompt
+
+
+@pytest.mark.asyncio
+async def test_a_reply_that_is_not_an_object_is_repaired(gate_env):
+    """It parses. It carries no verdict, and letting it through was the
+    silent pass in another costume."""
+    sinas = _SequenceSinas('["not", "a", "verdict"]', VALID)
+    ok, _missing, _issues, _corr, _unc = await _gate_seq(sinas)
+    assert len(sinas.calls) == 2
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_two_failures_stop_the_run_rather_than_publishing_it(gate_env):
+    """The defect this file was extended for: the gate is the only stage
+    that asks whether the answer addresses the question, so a reply it
+    cannot read must never read as approval."""
+    sinas = _SequenceSinas("I cannot judge this.")
+    with pytest.raises(qr.PartialOutcome) as e:
+        await _gate_seq(sinas)
+    assert e.value.cause == "coverage"
+    assert "never established" in e.value.explanation
+    assert len(sinas.calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_both_attempts_are_recorded(gate_env):
+    """A retry nobody can count is a retry nobody can act on, and the
+    terminal key keeps its old name so runs either side of this change
+    answer one query."""
+    with pytest.raises(qr.PartialOutcome):
+        await _gate_seq(_SequenceSinas("prose, not a verdict"))
+    assert gate_env["validate"]["gate_reparse"]
     assert gate_env["validate"]["gate_unparseable"]
 
 
@@ -233,7 +300,11 @@ async def test_an_unreadable_verdict_does_not_inherit_the_previous_decomposition
     )
     assert len(gate_env["validate"]["gate_parts"]) == 1
 
-    await _gate("I cannot judge this.")
+    # Under the merged repair flow (#102), a twice-unreadable verdict raises
+    # rather than passing — the staleness property is asserted on what was
+    # recorded before the raise.
+    with pytest.raises(qr.PartialOutcome):
+        await _gate("I cannot judge this.")
     assert gate_env["validate"]["gate_parts"] == []
     assert gate_env["validate"]["gate_unparseable"]
 
@@ -245,7 +316,8 @@ async def test_a_readable_verdict_does_not_inherit_the_previous_failure(gate_env
     repair and the caller re-enters the loop. Without the whole outcome
     being written each cycle, the record would say the gate produced no
     verdict when the one that decided the run parsed fine."""
-    await _gate("I cannot judge this.")
+    with pytest.raises(qr.PartialOutcome):
+        await _gate("I cannot judge this.")
     assert gate_env["validate"]["gate_unparseable"]
 
     await _gate(

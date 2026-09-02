@@ -239,6 +239,39 @@ async def test_an_unreadable_verdict_does_not_inherit_the_previous_decomposition
 
 
 @pytest.mark.asyncio
+async def test_a_readable_verdict_does_not_inherit_the_previous_failure(gate_env):
+    """The mirror of the case above, and reachable for the same reason: a
+    cycle can be followed by another when the pre-publish sweep feeds a
+    repair and the caller re-enters the loop. Without the whole outcome
+    being written each cycle, the record would say the gate produced no
+    verdict when the one that decided the run parsed fine."""
+    await _gate("I cannot judge this.")
+    assert gate_env["validate"]["gate_unparseable"]
+
+    await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "what the conditions are", "covered": True}],
+            }
+        )
+    )
+    assert gate_env["validate"]["gate_unparseable"] is None
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_absent_key_is_written_null_not_omitted(gate_env):
+    """Null rather than omitted is what makes the clearing work at all, since
+    telemetry merges and cannot delete. The cost is that key-existence tests
+    stop discriminating, so these are truthiness fields."""
+    await _gate(json.dumps({"publishable": True, "parts": []}))
+    assert "gate_unparseable" in gate_env["validate"]
+    assert gate_env["validate"]["gate_unparseable"] is None
+    assert not gate_env["validate"]["gate_unparseable"]
+
+
+@pytest.mark.asyncio
 async def test_covered_is_stored_as_a_boolean(gate_env):
     """The check reads it as truthiness, so the record has to agree with the
     check rather than with the reply."""

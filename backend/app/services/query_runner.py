@@ -1444,6 +1444,33 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     return answer_id
 
 
+async def _record_gate_cycle(
+    run_id: uuid.UUID, *, parts: list[dict], unparseable: str | None = None
+) -> None:
+    """One write per gate cycle, covering every key a cycle can set.
+
+    The gate runs once per validation cycle and telemetry merges by key, so
+    a key written by one cycle and not by the next is read as belonging to
+    the next. That produced two defects in mirror image: a decomposition
+    surviving an unreadable verdict, and an unreadable verdict surviving a
+    decomposition. Both came from the same shape, two exit paths each
+    writing the subset of keys it knew about, and a third would have
+    followed the moment a fourth key appeared. So every path records the
+    whole outcome through here, and a cycle inherits nothing.
+
+    A cycle can be followed by another because `_pre_publish_sweep` returns
+    False after feeding a repair cycle and the caller re-enters the validate
+    loop, which is what makes the staleness reachable rather than theoretical.
+
+    A key that did not happen is written null rather than omitted, and that
+    has a consequence worth stating: once this ships,
+    `telemetry->'validate' ? 'gate_unparseable'` is true for every run,
+    because the key is always present. These are truthiness fields. The one
+    consumer in the tree reads them that way already.
+    """
+    await _tele(run_id, "validate", gate_parts=parts, gate_unparseable=unparseable)
+
+
 async def _gate_answer(
     sinas: _Sinas, run_question: str, answer_id: uuid.UUID, run_id: uuid.UUID
 ) -> tuple[bool, str, list[str], list[str], list[str]]:
@@ -1568,8 +1595,7 @@ async def _gate_answer(
         # beside gate_unparseable: empty alone is a verdict that parsed and
         # enumerated nothing, empty with this key is one that could not be
         # read at all.
-        await _tele(run_id, "validate",
-                    gate_unparseable=str(exc)[:200], gate_parts=[])
+        await _record_gate_cycle(run_id, parts=[], unparseable=str(exc)[:200])
         return True, "(gate verdict unparseable — treated as pass)", [], [], []
 
     # Coverage is judged per part. One holistic verdict let an answer
@@ -1599,7 +1625,7 @@ async def _gate_answer(
     # what the check actually judged, not the raw field of the reply. And it
     # is overwritten per cycle, like gate_redraft and gate_issues beside it,
     # so the three line up: what survives is the verdict that decided the run.
-    await _tele(run_id, "validate", gate_parts=[
+    await _record_gate_cycle(run_id, parts=[
         {"asks": str(x.get("asks") or "")[:300],
          "covered": bool(x.get("covered")),
          "gap": str(x.get("gap") or "")[:300]}

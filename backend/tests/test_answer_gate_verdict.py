@@ -390,6 +390,39 @@ async def test_long_text_is_bounded(gate_env):
     assert len(part["gap"]) == 300
 
 
+@pytest.mark.asyncio
+async def test_a_clean_cycle_does_not_inherit_the_previous_repair(gate_env):
+    """The third key, and the one the merge of the two gate changes left
+    outside the single write. A cycle that needed a repair, followed by one
+    that parsed first time, would otherwise record the repair against the
+    verdict that decided the run."""
+    sinas = _SequenceSinas("not a verdict", VALID)
+    await _gate_seq(sinas)
+    assert gate_env["validate"]["gate_reparse"]
+
+    await _gate_seq(_SequenceSinas(VALID))
+    assert gate_env["validate"]["gate_reparse"] is None
+
+
+@pytest.mark.asyncio
+async def test_a_repair_that_then_parsed_records_both_facts(gate_env):
+    """Carried to the one write rather than written where it happens, so the
+    cycle's record says both that it needed a repair and what it found."""
+    sinas = _SequenceSinas(
+        "not a verdict",
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"asks": "whether it applies", "covered": True}],
+            }
+        ),
+    )
+    await _gate_seq(sinas)
+    assert gate_env["validate"]["gate_reparse"]
+    assert len(gate_env["validate"]["gate_parts"]) == 1
+    assert gate_env["validate"]["gate_unparseable"] is None
+
+
 def test_the_verdict_is_returned_from_outside_any_broad_try():
     """The shape that hid the bug: the whole gate body sat inside one
     `try: ... except Exception: return True`, so a NameError in it was

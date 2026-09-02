@@ -50,7 +50,7 @@ question against a corpus with this schema:
 
 Propose retrieval probes grounded in the schema. Reply ONLY JSON:
 {{"named_entities": ["<entities NAMED in the question>"],
-  "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'food deliv'>"}}],
+  "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'air transp'>"}}],
   "seed_cases": ["<specific cases/decisions/parties you KNOW bear on this topic even if unnamed>"],
   "websearch_queries": ["<3-10 SHORT queries: one quoted phrase or 2-4 words each; several small queries beat one long one; one per concept, in each language the corpus uses>"]}}
 

@@ -13,7 +13,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -69,6 +69,15 @@ class QueryRun(Base, TimestampMixin, OwnedMixin):
 
     id: Mapped[uuid.UUID] = uuid_pk()
     question: Mapped[str] = mapped_column(Text, nullable=False)
+    # Caller-supplied identifier for the LOGICAL question — deliberately not
+    # unique: every rerun of the same benchmark question shares it, so a
+    # question's history is a WHERE clause rather than a match on question
+    # text. External callers may put their own request id here.
+    reference: Mapped[str | None] = mapped_column(String(200), index=True)
+    # Named groupings ("round-3"): a batch is born tagged and stays queryable.
+    tags: Mapped[list] = mapped_column(
+        ARRAY(String(100)), nullable=False, default=list, server_default="{}"
+    )
     # "full" (question → answer), "retrieval" (stop at published parent
     # result), "synthesis" (existing parent_result_id → published answer)
     mode: Mapped[str] = mapped_column(

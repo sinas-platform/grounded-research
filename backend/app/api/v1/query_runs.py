@@ -16,7 +16,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import Response, APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -27,6 +27,7 @@ from app.models._common import now_utc
 from app.models.query import QueryRun
 from app.schemas.common import OwnedOut
 from app.services.query_runner import _Sinas, run_pipeline
+from app.services import run_export
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/query-runs", tags=["query-runs"])
@@ -43,6 +44,12 @@ def _launch(run_id: uuid.UUID) -> None:
 
 class QueryRunIn(BaseModel):
     question: str = Field(min_length=8)
+    # Identifier for the LOGICAL question — reruns share it (not unique).
+    # A benchmark run is born as e.g. "benchmark-q16"; an external caller
+    # may pass its own request id.
+    reference: str | None = Field(default=None, max_length=200)
+    # Named groupings, e.g. ["round-3"]: a batch is born tagged.
+    tags: list[str] = Field(default_factory=list, max_length=20)
     mode: str = Field(default="full", pattern="^(full|retrieval|synthesis)$")
     effort: str = Field(default="medium", pattern="^(low|medium|high)$")
     subqueries: list[str] | None = None  # skip decomposition when provided
@@ -53,6 +60,8 @@ class QueryRunIn(BaseModel):
 
 class QueryRunOut(OwnedOut):
     question: str
+    reference: str | None = None
+    tags: list[str] = []
     mode: str = "full"
     effort: str = "medium"
     status: str
@@ -84,6 +93,8 @@ async def create_query_run(
         )
     run = QueryRun(
         question=payload.question,
+        reference=(payload.reference or None),
+        tags=[t.strip()[:100] for t in payload.tags if t.strip()],
         mode=payload.mode,
         effort=payload.effort,
         subqueries=payload.subqueries,
@@ -104,16 +115,21 @@ async def list_query_runs(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
     limit: int = 20,
+    reference: str | None = None,
+    tag: str | None = None,
 ):
     read_all = await caller.has_permission("sgr.results.read:all")
-    rows = (
-        await session.execute(
-            select(QueryRun)
-            .where(visible_clause(QueryRun, caller, read_all=read_all))
-            .order_by(QueryRun.created_at.desc())
-            .limit(limit)
-        )
-    ).scalars().all()
+    stmt = (
+        select(QueryRun)
+        .where(visible_clause(QueryRun, caller, read_all=read_all))
+        .order_by(QueryRun.created_at.desc())
+        .limit(limit)
+    )
+    if reference:
+        stmt = stmt.where(QueryRun.reference == reference)
+    if tag:
+        stmt = stmt.where(QueryRun.tags.contains([tag]))
+    rows = (await session.execute(stmt)).scalars().all()
     return rows
 
 
@@ -131,6 +147,55 @@ async def _visible_run_or_404(
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "query run not found")
     return row
+
+
+class ExportIn(BaseModel):
+    run_ids: list[uuid.UUID] = Field(min_length=1, max_length=200)
+
+
+def _ndjson(docs: list[dict]) -> Response:
+    body = "\n".join(json.dumps(d, ensure_ascii=False) for d in docs)
+    return Response(
+        content=body + ("\n" if body else ""),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition":
+                 'attachment; filename="sgr-review-export.jsonl"'},
+    )
+
+
+@router.post("/export")
+async def export_selected_runs(
+    payload: ExportIn,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """The named runs as self-contained sgr-review/1 documents, one JSON
+    line each. Visibility applies: a run the caller cannot read is silently
+    absent from the export rather than an error, so a mixed selection
+    degrades the way the list view does."""
+    read_all = await caller.has_permission("sgr.results.read:all")
+    runs = await run_export.select_runs(
+        session, run_ids=payload.run_ids,
+        visible=visible_clause(QueryRun, caller, read_all=read_all))
+    return _ndjson([await run_export.export_run(session, r) for r in runs])
+
+
+@router.get("/export/by-tag")
+async def export_runs_by_tag(
+    tag: str,
+    latest_per_reference: bool = True,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """Every run carrying the tag — by default reduced to the newest
+    completed run per reference, which is "one version per question" for a
+    tagged round."""
+    read_all = await caller.has_permission("sgr.results.read:all")
+    runs = await run_export.select_runs(
+        session, tag=tag, latest_per_reference=latest_per_reference,
+        visible=visible_clause(QueryRun, caller, read_all=read_all))
+    return _ndjson([await run_export.export_run(session, r) for r in runs])
+
 
 
 @router.get("/{run_id}", response_model=QueryRunOut)
@@ -253,6 +318,38 @@ def _actions_from_messages(messages: list[dict]) -> list[AgentAction]:
                 args = args[:120] + "…"
             out.append(AgentAction(name=_short_name(name), args=args))
     return out
+
+
+class QueryRunMetaIn(BaseModel):
+    """Editable identity/grouping of an existing run. A field omitted is
+    left alone; an explicit null clears the reference; tags REPLACE the
+    run's tags wholesale (read-modify-write is the client's loop)."""
+    reference: str | None = Field(default=None, max_length=200)
+    tags: list[str] | None = Field(default=None, max_length=20)
+
+
+@router.patch(
+    "/{run_id}",
+    response_model=QueryRunOut,
+    dependencies=[Depends(require_permission("sgr.results.write:own"))],
+)
+async def update_query_run_meta(
+    run_id: uuid.UUID,
+    payload: QueryRunMetaIn,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """Stamp identity after the fact — a run done before its reference was
+    known ("benchmark-q16") gets it here, from the UI or a script."""
+    run = await _visible_run_or_404(run_id, session, caller)
+    fields = payload.model_dump(exclude_unset=True)
+    if "reference" in fields:
+        run.reference = (fields["reference"] or "").strip()[:200] or None
+    if fields.get("tags") is not None:
+        run.tags = [t.strip()[:100] for t in fields["tags"] if t.strip()][:20]
+    await session.commit()
+    await session.refresh(run)
+    return run
 
 
 @router.get("/{run_id}/activity", response_model=QueryRunActivityOut)

@@ -9,6 +9,8 @@ import { DocumentModal, EvidenceSpan } from '@/components/DocumentViewer';
 interface QueryRun {
   id: string;
   question: string;
+  reference: string | null;
+  tags: string[];
   mode: 'full' | 'retrieval' | 'synthesis';
   effort: 'low' | 'medium' | 'high';
   status: string;
@@ -384,10 +386,16 @@ export default function RunsPage() {
   const [effort, setEffort] = useState<'low' | 'medium' | 'high'>('medium');
   const [replayT, setReplayT] = useState<number | null>(null); // 0..1 while replaying
   const [listLimit, setListLimit] = useState(25);
+  const [tagFilter, setTagFilter] = useState('');
+  const [selecting, setSelecting] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
 
   const runs = useQuery({
-    queryKey: ['query-runs', listLimit],
-    queryFn: () => api<QueryRun[]>(`/query-runs?limit=${listLimit}`),
+    queryKey: ['query-runs', listLimit, tagFilter],
+    queryFn: () =>
+      api<QueryRun[]>(
+        `/query-runs?limit=${listLimit}${tagFilter ? `&tag=${encodeURIComponent(tagFilter)}` : ''}`,
+      ),
     refetchInterval: 5000,
     placeholderData: (prev) => prev, // keep the list steady while a longer page loads
   });
@@ -448,6 +456,29 @@ export default function RunsPage() {
     },
   });
 
+  // Export uses the authenticated client directly: the response is NDJSON
+  // for saving, not JSON for rendering, so the api<T> helper does not fit.
+  const [exporting, setExporting] = useState(false);
+  const downloadExport = async (path: string, body?: unknown) => {
+    setExporting(true);
+    try {
+      const { client, API_BASE } = await import('@/lib/api');
+      const res = await client.fetch(`${API_BASE}${path}`, {
+        method: body ? 'POST' : 'GET',
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+      const blob = await res.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'sgr-review-export.jsonl';
+      a.click();
+      URL.revokeObjectURL(a.href);
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const resume = useMutation({
     mutationFn: () => api<QueryRun>(`/query-runs/${runId}/resume`, { method: 'POST' }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['query-run', runId] }),
@@ -501,6 +532,13 @@ export default function RunsPage() {
     setReplayT(null);
   };
 
+  const toggleSel = (id: string) =>
+    setSelected((s) => {
+      const n = new Set(s);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+
   return (
     <div>
       <PageHeader
@@ -541,20 +579,53 @@ export default function RunsPage() {
         {/* recent runs — scrolls on its own so the run being inspected stays
             put no matter how far back the history is loaded */}
         <div className="w-56 shrink-0 sticky top-0 max-h-[calc(100vh-280px)] flex flex-col">
-          <div className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider mb-2 shrink-0">Recent runs</div>
+          <div className="flex items-center justify-between mb-2 shrink-0">
+            <div className="text-[11px] font-semibold text-stone-400 uppercase tracking-wider">Recent runs</div>
+            <button
+              onClick={() => { setSelecting(!selecting); setSelected(new Set()); }}
+              className={`text-[10.5px] font-medium rounded px-1.5 py-0.5 border ${
+                selecting ? 'border-primary-500 text-primary-700' : 'border-stone-200 text-stone-500 hover:border-stone-300'
+              }`}
+            >
+              {selecting ? 'Done' : 'Select'}
+            </button>
+          </div>
+          <input
+            value={tagFilter}
+            onChange={(e) => setTagFilter(e.target.value)}
+            placeholder="Filter by tag…"
+            className="mb-2 shrink-0 w-full border border-stone-200 rounded px-2 py-1 text-xs bg-white focus:outline-none focus:border-primary-500"
+          />
           <div className="space-y-1.5 flex-1 min-h-0 overflow-y-auto pr-1">
             {(runs.data ?? []).map((r) => (
               <button
                 key={r.id}
-                onClick={() => pick(r.id)}
+                onClick={() => (selecting ? toggleSel(r.id) : pick(r.id))}
                 className={`w-full text-left p-2.5 border rounded-md bg-white transition-colors ${
-                  r.id === runId ? 'border-primary-500 ring-1 ring-primary-500' : 'border-stone-200 hover:border-stone-300'
+                  (selecting ? selected.has(r.id) : r.id === runId)
+                    ? 'border-primary-500 ring-1 ring-primary-500'
+                    : 'border-stone-200 hover:border-stone-300'
                 }`}
               >
-                <div className="text-xs font-medium text-stone-900 line-clamp-2">{r.question}</div>
+                <div className="flex items-start gap-1.5">
+                  {selecting && (
+                    <span
+                      className={`mt-0.5 w-3 h-3 shrink-0 rounded-sm border ${
+                        selected.has(r.id) ? 'bg-primary-600 border-primary-600' : 'border-stone-300'
+                      }`}
+                    />
+                  )}
+                  <div className="text-xs font-medium text-stone-900 line-clamp-2">{r.question}</div>
+                </div>
                 <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
                   <span className="text-[10px] px-1.5 rounded bg-stone-100 text-stone-500">{r.mode}</span>
                   <StatusPill status={r.status} />
+                  {r.reference && (
+                    <span className="text-[10px] px-1.5 rounded bg-primary-50 text-primary-700 font-mono truncate max-w-full">{r.reference}</span>
+                  )}
+                  {(r.tags ?? []).slice(0, 2).map((t) => (
+                    <span key={t} className="text-[10px] px-1.5 rounded bg-stone-100 text-stone-500">#{t}</span>
+                  ))}
                 </div>
               </button>
             ))}
@@ -572,6 +643,29 @@ export default function RunsPage() {
               </button>
             )}
           </div>
+          {selecting && selected.size > 0 && (
+            <button
+              onClick={() => downloadExport('/query-runs/export', { run_ids: [...selected] })}
+              disabled={exporting}
+              className="mt-2 shrink-0 w-full text-xs bg-primary-600 hover:bg-primary-700 text-white rounded-md py-1.5 font-medium disabled:opacity-50"
+            >
+              {exporting ? 'Exporting…' : `Export ${selected.size} selected`}
+            </button>
+          )}
+          {!!tagFilter.trim() && (
+            <button
+              onClick={() =>
+                downloadExport(
+                  `/query-runs/export/by-tag?tag=${encodeURIComponent(tagFilter.trim())}&latest_per_reference=true`,
+                )
+              }
+              disabled={exporting}
+              title="One document per reference: the newest completed run of each question carrying this tag"
+              className="mt-2 shrink-0 w-full text-xs border border-primary-500 text-primary-700 rounded-md py-1.5 font-medium disabled:opacity-50"
+            >
+              {exporting ? 'Exporting…' : 'Export tag (latest per question)'}
+            </button>
+          )}
         </div>
 
         {/* diagram */}
@@ -775,6 +869,84 @@ function FlowDiagram({
   );
 }
 
+function RunIdentity({ run }: { run: QueryRun }) {
+  const qc = useQueryClient();
+  const [ref, setRef] = useState(run.reference ?? '');
+  const [newTag, setNewTag] = useState('');
+  const save = useMutation({
+    mutationFn: (patch: { reference?: string | null; tags?: string[] }) =>
+      api<QueryRun>(`/query-runs/${run.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['query-runs'] });
+      qc.invalidateQueries({ queryKey: ['query-run', run.id] });
+    },
+  });
+  const refDirty = ref.trim() !== (run.reference ?? '');
+  const saveRef = () => save.mutate({ reference: ref.trim() || null });
+  const addTag = () => {
+    const t = newTag.trim();
+    setNewTag('');
+    if (t && !(run.tags ?? []).includes(t)) save.mutate({ tags: [...(run.tags ?? []), t] });
+  };
+  const removeTag = (t: string) =>
+    save.mutate({ tags: (run.tags ?? []).filter((x) => x !== t) });
+
+  return (
+    <>
+      <div className="text-[10.5px] font-semibold text-stone-400 uppercase tracking-wider mt-4 mb-1.5">Reference</div>
+      <div className="flex gap-1.5">
+        <input
+          value={ref}
+          onChange={(e) => setRef(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter' && refDirty) saveRef(); }}
+          placeholder="e.g. benchmark-q16"
+          className="flex-1 min-w-0 border border-stone-300 rounded px-2 py-1 text-xs font-mono bg-white focus:outline-none focus:border-primary-500"
+        />
+        {refDirty && (
+          <button
+            onClick={saveRef}
+            disabled={save.isPending}
+            className="text-xs border border-primary-500 text-primary-700 rounded px-2.5 py-1 font-medium disabled:opacity-50"
+          >
+            {save.isPending ? '…' : 'Save'}
+          </button>
+        )}
+      </div>
+      <div className="text-[10px] text-stone-400 mt-1">Shared by reruns of the same question — not unique.</div>
+      <div className="text-[10.5px] font-semibold text-stone-400 uppercase tracking-wider mt-4 mb-1.5">Tags</div>
+      <div className="flex flex-wrap gap-1 items-center">
+        {(run.tags ?? []).map((t) => (
+          <span
+            key={t}
+            className="text-[10.5px] pl-1.5 pr-0.5 py-0.5 rounded bg-stone-100 text-stone-600 inline-flex items-center gap-0.5"
+          >
+            #{t}
+            <button
+              onClick={() => removeTag(t)}
+              disabled={save.isPending}
+              title="Remove tag"
+              className="text-stone-400 hover:text-red-600 px-0.5"
+            >
+              ×
+            </button>
+          </span>
+        ))}
+        <input
+          value={newTag}
+          onChange={(e) => setNewTag(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') addTag(); }}
+          placeholder="+ tag"
+          className="w-20 border border-stone-200 rounded px-1.5 py-0.5 text-[10.5px] bg-white focus:outline-none focus:border-primary-500"
+        />
+      </div>
+    </>
+  );
+}
+
 function Inspector({
   run, activity, docs, claims, plan, inspected, onResume, resuming, onPreviewDoc,
 }: {
@@ -820,6 +992,7 @@ function Inspector({
         <KV k="Mode" v={run.mode} />
         <KV k="Effort" v={run.effort} />
         <KV k="Run" v={<span className="font-mono text-xs text-stone-500">{run.id.slice(0, 8)}</span>} />
+        <RunIdentity key={run.id} run={run} />
         {run.error && (
           <>
             <Label>Error</Label>

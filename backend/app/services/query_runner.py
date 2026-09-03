@@ -1190,6 +1190,13 @@ async def _extract_passages(
                     cleaned = reply.strip().strip("`").removeprefix("json").strip()
                     data = json.loads(
                         cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+                except CancelledOutcome:
+                    # A cancel is not a transport failure. It reaches here
+                    # because the invoke checks for one after each retry wait,
+                    # and the catch below would read it as "this round failed"
+                    # and start the next chunk — another paid call on a run the
+                    # operator already stopped. It has to travel out.
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     # A transport failure is not "this document says nothing".
                     # Swallowing it produced runs that ended `partial` — which

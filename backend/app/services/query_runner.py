@@ -142,6 +142,34 @@ def _iso() -> str:
     return _now().isoformat()
 
 
+# Waits between invoke retries, in seconds. Deliberately long: the Anthropic
+# SDK underneath already retries twice with sub-second backoff on anything
+# >= 500, so a fast retry here would only repeat what it just exhausted. What
+# gets through that and reaches us is an overload lasting longer than a couple
+# of seconds, and these are sized for it. Two attempts, not more: an overload
+# that survives twenty seconds is not going to yield to a third.
+INVOKE_RETRY_WAITS = (5.0, 15.0)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether this invoke failure is worth waiting out.
+
+    Only a 5xx from Sinas and a connection failure. A 5xx is the shape an
+    upstream provider overload arrives in — Sinas surfaces it as a 500 — and a
+    connection error never carries a judgment about the request.
+
+    Everything else is ours. A 4xx means the call was wrong, and retrying it
+    hides the defect while paying for it twice; 429 is deliberately not here,
+    because the SDK below already honours `retry-after` and a rate limit we
+    still hit after that wants a smaller run, not a slower one.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    return isinstance(exc, (httpx.ConnectError, httpx.ReadError,
+                            httpx.WriteError, httpx.PoolTimeout,
+                            httpx.ReadTimeout, httpx.ConnectTimeout))
+
+
 class _Sinas:
     """Minimal async Sinas client for chat supervision."""
 
@@ -182,16 +210,47 @@ class _Sinas:
         asyncio.create_task(_fire())
 
     async def invoke(self, agent: str, message: str) -> str:
-        async with httpx.AsyncClient(timeout=600.0) as c:
-            r = await c.post(
-                f"{self.base}/agents/{agent}/invoke",
-                headers=self.headers,
-                json={"message": message},
-            )
-            r.raise_for_status()
-            data = r.json()
-        await record_llm_call(self.run_id, data.get("chat_id"), agent)
-        return data.get("reply", "") or ""
+        """One agent call, retried past a transient upstream failure.
+
+        Two runs died on the same day partway through validation, after the
+        retrieval, the draft and most of the validation rounds were paid for:
+        $2.69 between them, both on an Anthropic overload that Sinas surfaced
+        as a 500. Nothing in this pipeline retried a network failure — the
+        drafter and the gate each retry a malformed reply, which is a
+        different thing — so a call that had already been attempted three
+        times below ended the run.
+
+        The overload arrives spelled two ways, `OverloadedError` and an
+        `APIStatusError` carrying `overloaded_error`, which is why the attempt
+        is recorded: the second cost an hour to recognise as the first.
+        """
+        last: Exception | None = None
+        for attempt, wait in enumerate((*INVOKE_RETRY_WAITS, None)):
+            try:
+                async with httpx.AsyncClient(timeout=600.0) as c:
+                    r = await c.post(
+                        f"{self.base}/agents/{agent}/invoke",
+                        headers=self.headers,
+                        json={"message": message},
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                if attempt:
+                    await _tele_invoke_retry(self.run_id, agent, attempt,
+                                             last, recovered=True)
+                await record_llm_call(self.run_id, data.get("chat_id"), agent)
+                return data.get("reply", "") or ""
+            except Exception as exc:  # noqa: BLE001
+                if wait is None or not _is_transient(exc):
+                    if attempt:
+                        await _tele_invoke_retry(self.run_id, agent, attempt,
+                                                 exc, recovered=False)
+                    raise
+                last = exc
+                _log.warning("invoke %s failed (%s); retrying in %.0fs",
+                             agent, type(exc).__name__, wait)
+                await asyncio.sleep(wait)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def chat_messages(self, chat_id: str) -> list[dict]:
         # 120s: supervision reads must tolerate a Sinas API busy with bulk
@@ -210,6 +269,29 @@ class _Sinas:
                 await c.delete(f"{self.base}/chats/{chat_id}", headers=self.headers)
         except Exception:
             pass
+
+
+async def _tele_invoke_retry(run_id, agent: str, attempts: int,
+                             exc: Exception | None, *, recovered: bool) -> None:
+    """Note that an invoke had to be retried, and how it ended.
+
+    Best-effort, like the rest of the bookkeeping. Recorded because the two
+    failures that motivated the retry cost an hour to diagnose: the same
+    upstream overload reached the logs once as `OverloadedError` and once as
+    an `APIStatusError` whose message was `overloaded_error`, and grepping for
+    the first found nothing on the second. A run should be able to say it hit
+    one without anybody reading Sinas's logs.
+    """
+    if run_id is None:
+        return
+    try:
+        await _tele(run_id, "invoke_retries", **{f"{agent}_{_iso()}": {
+            "attempts": attempts + 1,
+            "recovered": recovered,
+            "error": f"{type(exc).__name__}: {exc}"[:300] if exc else None,
+        }})
+    except Exception:  # noqa: BLE001
+        _log.warning("could not record invoke retry", exc_info=True)
 
 
 async def record_llm_call(run_id, chat_id, agent: str | None) -> None:

@@ -343,7 +343,7 @@ function buildStages(
         : 'draft the answer, cite every claim',
       state: failed && sState === 'active' ? 'error' : partial && sState !== 'done' ? 'done' : sState,
       count: tel.draft?.claims != null
-        ? `${tel.draft.claims} claims${tel.extract?.passages_verified != null ? ` · ${tel.extract.passages_verified} verified passages` : ' drafted'}`
+        ? `${tel.draft.claims} claims${exField(tel.extract, 'passages_verified') != null ? ` · ${exField(tel.extract, 'passages_verified')} verified passages` : ' drafted'}`
         : undefined,
       wide: true,
     }]);
@@ -947,6 +947,20 @@ function RunIdentity({ run }: { run: QueryRun }) {
   );
 }
 
+
+// Extraction telemetry is per cycle (extract.cycle_N) since the numbering
+// change; runs recorded before it carry the same fields at the stage's top
+// level. Sums across cycles, falling back to the legacy flat key.
+function exField(ex: any, field: string): number | undefined {
+  if (ex == null) return undefined;
+  if (ex[field] != null) return ex[field];
+  const vals = Object.keys(ex)
+    .filter((k) => k.startsWith('cycle_'))
+    .map((k) => ex[k]?.[field])
+    .filter((v) => typeof v === 'number');
+  return vals.length ? vals.reduce((a, b) => a + b, 0) : undefined;
+}
+
 function Inspector({
   run, activity, docs, claims, plan, inspected, onResume, resuming, onPreviewDoc,
 }: {
@@ -1162,14 +1176,14 @@ function Inspector({
         {ex && (
           <>
             <Label>Passages</Label>
-            <KV k="Documents read" v={ex.documents_read ?? '—'} />
-            <KV k="Passages proposed" v={ex.passages_proposed ?? '—'} />
+            <KV k="Documents read" v={exField(ex, 'documents_read') ?? '—'} />
+            <KV k="Passages proposed" v={exField(ex, 'passages_proposed') ?? '—'} />
             <KV
               k="Verified verbatim"
               v={
-                <span className={ex.passages_verified === ex.passages_proposed ? 'text-primary-700 font-semibold' : 'text-amber-700 font-semibold'}>
-                  {ex.passages_verified ?? '—'}
-                  {ex.passages_proposed ? ` of ${ex.passages_proposed}` : ''}
+                <span className={exField(ex, 'passages_verified') === exField(ex, 'passages_proposed') ? 'text-primary-700 font-semibold' : 'text-amber-700 font-semibold'}>
+                  {exField(ex, 'passages_verified') ?? '—'}
+                  {exField(ex, 'passages_proposed') ? ` of ${exField(ex, 'passages_proposed')}` : ''}
                 </span>
               }
             />
@@ -1333,7 +1347,7 @@ function Inspector({
             passages actually cited in the answer — a different count, so it
             gets a different label rather than being folded into one. */}
         {tel.extract ? (
-          <span>passages <b className="text-stone-900 font-semibold">{tel.extract.passages_verified ?? '—'}</b></span>
+          <span>passages <b className="text-stone-900 font-semibold">{exField(tel.extract, 'passages_verified') ?? '—'}</b></span>
         ) : tel.draft?.extract_mode ? (
           <span>cited <b className="text-stone-900 font-semibold">{citedPassages || '—'}</b></span>
         ) : (

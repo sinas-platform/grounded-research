@@ -1308,6 +1308,7 @@ async def _extract_passages(
         rejected: list[dict] = []
         recovered = 0
         corrected = 0
+        moved = 0
         seen_spans: set[tuple[str, int, int]] = set()
         owed_empty = False
         proposed_total = 0
@@ -1415,6 +1416,22 @@ async def _extract_passages(
                 found = _locate_passage(shown[fn]["text"], lf, lt, text)
                 if found and found != (lf, lt):
                     corrected += 1
+                    # Two different things wear the same number. Narrowing
+                    # a range that already held the quote improves how a
+                    # citation reads; moving one that did not is a citation
+                    # that pointed at lines without the text it cited. Only the
+                    # second is a provenance defect, and only the second became
+                    # possible when the range stopped being forward-only. Under
+                    # the old rule an accepted quote was always inside
+                    # [line_from, line_to + 2], so the reported start could
+                    # never fall after it.
+                    #
+                    # Counted apart because the combined figure is the one
+                    # someone will quote: 49 of 171 verified passages across
+                    # two runs, 29%, which reads as a fault rate and is not one
+                    # until this says how much of it moved.
+                    if found[0] < lf or found[1] > lt:
+                        moved += 1
                 alf, alt = found or (lf, lt)
                 # The owed document is shown every round, so the same span can
                 # come back more than once. Deduplicated on the corrected span
@@ -1432,12 +1449,12 @@ async def _extract_passages(
             return {"n": c.get("n"), "passages": [], "proposed": proposed_total,
                     "read": len(docs), "error": last_error,
                     "rejected": rejected, "recovered_by_symmetry": recovered,
-                    "spans_corrected": corrected,
+                    "spans_corrected": corrected, "spans_moved": moved,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": proposed_total,
                 "rejected": rejected, "recovered_by_symmetry": recovered,
-                "spans_corrected": corrected,
+                "spans_corrected": corrected, "spans_moved": moved,
                 "owed": owed, "owed_empty": owed_empty,
                 "read": len(docs), "truncated": truncated, "chunked": chunked}
 
@@ -1524,6 +1541,10 @@ async def _extract_passages(
                 # extractor reported: how often the coordinates needed
                 # correcting to point at the text they cite.
                 "spans_corrected": sum(r.get("spans_corrected", 0) for r in out),
+                # The half of `spans_corrected` that is a provenance defect:
+                # the reported range did not contain the whole quote. The rest
+                # is narrowing, which only makes a citation read better.
+                "spans_moved": sum(r.get("spans_moved", 0) for r in out),
                 "extraction_errors": len(errors),
                 "documents_truncated": len(cut_by_file),
                 "characters_dropped": sum(

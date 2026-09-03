@@ -437,3 +437,55 @@ def test_a_short_quote_is_unaffected():
     """Under 200 characters the two paths are the same search."""
     assert _locate_passage(
         SOURCE, 2, 3, "The authority may not rely on a document") == (1, 1)
+
+
+# -- narrowed is not moved -----------------------------------------------------
+#
+# `spans_corrected` counts both, and they are different things. Narrowing a
+# range that already held the quote makes a citation read better; moving one
+# that did not is a citation that pointed at lines without the text it cited.
+# Only the second is a provenance defect, and the combined figure (49 of 171
+# verified passages across two runs) reads as a fault rate until they are
+# separated.
+
+
+def moved(reported: tuple[int, int], located: tuple[int, int]) -> bool:
+    """The runner's test, in one place so the tests and the code agree."""
+    return located[0] < reported[0] or located[1] > reported[1]
+
+
+def test_a_narrowing_is_not_a_move():
+    """The extractor guessed a wide range; the quote was inside it all along.
+    This is the only kind the old forward-only rule could produce."""
+    assert not moved((1, 9), (6, 6))
+
+
+def test_an_exact_narrowing_at_one_end_is_not_a_move():
+    assert not moved((4, 9), (4, 5))
+    assert not moved((4, 9), (7, 9))
+
+
+def test_a_start_before_the_reported_range_is_a_move():
+    """What the symmetric range admits and the old one rejected: the quote
+    begins before the line the extractor named."""
+    assert moved((3, 5), (1, 2))
+
+
+def test_an_end_after_the_reported_range_is_a_move():
+    """Possible under the old rule too, through its forward slack, and stored
+    wrongly for as long as that slack existed."""
+    assert moved((3, 5), (4, 7))
+
+
+def test_the_runner_counts_them_apart():
+    from pathlib import Path
+
+    from app.services import obligations
+
+    src = Path(obligations.__file__).with_name("query_runner.py").read_text(
+        encoding="utf-8")
+    assert "if found[0] < lf or found[1] > lt:" in src
+    assert '"spans_moved": sum(r.get("spans_moved", 0) for r in out),' in src
+    # Beside the combined count, never instead of it: the pair is read as
+    # moved-out-of-corrected.
+    assert '"spans_corrected": sum(r.get("spans_corrected", 0) for r in out),' in src

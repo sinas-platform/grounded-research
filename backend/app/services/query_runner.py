@@ -882,6 +882,63 @@ def _canonical(text: str) -> str:
     return re.sub(r"\s+", " ", folded).strip().lower()
 
 
+def _numbered_pairs(numbered: str) -> list[tuple[int, str]]:
+    """The numbered block as (line number, text) pairs, unnumbered lines
+    dropped. Shared by the verifier and the locator so the two can never
+    disagree about what a line is."""
+    out = []
+    for line in numbered.splitlines():
+        num, _, rest = line.partition(": ")
+        try:
+            out.append((int(num), rest))
+        except ValueError:
+            continue
+    return out
+
+
+def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
+                    back: int = 2, fwd: int = 2) -> tuple[int, int] | None:
+    """Where the quote actually sits, or None if it cannot be narrowed.
+
+    The verifier widens the reported range before checking containment, so a
+    quote the extractor placed a line or two off still verifies — and the
+    reported coordinates were then persisted as the evidence span. A citation
+    could point at lines that do not contain the text it cites, and anything
+    reading the span back would slice the wrong part of the document.
+
+    That was already true of the forward slack before the range became
+    symmetric; widening both ends doubles the exposure and puts it at the end
+    a reader looks at first. So the span is corrected rather than the slack
+    withdrawn: the tolerance is what lets a faithful quote through, and the
+    coordinates are what a reader needs to be true.
+
+    Narrowest window wins. Scanning starts at each candidate line and extends
+    only as far as it must, so a quote that fits in one line is recorded as
+    one line rather than as the range the model guessed.
+
+    Pure: text in, a pair of line numbers out.
+    """
+    want = _canonical(quoted)[:200]
+    if len(_canonical(quoted)) < 20:
+        return None
+    rows = [(n, t) for n, t in _numbered_pairs(numbered)
+            if line_from - back <= n <= line_to + fwd]
+    best: tuple[int, int] | None = None
+    for i in range(len(rows)):
+        acc: list[str] = []
+        for j in range(i, len(rows)):
+            acc.append(rows[j][1])
+            if want in _canonical(" ".join(acc)):
+                # Narrowest wins, earliest breaking the tie. Taking the first
+                # window that matches would return the earliest start instead,
+                # and a quote sitting on one line would be recorded as the
+                # several lines that happen to precede it.
+                if best is None or (j - i) < (best[1] - best[0]):
+                    best = (i, j)
+                break
+    return (rows[best[0]][0], rows[best[1]][0]) if best else None
+
+
 def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str,
                     back: int = 2, fwd: int = 2) -> bool:
     """Deterministic anti-hallucination: the quoted text must actually occur
@@ -909,15 +966,8 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str,
     want = _canonical(quoted)
     if len(want) < 20:
         return False
-    span_lines = []
-    for line in numbered.splitlines():
-        num, _, rest = line.partition(": ")
-        try:
-            n = int(num)
-        except ValueError:
-            continue
-        if line_from - back <= n <= line_to + fwd:
-            span_lines.append(rest)
+    span_lines = [t for n, t in _numbered_pairs(numbered)
+                  if line_from - back <= n <= line_to + fwd]
     return want[:200] in _canonical(" ".join(span_lines))
 
 
@@ -1103,6 +1153,7 @@ async def _extract_passages(
         good: list[dict] = []
         rejected: list[dict] = []
         recovered = 0
+        corrected = 0
         proposed_total = 0
         last_error: str | None = None
         for k in range(rounds):
@@ -1172,7 +1223,17 @@ async def _extract_passages(
                 # it can only be asked at the moment the passage is judged.
                 if not _verify_passage(shown[fn]["text"], lf, lt, text, back=0):
                     recovered += 1
-                good.append({"filename": fn, "line_from": lf, "line_to": lt,
+                # Recorded where the quote is, not where it was said to be.
+                # The tolerance is what lets a faithful quote through; the
+                # coordinates are what a reader needs to be true, and they
+                # become the persisted evidence span. Falls back to the
+                # reported pair only if the window cannot be narrowed, which
+                # verification already says should not happen.
+                found = _locate_passage(shown[fn]["text"], lf, lt, text)
+                if found and found != (lf, lt):
+                    corrected += 1
+                alf, alt = found or (lf, lt)
+                good.append({"filename": fn, "line_from": alf, "line_to": alt,
                              "text": text[:2000]})
 
         # Only a failure with nothing to show for it is an error: one bad round
@@ -1181,10 +1242,12 @@ async def _extract_passages(
             return {"n": c.get("n"), "passages": [], "proposed": proposed_total,
                     "read": len(docs), "error": last_error,
                     "rejected": rejected, "recovered_by_symmetry": recovered,
+                    "spans_corrected": corrected,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": proposed_total,
                 "rejected": rejected, "recovered_by_symmetry": recovered,
+                "spans_corrected": corrected,
                 "read": len(docs), "truncated": truncated, "chunked": chunked}
 
     out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
@@ -1231,6 +1294,10 @@ async def _extract_passages(
             # rather than estimated from a sample of five.
             recovered_by_symmetry=sum(
                 r.get("recovered_by_symmetry", 0) for r in out),
+            # Passages whose recorded span differs from the one the extractor
+            # reported. Not an error rate: it is how often the coordinates
+            # needed correcting to point at the text they cite.
+            spans_corrected=sum(r.get("spans_corrected", 0) for r in out),
             extraction_errors=len(errors),
             documents_truncated=len(cut_by_file),
             characters_dropped=sum(

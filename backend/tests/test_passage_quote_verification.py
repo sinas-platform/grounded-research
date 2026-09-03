@@ -16,6 +16,7 @@ Run from the backend directory:
 
 from app.services.query_runner import (
     _canonical,
+    _locate_passage,
     _reject_reason,
     _verify_passage,
 )
@@ -321,3 +322,82 @@ def test_the_reasons_are_checked_in_a_useful_order():
     the document, because that is the actionable half."""
     assert _reject_reason(shown_one(), "other.md", 1, 2, "short") \
         == "document not among those shown"
+
+
+# -- the recorded span is where the quote is ------------------------------------
+#
+# The verifier widens the reported range before checking containment, so a
+# quote placed a line or two off still verifies — and the reported coordinates
+# were then persisted as the evidence span, so a citation could point at lines
+# that do not contain the text it cites. That was already true of the forward
+# slack; making the range symmetric doubles the exposure and puts it at the end
+# a reader looks at first. The span is corrected rather than the slack
+# withdrawn: the tolerance lets a faithful quote through, the coordinates have
+# to be true.
+
+
+def test_a_span_reported_late_is_corrected_back():
+    """The case the symmetry admits: the quote is on line 1, reported as 2."""
+    assert _locate_passage(
+        SOURCE, 2, 3, "The authority may not rely on a document") == (1, 1)
+
+
+def test_a_span_reported_early_is_corrected_forward():
+    """The case the old forward slack already admitted, and already recorded
+    wrongly."""
+    assert _locate_passage(
+        SOURCE, 4, 4, "A record shall be kept") == (5, 5)
+
+
+def test_an_accurate_span_is_left_alone():
+    assert _locate_passage(
+        SOURCE, 1, 1, "The authority may not rely on a document") == (1, 1)
+
+
+def test_a_quote_spanning_two_lines_reports_both():
+    assert _locate_passage(
+        SOURCE, 1, 4,
+        f"party concerned, and the {LDQUO}right to be heard{RDQUO} applies to "
+        f"an inspection at the undertaking{RSQUO}s premises") == (2, 3)
+
+
+def test_the_narrowest_window_wins():
+    """A quote that fits in one line is recorded as one line, not as the range
+    the model guessed around it."""
+    assert _locate_passage(
+        SOURCE, 1, 6, "shall be noted in paragraph 42 of the report") == (6, 6)
+
+
+def test_text_outside_the_tolerance_locates_nothing():
+    assert _locate_passage(
+        SOURCE, 8, 9, "The authority may not rely on a document") is None
+
+
+def test_a_quote_under_the_floor_locates_nothing():
+    """Same floor as the verifier, so the two cannot disagree about whether a
+    passage exists."""
+    assert _locate_passage(SOURCE, 1, 2, "a rule") is None
+
+
+def test_locating_agrees_with_verifying():
+    """The pair has to move together: anything the verifier accepts must be
+    locatable, or the span would fall back to coordinates the verifier just
+    said were approximate."""
+    cases = [
+        (2, 3, "The authority may not rely on a document"),
+        (1, 1, "party concerned, and the"),
+        (4, 5, "court has applied since 2011-2012 without exception"),
+        (5, 6, "A record shall be kept, and any cooperation offered"),
+    ]
+    for lf, lt, q in cases:
+        assert _verify_passage(SOURCE, lf, lt, q)
+        assert _locate_passage(SOURCE, lf, lt, q) is not None
+
+
+def test_what_the_verifier_rejects_is_not_located():
+    for lf, lt, q in [
+        (1, 2, "shall be noted in paragraph 42 of the report"),
+        (1, 9, "The undertaking is entitled to compensation for the delay"),
+    ]:
+        assert not _verify_passage(SOURCE, lf, lt, q)
+        assert _locate_passage(SOURCE, lf, lt, q) is None

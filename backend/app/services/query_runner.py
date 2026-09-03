@@ -1130,8 +1130,25 @@ async def _extract_passages(
     so the drafter can only ever see text that exists."""
     sem = asyncio.Semaphore(4)
     started = time.monotonic()
+    started_iso = _iso()
+    # Decided once, on the way in, and reused for both writes. Computing it
+    # again at the end would count the key this one just wrote and number the
+    # cycle twice.
+    cycle = (await _next_cycle_key(run_id, "extract", "cycle")
+             if run_id is not None else "cycle_1")
     if run_id is not None:
-        await _tele(run_id, "extract", started=_iso())
+        # Written before the work so an extraction that raises still leaves a
+        # cycle behind. The final write replaces the cycle with a superset.
+        #
+        # `started` stays a stage-level keyword beside it. Every stage records
+        # when it started, when it ended and how long it took — a contract
+        # written after a 52-minute run whose wall clock could not be
+        # attributed to any stage — and it is checked by reading this call's
+        # keywords, so it has to be one. The stage-level copy answers where
+        # the time went; the copy inside the cycle answers what each
+        # extraction did.
+        await _tele(run_id, "extract", started=started_iso,
+                    **{cycle: {"started": started_iso}})
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
@@ -1259,23 +1276,39 @@ async def _extract_passages(
         # over the cap is cut before the model sees any of it, so a thin answer
         # can be a corpus that never arrived rather than a corpus with nothing
         # to say. These say which.
+        #
+        # All of it now sits under `cycle_N`. A run extracts once for the
+        # draft and again for every revision cycle that carries a point, and
+        # this dict was written whole each time, so `_tele` replaced it and
+        # only the last extraction survived. Every number here was affected,
+        # not one of them: reading a run's `documents_read` gave whichever
+        # extraction happened to go last, and comparing two runs could compare
+        # a draft extraction against a revision one without anything saying
+        # so. Same shape as round_N and revision_N, and answer_regress already
+        # reads that family by prefix.
         await _tele(
             run_id, "extract",
-            claims=len(out),
-            documents_read=sum(r.get("read", 0) for r in out),
-            passages_proposed=sum(r.get("proposed", 0) for r in out),
-            passages_verified=sum(len(r.get("passages") or []) for r in out),
-            extraction_errors=len(errors),
-            documents_truncated=len(cut_by_file),
-            characters_dropped=sum(
-                t["dropped_chars"] for t in cut_by_file.values()),
-            lines_dropped=sum(t["dropped_lines"] for t in cut_by_file.values()),
-            truncated_documents=sorted(
-                cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
-            **_chunk_telemetry(out),
             completed=_iso(),
             elapsed_s=round(time.monotonic() - started, 1),
-        )
+            **{cycle: {
+                "started": started_iso,
+                "claims": len(out),
+                "documents_read": sum(r.get("read", 0) for r in out),
+                "passages_proposed": sum(r.get("proposed", 0) for r in out),
+                "passages_verified": sum(
+                    len(r.get("passages") or []) for r in out),
+                "extraction_errors": len(errors),
+                "documents_truncated": len(cut_by_file),
+                "characters_dropped": sum(
+                    t["dropped_chars"] for t in cut_by_file.values()),
+                "lines_dropped": sum(
+                    t["dropped_lines"] for t in cut_by_file.values()),
+                "truncated_documents": sorted(
+                    cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
+                **_chunk_telemetry(out),
+                "completed": _iso(),
+                "elapsed_s": round(time.monotonic() - started, 1),
+            }})
     return out
 
 
@@ -2305,6 +2338,38 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             "waive": waives}
 
 
+def _cycle_key(existing: dict, prefix: str) -> str:
+    """The next per-cycle telemetry key, `prefix_1` upward.
+
+    `_tele` merges by key and cannot delete, so a stage that writes the same
+    key every cycle keeps only its last one. `round_N` already avoids that by
+    numbering; this is the same trick for stages whose loop has no counter of
+    its own to number by.
+    """
+    return f"{prefix}_{sum(1 for k in existing if k.startswith(prefix + '_')) + 1}"
+
+
+async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        entry = ((run.telemetry if run is not None else None) or {}).get(stage) or {}
+    return _cycle_key(entry, prefix)
+
+
+def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
+    """Split the reviser's additions into those the answer has room for and
+    the count refused, given `live` claims already in it.
+
+    Pure, and separate, because the refusal is silent everywhere else: an
+    answer at MAX_CLAIMS takes nothing, the reviser is not told, and the run
+    continues as though the claim had been written. Returning the refused
+    count is what lets the caller record a cap hit instead of recording an
+    addition that never happened.
+    """
+    room = max(0, MAX_CLAIMS - live)
+    return adds[:room], len(adds) - min(len(adds), room)
+
+
 async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
     for sp in spans[:4]:
         doc = (await session.execute(
@@ -2516,6 +2581,10 @@ async def _revise_answer(
 
     by_seq = {c.sequence: c for c, *_ in rows}
     touched = 0
+    # Bound before the add block, which does not run when the patch adds
+    # nothing; the telemetry below reads both either way.
+    admitted: list[dict] = []
+    add_dropped_at_cap = 0
     async with AsyncSessionLocal() as session:
         for seq in patch["drop"]:
             claim = by_seq.get(seq)
@@ -2550,7 +2619,8 @@ async def _revise_answer(
             nxt = ((await session.execute(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id))).scalar() or 0) + 1
-            for item in patch["add"][:max(0, MAX_CLAIMS - live)]:
+            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live)
+            for item in admitted:
                 row = AnswerClaim(answer_id=answer_id, sequence=nxt,
                                   claim_text=item["text"][:4000],
                                   rationale=(item.get("rationale") or "")[:2000]
@@ -2573,15 +2643,30 @@ async def _revise_answer(
                 row.rationale = item["rationale"][:2000]
         await session.commit()
 
-    await _tele(run_id, "validate",
-                revision={"claims": len(by_claim), "revised": len(patch["revise"]),
-                          "kept_with_reason": len(patch.get("keep") or []),
-                          "abstentions": sum(
-                              1 for a in patch["add"]
-                              if a.get("type") == "abstention"),
-                          "dropped": len(patch["drop"]), "added": len(patch["add"]),
-                          "untouched": len(by_claim) - touched,
-                          "feedback_items": len(feedback)})
+    # `added` counts rows written, not rows asked for. It used to be
+    # len(patch["add"]), so a patch whose additions were all refused at the
+    # cap recorded the same number as one where every addition landed.
+    # `add_dropped_at_cap` carries the difference; the two sum to what the
+    # reviser proposed.
+    #
+    # And one key per cycle, like round_N. Recording the right number was not
+    # enough on its own: a single `revision` key kept only the last cycle, so
+    # a run that revised four times threw away three cycles of adds, drops and
+    # cap refusals before anyone could read them. Measured on three runs that
+    # each reached the cap, every one reported add_dropped_at_cap = 0, because
+    # the cycle that survived was not the cycle that hit it. Numbering is what
+    # makes this a history instead of a last-write.
+    cycle = await _next_cycle_key(run_id, "validate", "revision")
+    await _tele(run_id, "validate", **{
+        cycle: {
+            "claims": len(by_claim), "revised": len(patch["revise"]),
+            "kept_with_reason": len(patch.get("keep") or []),
+            "abstentions": sum(1 for a in admitted
+                               if a.get("type") == "abstention"),
+            "dropped": len(patch["drop"]), "added": len(admitted),
+            "add_dropped_at_cap": add_dropped_at_cap,
+            "untouched": len(by_claim) - touched,
+            "feedback_items": len(feedback)}})
     return touched
 
 

@@ -581,3 +581,21 @@ def test_the_dedup_still_happens_once_and_on_the_corrected_span():
     src = runner_source()
     assert src.count("seen_spans.add(") == 1
     assert src.count("if (fn, alf, alt) in seen_spans:") == 1
+
+
+def test_prefix_only_and_moved_overlap_on_purpose():
+    """The two counters are different axes, not three exclusive buckets.
+
+    `spans_moved` asks whether the reported range held the quote.
+    `spans_prefix_only` asks whether the recorded span covers all of it. A
+    quote that starts before the reported range and also runs past the window
+    fails both, and both must say so: made exclusive, the second would stop
+    answering "how many spans fall short of what they cite", which is the only
+    question it exists for. Pinned so nobody tidies the overlap away.
+    """
+    quote = " ".join(["alpha " * 40, "bravo " * 40, "charlie " * 40,
+                      "delta " * 40, "echo " * 40, "foxtrot " * 40]).strip()
+    found = _locate_passage(WIDE, 2, 3, quote)
+    assert found is not None
+    assert found[0] < 2                             # movido
+    assert not _quote_whole(WIDE, 2, 3, quote)      # y ademas corto

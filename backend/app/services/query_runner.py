@@ -1006,10 +1006,12 @@ def _quote_whole(numbered: str, line_from: int, line_to: int, quoted: str,
     This does not separate the two, and says only that the whole quote was not
     found where the span points.
 
-    Either way it is neither of the cases `spans_moved` separates: not
-    narrowed, since the span no longer covers the quote, and not moved, since
-    it does begin where the quote begins. Counting it as either puts a number
-    on the wrong pile, so it gets its own.
+    This is a different axis from the narrowed/moved split, not a third
+    bucket in it. That split asks whether the reported range held the quote;
+    this asks whether the recorded span covers all of it. A span can be moved
+    and also fall short, so the counters overlap by design and must not be
+    added together. Kept separate because a reader wants both answers: where
+    the citation points, and how much of the quote it reaches.
 
     Pure: text in, a verdict out.
     """
@@ -1472,8 +1474,11 @@ async def _extract_passages(
                     # never fall after it.
                     if alf < lf or alt > lt:
                         moved += 1
-                # Independent of the two above: the span can be right about
-                # where the quote starts and still not cover all of it.
+                # A separate axis, deliberately overlapping the two above
+                # rather than excluding them: those ask whether the reported
+                # range held the quote, this asks whether the recorded span
+                # covers all of it. A moved span can also fall short. Do not
+                # add these together.
                 if not _quote_whole(shown[fn]["text"], lf, lt, text):
                     prefix_only += 1
                 good.append({"filename": fn, "line_from": alf, "line_to": alt,
@@ -1583,10 +1588,11 @@ async def _extract_passages(
                 # the reported range did not contain the whole quote. The rest
                 # is narrowing, which only makes a citation read better.
                 "spans_moved": sum(r.get("spans_moved", 0) for r in out),
-                # Neither narrowed nor moved: only the quote's first 200
-                # characters were found, so the span begins correctly and does
-                # not cover all of what it cites. Either the quote runs past
-                # the window, or it stops being verbatim after its opening.
+                # Only the quote's first 200 characters were found, so the
+                # span does not cover all of what it cites. Either the quote
+                # runs past the window, or it stops being verbatim after its
+                # opening. Overlaps `spans_moved` on purpose: this is coverage,
+                # that is location, and a span can fail both.
                 "spans_prefix_only": sum(
                     r.get("spans_prefix_only", 0) for r in out),
                 "extraction_errors": len(errors),

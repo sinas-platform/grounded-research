@@ -165,9 +165,14 @@ def _is_transient(exc: Exception) -> bool:
     """
     if isinstance(exc, httpx.HTTPStatusError):
         return exc.response.status_code >= 500
-    return isinstance(exc, (httpx.ConnectError, httpx.ReadError,
-                            httpx.WriteError, httpx.PoolTimeout,
-                            httpx.ReadTimeout, httpx.ConnectTimeout))
+    # Connect-side only. An invoke is not idempotent — it starts model work
+    # and opens a chat — so a failure is safe to repeat exactly when it is
+    # certain the request never arrived. A refused connection and a timeout
+    # while connecting are that. A read timeout is not: Sinas may have
+    # accepted and be running it, and retrying would start the same work
+    # twice while only the attempt whose response arrives gets its chat
+    # recorded, so the run would pay for both and see one.
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
 
 
 class _Sinas:
@@ -250,6 +255,14 @@ class _Sinas:
                 _log.warning("invoke %s failed (%s); retrying in %.0fs",
                              agent, type(exc).__name__, wait)
                 await asyncio.sleep(wait)
+                # Checked after the wait, not before it. Fifteen seconds is
+                # long enough for an operator to cancel inside one, and
+                # without this the loop would start and pay for another model
+                # call on a run already cancelled. `_check_cancel` raises, so
+                # the cancellation surfaces here rather than at whichever
+                # later checkpoint the pipeline reached next.
+                if self.run_id is not None:
+                    await _check_cancel(self.run_id)
         raise AssertionError("unreachable")  # pragma: no cover
 
     async def chat_messages(self, chat_id: str) -> list[dict]:

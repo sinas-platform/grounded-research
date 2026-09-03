@@ -39,10 +39,19 @@ def test_any_5xx_is_transient():
     assert all(qr._is_transient(status(c)) for c in (500, 502, 503, 529))
 
 
-def test_a_connection_failure_is_transient():
-    """It never carries a judgment about the request."""
+def test_a_connect_failure_is_transient():
+    """Connect-side only: it is certain the request never arrived."""
     assert qr._is_transient(httpx.ConnectError("refused"))
-    assert qr._is_transient(httpx.ReadTimeout("slow"))
+    assert qr._is_transient(httpx.ConnectTimeout("no route"))
+
+
+def test_a_read_timeout_is_not_transient():
+    """An invoke is not idempotent. Sinas may have accepted and be running it,
+    so retrying starts the same model work twice while only the attempt whose
+    response arrives has its chat recorded — the run pays for both and sees
+    one."""
+    assert not qr._is_transient(httpx.ReadTimeout("slow"))
+    assert not qr._is_transient(httpx.ReadError("dropped"))
 
 
 def test_a_4xx_is_not():
@@ -171,10 +180,52 @@ async def test_a_4xx_is_not_retried(transport):
 
 
 @pytest.mark.asyncio
-async def test_a_connection_error_is_retried(transport):
+async def test_a_connect_error_is_retried(transport):
     transport["replies"] = [httpx.ConnectError("refused"), ok()]
     assert await qr._Sinas().invoke("sgr/a", "m") == "done"
     assert transport["calls"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_read_timeout_is_not_retried(transport):
+    """The request may already be running server-side."""
+    transport["replies"] = [httpx.ReadTimeout("slow")]
+    with pytest.raises(httpx.ReadTimeout):
+        await qr._Sinas().invoke("sgr/a", "m")
+    assert transport["calls"] == 1
+    assert transport["slept"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_during_the_wait_stops_the_retry(transport, monkeypatch):
+    """Fifteen seconds is long enough for an operator to cancel inside one.
+    Without the check the loop would start and pay for another model call on a
+    run already cancelled."""
+    seen = []
+
+    async def cancelled(run_id):
+        seen.append(run_id)
+        raise RuntimeError("run cancelled")
+
+    monkeypatch.setattr(qr, "_check_cancel", cancelled)
+    transport["replies"] = [boom(500), ok()]
+    with pytest.raises(RuntimeError, match="cancelled"):
+        await qr._Sinas(run_id="r1").invoke("sgr/a", "m")
+    assert transport["calls"] == 1      # no segunda invocacion
+    assert transport["slept"] == [qr.INVOKE_RETRY_WAITS[0]]
+    assert seen == ["r1"]
+
+
+@pytest.mark.asyncio
+async def test_no_run_id_skips_the_cancel_check(transport, monkeypatch):
+    """Unit paths construct the client without a run. There is nothing to
+    cancel, and the check must not be the thing that breaks them."""
+    async def boom_if_called(run_id):
+        raise AssertionError("should not be called")
+
+    monkeypatch.setattr(qr, "_check_cancel", boom_if_called)
+    transport["replies"] = [boom(500), ok()]
+    assert await qr._Sinas().invoke("sgr/a", "m") == "done"
 
 
 @pytest.mark.asyncio

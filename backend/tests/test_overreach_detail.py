@@ -88,31 +88,54 @@ def test_none_values_become_empty_strings():
     assert d[0]["uncovered"] == "" and d[0]["claim"] == ""
 
 
-# -- the contract the existing reader depends on -------------------------------
+# -- both write sites, each pinned to itself -----------------------------------
+#
+# There are two, and they are checked apart. An assertion on the key alone
+# matches either of them, so deleting one payload would leave every assertion
+# green and that site's record unprotected — which is what an earlier version
+# of this file did.
 
 
-def test_the_count_is_not_replaced_by_this():
-    """`answer_regress` reads `round_N.overreaching` by prefix. The detail is
-    added beside the count, never instead of it, so an existing reader that
-    knows nothing about this keeps working."""
+def _runner_source() -> str:
+    """query_runner.py with runs of whitespace collapsed.
+
+    The two calls differ only in their argument, and one of them is wrapped
+    across lines. Matching the argument is what makes each assertion belong to
+    one site; normalising first is what stops a reformat from breaking it.
+    """
     from pathlib import Path
 
     from app.services import obligations
 
     src = Path(obligations.__file__).with_name("query_runner.py").read_text(
         encoding="utf-8")
+    return " ".join(src.split())
+
+
+def test_there_are_exactly_two_write_sites():
+    """The count is the guard the per-site assertions cannot give on their own:
+    it fails if either payload is deleted, and it fails if a third appears
+    without a test of its own."""
+    assert _runner_source().count('"overreaching_claims"') == 2
+
+
+def test_the_validation_round_records_the_detail():
+    """Pinned by its own argument. `verdict.get("overreaching")` appears at
+    this call site and nowhere else."""
+    assert ('"overreaching_claims": _overreach_detail( '
+            'verdict.get("overreaching") or []),') in _runner_source()
+
+
+def test_the_final_sweep_records_the_detail():
+    """The sweep is a second overreach finding of the same kind, 37 across 23
+    stored runs. Recording the subject in one place and not the other is how
+    the mirrored defects in #103 and #106 appeared."""
+    assert '"overreaching_claims": _overreach_detail(f_over)' in _runner_source()
+
+
+def test_the_count_is_not_replaced_by_the_detail():
+    """`answer_regress` reads `round_N.overreaching` by prefix and knows
+    nothing about the detail. Both sites keep their count beside it."""
+    src = _runner_source()
     assert '"overreaching": len(verdict.get("overreaching") or []),' in src
-    assert '"overreaching_claims": _overreach_detail(' in src
-
-
-def test_the_sweep_records_it_too():
-    """The final sweep is a second overreach finding of the same kind, 37
-    across 23 stored runs. Recording the subject in one place and not the
-    other is how the mirrored defects in #103 and #106 appeared."""
-    from pathlib import Path
-
-    from app.services import obligations
-
-    src = Path(obligations.__file__).with_name("query_runner.py").read_text(
-        encoding="utf-8")
-    assert '"overreaching_claims": _overreach_detail(f_over)' in src
+    assert '"overreaching": len(f_over),' in src

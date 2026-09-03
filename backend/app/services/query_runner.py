@@ -918,24 +918,38 @@ def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
 
     Pure: text in, a pair of line numbers out.
     """
-    want = _canonical(quoted)[:200]
-    if len(_canonical(quoted)) < 20:
+    full = _canonical(quoted)
+    if len(full) < 20:
         return None
     rows = [(n, t) for n, t in _numbered_pairs(numbered)
             if line_from - back <= n <= line_to + fwd]
-    best: tuple[int, int] | None = None
-    for i in range(len(rows)):
-        acc: list[str] = []
-        for j in range(i, len(rows)):
-            acc.append(rows[j][1])
-            if want in _canonical(" ".join(acc)):
-                # Narrowest wins, earliest breaking the tie. Taking the first
-                # window that matches would return the earliest start instead,
-                # and a quote sitting on one line would be recorded as the
-                # several lines that happen to precede it.
-                if best is None or (j - i) < (best[1] - best[0]):
-                    best = (i, j)
-                break
+
+    def window(want: str) -> tuple[int, int] | None:
+        best: tuple[int, int] | None = None
+        for i in range(len(rows)):
+            acc: list[str] = []
+            for j in range(i, len(rows)):
+                acc.append(rows[j][1])
+                if want in _canonical(" ".join(acc)):
+                    # Narrowest wins, earliest breaking the tie. Taking the
+                    # first window that matches would return the earliest
+                    # start instead, and a quote sitting on one line would be
+                    # recorded as the several lines that happen to precede it.
+                    if best is None or (j - i) < (best[1] - best[0]):
+                        best = (i, j)
+                    break
+        return best
+
+    # The whole quote first. Verification matches on the first 200 characters
+    # and up to 2,000 are stored, so locating on the prefix alone would end the
+    # span before the text it is meant to cover — a citation shorter than the
+    # passage it cites, which is this function's own defect reappearing at the
+    # other end.
+    #
+    # The prefix is the fallback, not the rule: it is what verification
+    # actually guaranteed, so anything the verifier accepted stays locatable
+    # and the span never falls back to coordinates already called approximate.
+    best = window(full) or window(full[:200])
     return (rows[best[0]][0], rows[best[1]][0]) if best else None
 
 

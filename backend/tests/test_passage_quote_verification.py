@@ -401,3 +401,39 @@ def test_what_the_verifier_rejects_is_not_located():
     ]:
         assert not _verify_passage(SOURCE, lf, lt, q)
         assert _locate_passage(SOURCE, lf, lt, q) is None
+
+
+# -- a long quote gets its whole span ------------------------------------------
+#
+# Verification matches on the first 200 canonical characters and up to 2,000
+# are stored. Locating on the prefix alone ended the span before the text it
+# was meant to cover: a citation shorter than the passage it cites, which is
+# what the locator exists to prevent, reappearing at the other end.
+
+
+LONG = numbered(*[f"Paragraph {i}. " + "the authority shall record the matter "
+                  f"in the file as item {i} of the annex." for i in range(1, 9)])
+
+
+def test_a_quote_longer_than_the_match_prefix_spans_all_its_lines():
+    """Four lines of quote, well past 200 characters. The span has to reach
+    the fourth, not stop at whichever line the first 200 end on."""
+    quote = " ".join(row.split(": ", 1)[1] for row in LONG.splitlines()[1:5])
+    assert len(_canonical(quote)) > 200
+    assert _locate_passage(LONG, 2, 5, quote) == (2, 5)
+
+
+def test_the_prefix_is_only_a_fallback():
+    """When the whole quote is not inside the tolerance but its first 200
+    characters are, the span still lands — verification accepted on that
+    prefix, so the locator must not come back empty and drop to the reported
+    coordinates it just called approximate."""
+    quote = " ".join(row.split(": ", 1)[1] for row in LONG.splitlines()[1:5])
+    assert _verify_passage(LONG, 2, 3, quote)
+    assert _locate_passage(LONG, 2, 3, quote) is not None
+
+
+def test_a_short_quote_is_unaffected():
+    """Under 200 characters the two paths are the same search."""
+    assert _locate_passage(
+        SOURCE, 2, 3, "The authority may not rely on a document") == (1, 1)

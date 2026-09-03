@@ -1035,8 +1035,25 @@ async def _extract_passages(
     so the drafter can only ever see text that exists."""
     sem = asyncio.Semaphore(4)
     started = time.monotonic()
+    started_iso = _iso()
+    # Decided once, on the way in, and reused for both writes. Computing it
+    # again at the end would count the key this one just wrote and number the
+    # cycle twice.
+    cycle = (await _next_cycle_key(run_id, "extract", "cycle")
+             if run_id is not None else "cycle_1")
     if run_id is not None:
-        await _tele(run_id, "extract", started=_iso())
+        # Written before the work so an extraction that raises still leaves a
+        # cycle behind. The final write replaces the cycle with a superset.
+        #
+        # `started` stays a stage-level keyword beside it. Every stage records
+        # when it started, when it ended and how long it took — a contract
+        # written after a 52-minute run whose wall clock could not be
+        # attributed to any stage — and it is checked by reading this call's
+        # keywords, so it has to be one. The stage-level copy answers where
+        # the time went; the copy inside the cycle answers what each
+        # extraction did.
+        await _tele(run_id, "extract", started=started_iso,
+                    **{cycle: {"started": started_iso}})
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
@@ -1157,23 +1174,39 @@ async def _extract_passages(
         # over the cap is cut before the model sees any of it, so a thin answer
         # can be a corpus that never arrived rather than a corpus with nothing
         # to say. These say which.
+        #
+        # All of it now sits under `cycle_N`. A run extracts once for the
+        # draft and again for every revision cycle that carries a point, and
+        # this dict was written whole each time, so `_tele` replaced it and
+        # only the last extraction survived. Every number here was affected,
+        # not one of them: reading a run's `documents_read` gave whichever
+        # extraction happened to go last, and comparing two runs could compare
+        # a draft extraction against a revision one without anything saying
+        # so. Same shape as round_N and revision_N, and answer_regress already
+        # reads that family by prefix.
         await _tele(
             run_id, "extract",
-            claims=len(out),
-            documents_read=sum(r.get("read", 0) for r in out),
-            passages_proposed=sum(r.get("proposed", 0) for r in out),
-            passages_verified=sum(len(r.get("passages") or []) for r in out),
-            extraction_errors=len(errors),
-            documents_truncated=len(cut_by_file),
-            characters_dropped=sum(
-                t["dropped_chars"] for t in cut_by_file.values()),
-            lines_dropped=sum(t["dropped_lines"] for t in cut_by_file.values()),
-            truncated_documents=sorted(
-                cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
-            **_chunk_telemetry(out),
             completed=_iso(),
             elapsed_s=round(time.monotonic() - started, 1),
-        )
+            **{cycle: {
+                "started": started_iso,
+                "claims": len(out),
+                "documents_read": sum(r.get("read", 0) for r in out),
+                "passages_proposed": sum(r.get("proposed", 0) for r in out),
+                "passages_verified": sum(
+                    len(r.get("passages") or []) for r in out),
+                "extraction_errors": len(errors),
+                "documents_truncated": len(cut_by_file),
+                "characters_dropped": sum(
+                    t["dropped_chars"] for t in cut_by_file.values()),
+                "lines_dropped": sum(
+                    t["dropped_lines"] for t in cut_by_file.values()),
+                "truncated_documents": sorted(
+                    cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
+                **_chunk_telemetry(out),
+                "completed": _iso(),
+                "elapsed_s": round(time.monotonic() - started, 1),
+            }})
     return out
 
 

@@ -130,3 +130,57 @@ def test_a_legacy_single_key_run_starts_at_one():
 def test_the_same_helper_serves_another_prefix():
     entry = {"revision_1": {}, "revision_2": {}}
     assert _cycle_key(entry, "sweep") == "sweep_1"
+
+
+# -- the same numbering, applied to extraction --------------------------------
+#
+# `extract` had the defect this helper exists to remove, and worse: a run
+# extracts once for the draft and again for every revision cycle carrying a
+# point, and the whole dict was rewritten each time. Every number in it read
+# as whichever extraction went last, which is how a draft extraction came to
+# be compared against a revision one.
+
+
+def test_an_untouched_extract_stage_starts_at_one():
+    assert _cycle_key({}, "cycle") == "cycle_1"
+
+
+def test_a_run_recorded_before_the_numbering_starts_at_one():
+    """The edge that mattered for revision, in the shape extraction has: a
+    stage recorded before this existed carries its counters flat, and none of
+    them is a cycle. Numbering must start at 1 and leave the inherited keys
+    where they are, not read them as a cycle already recorded."""
+    legacy = {
+        "claims": 12, "documents_read": 43, "passages_proposed": 31,
+        "passages_verified": 25, "extraction_errors": 0,
+        "documents_truncated": 5, "characters_dropped": 118420,
+        "lines_dropped": 0, "truncated_documents": [], "chunks_total": 72,
+        "documents_chunked": 5, "extra_extraction_calls": 3,
+        "started": "2026-09-03T09:56:50Z", "completed": "2026-09-03T09:57:04Z",
+        "elapsed_s": 13.6,
+    }
+    assert _cycle_key(legacy, "cycle") == "cycle_1"
+
+
+def test_extraction_cycles_number_in_order():
+    seen = {"started": "t"}
+    for expected in ("cycle_1", "cycle_2", "cycle_3"):
+        key = _cycle_key(seen, "cycle")
+        assert key == expected
+        seen[key] = {}
+
+
+def test_a_legacy_stage_that_later_gains_cycles_keeps_counting_from_them():
+    """A resumed run can carry both: flat counters from before and numbered
+    cycles from after. Only the numbered ones count."""
+    mixed = {"claims": 12, "documents_read": 43, "cycle_1": {}, "cycle_2": {}}
+    assert _cycle_key(mixed, "cycle") == "cycle_3"
+
+
+def test_the_two_prefixes_do_not_count_each_other():
+    """`revision_N` lives in the validate stage and `cycle_N` in extract, but
+    the helper is one function and a shared counter would be a silent gap in
+    whichever it numbered second."""
+    entry = {"revision_1": {}, "revision_2": {}, "cycle_1": {}}
+    assert _cycle_key(entry, "cycle") == "cycle_2"
+    assert _cycle_key(entry, "revision") == "revision_3"

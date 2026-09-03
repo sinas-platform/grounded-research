@@ -882,9 +882,30 @@ def _canonical(text: str) -> str:
     return re.sub(r"\s+", " ", folded).strip().lower()
 
 
-def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) -> bool:
+def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str,
+                    back: int = 2, fwd: int = 2) -> bool:
     """Deterministic anti-hallucination: the quoted text must actually occur
-    in the claimed line range (containment, normalized by _canonical)."""
+    in the claimed line range (containment, normalized by _canonical).
+
+    The range is widened by a couple of lines at both ends. The extractor
+    reports where it believes the quote sits, and that estimate is off by a
+    line or two in either direction; nothing about the error is directional.
+    It used to be widened forward only — `line_from <= n <= line_to + 2` —
+    which arrived as a passenger in the commit that built extract drafting and
+    was never argued for. `_anchors_for` assumes the opposite three lines
+    away, taking `lines[0] - 3` when it builds the reviser's windows, so the
+    codebase already treats text before the matched line as part of it.
+
+    `back` is a parameter so the caller can re-run a passage under the old
+    asymmetric rule and record which ones only the symmetry recovered. That is
+    the measurement the change was made without: rejected passages were never
+    persisted, so the size of the loss could only be estimated from a sample
+    of five.
+
+    Widening cannot admit a fabrication. The quote still has to occur
+    verbatim, in the chunk the model was shown; two more lines of real
+    document is more text to match against, not weaker matching.
+    """
     want = _canonical(quoted)
     if len(want) < 20:
         return False
@@ -895,9 +916,32 @@ def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) ->
             n = int(num)
         except ValueError:
             continue
-        if line_from <= n <= line_to + 2:
+        if line_from - back <= n <= line_to + fwd:
             span_lines.append(rest)
     return want[:200] in _canonical(" ".join(span_lines))
+
+
+def _reject_reason(shown: dict, fn: str, lf: int | None, lt: int | None,
+                   quoted: str) -> str | None:
+    """Why this proposed passage was not kept, or None if it was.
+
+    The check exists to stop a fabricated quote and it rejects 1,043 of 3,933
+    proposed passages across the stored runs — 27% — with nothing recorded but
+    the two counts. A gap that size is worth a reason each: a quote the model
+    invented and a quote it copied faithfully while misreporting its line
+    number are different failures, and only one of them is the check working.
+
+    Pure: dicts and strings in, a string or None out.
+    """
+    if fn not in shown:
+        return "document not among those shown"
+    if lf is None or lt is None:
+        return "line range not readable"
+    if len(_canonical(quoted)) < 20:
+        return "quote under the length floor"
+    if not _verify_passage(shown[fn]["text"], lf, lt, quoted):
+        return "not found in the claimed lines"
+    return None
 
 
 async def _content_anchors(
@@ -1057,6 +1101,8 @@ async def _extract_passages(
         ]
 
         good: list[dict] = []
+        rejected: list[dict] = []
+        recovered = 0
         proposed_total = 0
         last_error: str | None = None
         for k in range(rounds):
@@ -1110,24 +1156,35 @@ async def _extract_passages(
                 try:
                     lf, lt = int(p.get("line_from")), int(p.get("line_to"))
                 except (TypeError, ValueError):
-                    continue
+                    lf = lt = None
+                text = str(p.get("text") or "")
                 # Verified against the chunk the model was actually shown, not
                 # the whole document: a quote it could not have seen is not
                 # grounded, however true it happens to be.
-                if fn in shown and _verify_passage(
-                    shown[fn]["text"], lf, lt, str(p.get("text") or "")
-                ):
-                    good.append({"filename": fn, "line_from": lf, "line_to": lt,
-                                 "text": str(p.get("text"))[:2000]})
+                why = _reject_reason(shown, fn, lf, lt, text)
+                if why is not None:
+                    rejected.append({"filename": fn, "line_from": lf,
+                                     "line_to": lt, "reason": why,
+                                     "quote": text[:200]})
+                    continue
+                # Kept, but would the old forward-only rule have kept it? The
+                # answer is the whole point of making the range symmetric, and
+                # it can only be asked at the moment the passage is judged.
+                if not _verify_passage(shown[fn]["text"], lf, lt, text, back=0):
+                    recovered += 1
+                good.append({"filename": fn, "line_from": lf, "line_to": lt,
+                             "text": text[:2000]})
 
         # Only a failure with nothing to show for it is an error: one bad round
         # out of several still leaves the claim grounded.
         if last_error and not good:
             return {"n": c.get("n"), "passages": [], "proposed": proposed_total,
                     "read": len(docs), "error": last_error,
+                    "rejected": rejected, "recovered_by_symmetry": recovered,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": proposed_total,
+                "rejected": rejected, "recovered_by_symmetry": recovered,
                 "read": len(docs), "truncated": truncated, "chunked": chunked}
 
     out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
@@ -1163,6 +1220,17 @@ async def _extract_passages(
             documents_read=sum(r.get("read", 0) for r in out),
             passages_proposed=sum(r.get("proposed", 0) for r in out),
             passages_verified=sum(len(r.get("passages") or []) for r in out),
+            # The 27% that never reach the drafter, with a reason each. Capped
+            # because this is a JSONB column a person reads, not a log: the
+            # count is exact, the sample is for looking at.
+            passages_rejected=sum(len(r.get("rejected") or []) for r in out),
+            rejected_sample=[
+                x for r in out for x in (r.get("rejected") or [])][:20],
+            # Passages the symmetric range kept that the old forward-only one
+            # would have thrown away. This is what the change recovers, counted
+            # rather than estimated from a sample of five.
+            recovered_by_symmetry=sum(
+                r.get("recovered_by_symmetry", 0) for r in out),
             extraction_errors=len(errors),
             documents_truncated=len(cut_by_file),
             characters_dropped=sum(

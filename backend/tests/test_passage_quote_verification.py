@@ -14,7 +14,11 @@ Run from the backend directory:
 `python -m pytest tests/test_passage_quote_verification.py`
 """
 
-from app.services.query_runner import _canonical, _verify_passage
+from app.services.query_runner import (
+    _canonical,
+    _reject_reason,
+    _verify_passage,
+)
 
 # Every non-ASCII character here is written as an escape, and this file is
 # ASCII. These tests are ABOUT character identity: a source file that reached
@@ -220,3 +224,100 @@ def test_canonical_does_not_join_words_across_a_dash():
 def test_canonical_tolerates_no_text():
     assert _canonical(None) == ""
     assert _canonical("") == ""
+
+
+# -- the range is symmetric ---------------------------------------------------
+#
+# It used to be widened forward only. The extractor reports where it believes
+# a quote sits and is off by a line or two either way; nothing about that error
+# is directional. The forward-only rule arrived as a passenger in the commit
+# that built extract drafting and was never argued for, while `_anchors_for`
+# assumes the opposite three lines away, taking `lines[0] - 3` for its windows.
+
+
+def test_a_quote_starting_a_line_early_verifies():
+    """The case the old rule threw away: the text is verbatim, in the document,
+    and the reported start is one line late."""
+    assert _verify_passage(SOURCE, 2, 3, "The authority may not rely on a document")
+
+
+def test_a_quote_starting_two_lines_early_verifies():
+    assert _verify_passage(SOURCE, 3, 4, "The authority may not rely on a document")
+
+
+def test_the_old_rule_rejected_exactly_that():
+    """Pinned so the asymmetry cannot come back unnoticed: with back=0 the
+    same passage fails, which is what `recovered_by_symmetry` counts."""
+    assert not _verify_passage(
+        SOURCE, 2, 3, "The authority may not rely on a document", back=0)
+
+
+def test_forward_slack_is_unchanged():
+    assert _verify_passage(SOURCE, 1, 1, "party concerned, and the")
+
+
+def test_three_lines_early_still_fails():
+    """Widened, not opened. Two lines each way is the tolerance; a quote from
+    somewhere else in the document is still not evidence for this span."""
+    assert not _verify_passage(SOURCE, 4, 5, "The authority may not rely on a document")
+
+
+def test_provenance_still_holds_at_distance():
+    """The guarantee the check exists for: the right words in the wrong place
+    are not evidence for a claim bound to that place."""
+    assert not _verify_passage(SOURCE, 1, 2, "shall be noted in paragraph 42")
+
+
+def test_symmetry_does_not_admit_a_fabrication():
+    """Two more lines of real document is more text to match against, not
+    weaker matching."""
+    assert not _verify_passage(
+        SOURCE, 2, 3, "The undertaking is entitled to compensation for the delay")
+
+
+# -- why a passage was rejected ------------------------------------------------
+#
+# 1,043 of 3,933 proposed passages were rejected across the stored runs with
+# nothing recorded but the two counts. A quote the model invented and a quote
+# it copied faithfully while misreporting its line number are different
+# failures, and only one of them is the check working.
+
+
+def shown_one() -> dict:
+    return {"a.md": {"text": SOURCE, "strategy": "whole"}}
+
+
+def test_a_kept_passage_has_no_reason():
+    assert _reject_reason(
+        shown_one(), "a.md", 1, 2, "The authority may not rely on a document") is None
+
+
+def test_a_document_not_shown_says_so():
+    """The model can name a file it was never given; that is not the same
+    failure as quoting one it was."""
+    assert _reject_reason(shown_one(), "other.md", 1, 2, "x" * 40) \
+        == "document not among those shown"
+
+
+def test_an_unreadable_line_range_says_so():
+    assert _reject_reason(shown_one(), "a.md", None, None, "x" * 40) \
+        == "line range not readable"
+
+
+def test_a_quote_under_the_floor_says_so():
+    assert _reject_reason(shown_one(), "a.md", 1, 2, "a rule") \
+        == "quote under the length floor"
+
+
+def test_a_quote_not_in_the_lines_says_so():
+    """The interesting one: the text may be real and elsewhere, or invented.
+    Both land here, which is why the sample is kept alongside the count."""
+    assert _reject_reason(shown_one(), "a.md", 1, 2, "shall be noted in paragraph 42") \
+        == "not found in the claimed lines"
+
+
+def test_the_reasons_are_checked_in_a_useful_order():
+    """A passage that is both from an unshown document and too short reports
+    the document, because that is the actionable half."""
+    assert _reject_reason(shown_one(), "other.md", 1, 2, "short") \
+        == "document not among those shown"

@@ -1962,6 +1962,32 @@ def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
     )
 
 
+def _overreach_detail(verdicts: list[dict]) -> list[dict]:
+    """What the coverage check objected to, small enough to store.
+
+    The check judges whether the union of a claim's spans carries the whole
+    claim, and it works: 384 claims marked across 3,777 judged. But its
+    verdicts were the one kind `validate_answer_evidence` returns without
+    persisting — the per-span ones land in `claim_evidence.validated` and
+    `validation_reasoning`, while a coverage verdict is separated off before
+    that and lives only long enough to build the reviser's feedback. Only its
+    count reached telemetry, so 15 answers published with overreach standing
+    in the round that decided them and nothing records which claim it was.
+
+    The claim text is kept beside the sequence deliberately. Revision narrows
+    an overreaching claim to its supported core, so reading the claim back by
+    sequence after the run tells you what it became, not what was objected to.
+
+    Pure: dicts in, dicts out.
+    """
+    return [
+        {"seq": v.get("claim_sequence"),
+         "uncovered": str(v.get("uncovered") or "")[:300],
+         "claim": str(v.get("claim_text") or "")[:300]}
+        for v in verdicts
+    ]
+
+
 async def _pre_publish_sweep(
     run_id: uuid.UUID, sinas: _Sinas, caller, answer_id: uuid.UUID,
     question: str,
@@ -1989,10 +2015,15 @@ async def _pre_publish_sweep(
             s2, caller, answer_id, pending_only=False,
             run_id=run_id, final=True)
     f_over = fv.get("overreaching") or []
+    # Both writes, not one. The sweep is a second overreach finding of the
+    # same kind — 37 across 23 stored runs — and recording the subject in one
+    # place and not the other is how the mirrored defects in #103 and #106
+    # appeared: two writes of the same fact that drift apart.
     await _tele(run_id, "validate", final_sweeps=sweeps + 1,
                 final_sweep_result={
                     "failed": len(fv["failed"]),
-                    "overreaching": len(f_over)})
+                    "overreaching": len(f_over),
+                    "overreaching_claims": _overreach_detail(f_over)})
     if not fv["failed"] and not f_over:
         return True
     fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
@@ -2492,6 +2523,11 @@ async def _stage_validate_publish(
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
             "overreaching": len(verdict.get("overreaching") or []),
+            # The count stays where it is: answer_regress reads it by prefix.
+            # This is the same finding with its subject attached, so a run can
+            # be asked which claim was objected to and on what ground.
+            "overreaching_claims": _overreach_detail(
+                verdict.get("overreaching") or []),
         }})
         # A claim whose every span passes can still assert more than those
         # spans establish — "the whole period" on passages about a second

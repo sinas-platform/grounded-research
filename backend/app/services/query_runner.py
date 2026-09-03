@@ -1121,6 +1121,33 @@ def _chunk_telemetry(out: list[dict]) -> dict:
     }
 
 
+def _shown_for_round(
+    docs: dict[str, list[dict]], k: int, owed: str | None = None
+) -> dict[str, dict]:
+    """The chunk of each anchored document to show in round k.
+
+    Round k shows chunk k, so a document that fits in a single chunk is
+    visible in round 0 and absent from every round after it, while a long one
+    stays for all of them. Measured on a real cycle: an owed ECtHR ruling of
+    18,706 characters was shown once, beside chunk 0 of a 2.8 MB decision that
+    was shown four times.
+
+    The owed document is what the cycle exists to settle, so it is pinned into
+    every round, cycling its own chunks when it has several. Order follows
+    `docs`, which puts it at the head of the blob, and it is placed in the same
+    pass rather than appended so it keeps that position.
+
+    Pure: dicts in, dict out.
+    """
+    shown: dict[str, dict] = {}
+    for fn, chunks in docs.items():
+        if k < len(chunks):
+            shown[fn] = chunks[k]
+        elif fn == owed and chunks:
+            shown[fn] = chunks[k % len(chunks)]
+    return shown
+
+
 async def _extract_passages(
     sinas: _Sinas, plan_claims: list[dict], run_id: uuid.UUID | None = None
 ) -> list[dict]:
@@ -1152,6 +1179,7 @@ async def _extract_passages(
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
+        owed = str(c.get("owed") or "") or None
         docs, truncated = await _fetch_numbered(anchors)
         if not docs:
             return {"n": c.get("n"), "passages": [], "proposed": 0, "read": 0,
@@ -1169,10 +1197,12 @@ async def _extract_passages(
         ]
 
         good: list[dict] = []
+        seen_spans: set[tuple[str, int, int]] = set()
+        owed_empty = False
         proposed_total = 0
         last_error: str | None = None
         for k in range(rounds):
-            shown = {fn: ch[k] for fn, ch in docs.items() if k < len(ch)}
+            shown = _shown_for_round(docs, k, owed)
             if not shown:
                 continue
             # The header states the range and the whole, so the model can tell
@@ -1193,6 +1223,21 @@ async def _extract_passages(
                         "that bear on: " + str(c.get("establishes") or "") + "\n"
                         + (("Focus: " + str(c.get("hint")) + "\n")
                            if c.get("hint") else "")
+                        # Naming it is what makes pinning it useful: the model
+                        # can only weigh a document it knows is the point of
+                        # the call. The refusal is offered in the same breath
+                        # and given somewhere to go in the reply, because an
+                        # instruction to produce a passage with no expressible
+                        # alternative is an instruction to strain for one, and
+                        # a strained quote from the real document passes
+                        # verification exactly as a faithful one does.
+                        + (f"One document below is owed: {owed}. Settling that "
+                           "debt is what this call is for, so a passage from it "
+                           "is what is wanted. If it holds nothing bearing on "
+                           "the objective, take nothing from it and set "
+                           '"owed_has_nothing": true — that is a complete '
+                           "answer here, and a stretched quote is not.\n"
+                           if owed and owed in shown else "")
                         + ("Some documents are shown as a numbered section of a "
                            "longer text, marked with the line range in its header. "
                            "Judge only what is in front of you: silence in a "
@@ -1200,7 +1245,10 @@ async def _extract_passages(
                            if partial else "")
                         + 'Reply ONLY JSON: {"passages": [{"filename": "...", '
                         '"line_from": <int>, "line_to": <int>, "text": "<verbatim '
-                        'quote>"}]} — max 4 passages, each 2-25 lines, text EXACTLY '
+                        'quote>"}]'
+                        + (', "owed_has_nothing": true|false'
+                           if owed and owed in shown else "")
+                        + '} — max 4 passages, each 2-25 lines, text EXACTLY '
                         "as printed (without the line-number prefixes).\n\n"
                         + doc_blob,
                     )
@@ -1222,6 +1270,8 @@ async def _extract_passages(
                     # tell an empty document from an unreachable one.
                     last_error = str(exc)[:200]
                     continue
+            if data.get("owed_has_nothing") is True:
+                owed_empty = True
             proposed = (data.get("passages") or [])[:4]
             proposed_total += len(proposed)
             for p in proposed:
@@ -1233,9 +1283,16 @@ async def _extract_passages(
                 # Verified against the chunk the model was actually shown, not
                 # the whole document: a quote it could not have seen is not
                 # grounded, however true it happens to be.
+                # The owed document is now shown every round, so the same
+                # span can come back more than once. Kept once: a repeated
+                # passage is not more evidence, and the drafter would read it
+                # as two.
+                if (fn, lf, lt) in seen_spans:
+                    continue
                 if fn in shown and _verify_passage(
                     shown[fn]["text"], lf, lt, str(p.get("text") or "")
                 ):
+                    seen_spans.add((fn, lf, lt))
                     good.append({"filename": fn, "line_from": lf, "line_to": lt,
                                  "text": str(p.get("text"))[:2000]})
 
@@ -1247,6 +1304,7 @@ async def _extract_passages(
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": proposed_total,
+                "owed": owed, "owed_empty": owed_empty,
                 "read": len(docs), "truncated": truncated, "chunked": chunked}
 
     out = list(await asyncio.gather(*(one(c) for c in plan_claims)))
@@ -1297,6 +1355,26 @@ async def _extract_passages(
                 "passages_proposed": sum(r.get("proposed", 0) for r in out),
                 "passages_verified": sum(
                     len(r.get("passages") or []) for r in out),
+                # What the owed documents did. `owed_declared_empty` is
+                # the extractor using the refusal rather than straining, and
+                # is the only signal that separates "the document does not
+                # bear on this" from "nothing was found", which the ledger
+                # cannot otherwise tell apart.
+                "owed_points": sum(1 for r in out if r.get("owed")),
+                "owed_with_passage": sum(
+                    1 for r in out if r.get("owed")
+                    and any(p["filename"] == r["owed"]
+                            for p in (r.get("passages") or []))),
+                # Only when the refusal stood. A multi-chunk owed document is
+                # shown once per round, so one round can declare its chunk
+                # empty while another returns a verified passage from a
+                # different one. Counting the declaration on its own would put
+                # the same point in both this and `owed_with_passage`, which
+                # is the distinction the field exists to draw.
+                "owed_declared_empty": sum(
+                    1 for r in out if r.get("owed_empty") and not any(
+                        p["filename"] == r.get("owed")
+                        for p in (r.get("passages") or []))),
                 "extraction_errors": len(errors),
                 "documents_truncated": len(cut_by_file),
                 "characters_dropped": sum(
@@ -2474,8 +2552,9 @@ async def _revise_answer(
             # An obligated point names its document; the term-scan may rank
             # it low or miss it. The debt is to THAT document, so it leads.
             ob = re.search(r"\[obligated document: ([^\]]+)\]", pt)
-            if ob:
-                anchors = [ob.group(1)] + [a for a in anchors if a != ob.group(1)]
+            owed = ob.group(1) if ob else None
+            if owed:
+                anchors = [owed] + [a for a in anchors if a != owed]
             # The term scan already KNOWS where the matching lines sit.
             # Hand the reviser those windows directly — text copied from
             # the stored document, so the quotes are correct by
@@ -2500,7 +2579,15 @@ async def _revise_answer(
                     windows.append(
                         (fn, lf, lt, "\n".join(doc_lines[lf - 1:lt])[:1500]))
             plan.append({
-                "n": i, "establishes": pt[:600], "anchors": anchors,
+                # The debt travels as a field. It used to reach the extractor
+                # only as a marker inside this sentence, which is truncated at
+                # 600 characters: a 400-character note plus a 130-character
+                # filename left 48 characters of margin, and lengthening
+                # either would have dropped the marker with nothing failing
+                # loudly. Raising the number moves that cliff rather than
+                # removing it. The sentence keeps the note alone.
+                "n": i, "establishes": (pt[:ob.start()] if ob else pt).strip()[:600],
+                "owed": owed, "anchors": anchors,
                 "hint": ("extract the passage that states this; a case "
                          "caption or party list is not a holding"
                          + (f". Matching terms sit at: {near}" if near else ""))})

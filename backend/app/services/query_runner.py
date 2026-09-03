@@ -1447,6 +1447,7 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
 async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
+    unaccounted: list[str] | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -1472,6 +1473,15 @@ async def _record_gate_cycle(
     False after feeding a repair cycle and the caller re-enters the validate
     loop, which is what makes the staleness reachable rather than theoretical.
 
+    `accounted` on a part is answer-scoped, not part-scoped, and the same
+    value is written onto every part of the cycle. The gate names unused
+    sources as `"<filename>: <why>"` with no reference to a part, so nothing
+    says which limb of the question a named source bears on; a per-part claim
+    would be invented here rather than read. It is written onto the parts
+    anyway because that is where it has to be read against `covered`: a row
+    saying `covered: true, accounted: false` is the contradiction this exists
+    to make legible, and `gate_unaccounted` beside it names the documents.
+
     A key that did not happen is written null rather than omitted, and that
     has a consequence worth stating: once this ships,
     `telemetry->'validate' ? 'gate_unparseable'` is true for every run,
@@ -1479,7 +1489,8 @@ async def _record_gate_cycle(
     consumer in the tree reads them that way already.
     """
     await _tele(run_id, "validate", gate_parts=parts,
-                gate_reparse=reparse, gate_unparseable=unparseable)
+                gate_reparse=reparse, gate_unparseable=unparseable,
+                gate_unaccounted=unaccounted)
 
 
 def _gate_json(reply: str) -> dict:
@@ -1795,29 +1806,11 @@ async def _gate_answer(
         for x in parts if not x.get("covered")
     ]
     uncovered = [u for u in uncovered if u]
-    # The decomposition the check ran on, recorded because nothing else
-    # carries it. `uncovered` names the parts the gate judged and failed; it
-    # says nothing about the parts the gate never wrote down, and a part that
-    # was never written down cannot be uncovered. So an answer that leaves a
-    # limb of the question untouched publishes with an empty gate_redraft and
-    # looks, in telemetry, exactly like an answer that covers everything.
-    #
-    # This changes none of that. It makes the difference countable, which has
-    # to come first: whether the decomposition needs constraining depends on
-    # how often it is thin, and there is currently no way to ask. Truncation
-    # was counted for a release before the chunking that answered it was
-    # written, for the same reason.
-    #
-    # What is stored is the list after the isinstance filter above, which is
-    # what the check actually judged, not the raw field of the reply. And it
-    # is overwritten per cycle, like gate_redraft and gate_issues beside it,
-    # so the three line up: what survives is the verdict that decided the run.
-    await _record_gate_cycle(run_id, reparse=reparse, parts=[
-        {"asks": str(x.get("asks") or "")[:300],
-         "covered": bool(x.get("covered")),
-         "gap": str(x.get("gap") or "")[:300]}
-        for x in parts
-    ])
+    # The decomposition is recorded further down, after the obligation
+    # ledger has been consulted, because a part now carries whether the
+    # answer accounted for the sources the gate named as well as whether the
+    # gate called it covered. Recording it here would mean two writes per
+    # cycle to keep in step, which is the shape #106 removed.
 
     issues: list[str] = []
     # Correctness defects make the answer wrong or incoherent, and must be
@@ -1896,6 +1889,47 @@ async def _gate_answer(
             "nor waived returns every round."
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
+
+    # What the answer has not accounted for, decided from the ledger rather
+    # than asked of the model. The gate is given two jobs in one call and
+    # nothing ties its answers together: it judges each part covered, and it
+    # separately names sources that bear on those parts and sit uncited. Its
+    # own prompt permits both at once — "a part can be covered and still be
+    # poorly served" — and `publishable` reads only the first, so a source the
+    # gate itself called decisive never affected whether the question counted
+    # as answered.
+    #
+    # Measured over eleven runs with a decomposition recorded: in the cycle
+    # that decided publication, 29 of 29 parts were covered, and ten of the
+    # eleven published with at least one named source neither cited nor
+    # waived. That is not the run's whole history — one run did return an
+    # uncovered part in an earlier cycle before converging — but it is the
+    # verdict each run published on.
+    #
+    # The tie is answer-scoped because it cannot honestly be finer: the gate
+    # names sources without saying which part each bears on.
+    unaccounted = await obligations.unaccounted(run_id, answer_id)
+    if unaccounted:
+        # Ahead of the per-source lines, because those read as "a better
+        # source exists" and the reviser is told to add a claim only where the
+        # answer fails to address the question. It has just been told it does
+        # not fail. This says what the per-source lines do not: while a named
+        # source is unaccounted for, the question is not yet fully answered,
+        # so writing a claim that cites one is in scope.
+        issues.insert(0, (
+            f"{len(unaccounted)} source(s) this review named as bearing on "
+            "what the question asks are neither cited nor waived, so the "
+            "answer does not yet account for them and the question is not "
+            "fully answered. Adding a claim that cites one is in scope. "
+            "Waiving it with a rationale you can only give after reading its "
+            "passages is in scope. Leaving it untouched is not."))
+    await _record_gate_cycle(
+        run_id, reparse=reparse, unaccounted=unaccounted,
+        parts=[{"asks": str(x.get("asks") or "")[:300],
+                "covered": bool(x.get("covered")),
+                "accounted": not unaccounted,
+                "gap": str(x.get("gap") or "")[:300]}
+               for x in parts])
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

@@ -156,3 +156,25 @@ def test_repeated_spans_are_kept_once():
     """The owed document is shown every round, so the same span can come back
     more than once; the drafter would read two copies as two sources."""
     assert "seen_spans" in SRC
+
+
+# -- the refusal only counts when it stood --------------------------------------
+#
+# A multi-chunk owed document is shown once per round, so one round can declare
+# its chunk empty while another returns a verified passage from a different
+# one. Pinning it into every round — what this change does — is what makes that
+# reachable, and counting the declaration on its own would put the same point
+# in both `owed_declared_empty` and `owed_with_passage`.
+
+
+def test_the_refusal_is_counted_only_when_no_passage_came_back():
+    assert 'if r.get("owed_empty") and not any(' in SRC
+
+
+def test_the_two_counters_cannot_both_claim_one_point():
+    """`owed_with_passage` and `owed_declared_empty` are read as a partition of
+    the owed points; a point in both would make the diagnostic say two opposite
+    things about the same document."""
+    assert 'owed_with_passage=sum(' in SRC
+    assert 'owed_declared_empty=sum(' in SRC
+    assert 'p["filename"] == r.get("owed")' in SRC

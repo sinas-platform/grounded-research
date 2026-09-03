@@ -1230,7 +1230,18 @@ async def _extract_passages(
             owed_with_passage=sum(
                 1 for r in out if r.get("owed")
                 and any(p["filename"] == r["owed"] for p in (r.get("passages") or []))),
-            owed_declared_empty=sum(1 for r in out if r.get("owed_empty")),
+            # Only when the refusal stood. A multi-chunk owed document is
+            # shown once per round, so one round can declare its chunk empty
+            # while another returns a verified passage from a different one —
+            # and pinning it into every round, which is what this change does,
+            # is exactly what makes that reachable. Counting the declaration
+            # on its own would put the same point in both this and
+            # `owed_with_passage`, which is the distinction the field exists
+            # to draw.
+            owed_declared_empty=sum(
+                1 for r in out if r.get("owed_empty") and not any(
+                    p["filename"] == r.get("owed")
+                    for p in (r.get("passages") or []))),
             extraction_errors=len(errors),
             documents_truncated=len(cut_by_file),
             characters_dropped=sum(

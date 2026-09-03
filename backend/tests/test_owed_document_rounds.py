@@ -137,8 +137,11 @@ def test_the_refusal_is_offered_and_has_somewhere_to_go():
 def test_the_refusal_is_counted():
     """It is the only signal separating "this document does not bear on the
     objective" from "nothing was found"."""
-    assert "owed_declared_empty=" in SRC
-    assert "owed_with_passage=" in SRC
+    # Named without the punctuation that carries them: they are keyword
+    # arguments here and dict entries once the per-cycle numbering in #109
+    # lands, and the counter existing is the thing worth pinning.
+    assert "owed_declared_empty" in SRC
+    assert "owed_with_passage" in SRC
 
 
 def test_the_debt_travels_as_a_field_not_inside_the_truncated_sentence():

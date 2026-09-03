@@ -977,22 +977,130 @@ def _canonical(text: str) -> str:
     return re.sub(r"\s+", " ", folded).strip().lower()
 
 
-def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str) -> bool:
-    """Deterministic anti-hallucination: the quoted text must actually occur
-    in the claimed line range (containment, normalized by _canonical)."""
-    want = _canonical(quoted)
-    if len(want) < 20:
-        return False
-    span_lines = []
+def _numbered_pairs(numbered: str) -> list[tuple[int, str]]:
+    """The numbered block as (line number, text) pairs, unnumbered lines
+    dropped. Shared by the verifier and the locator so the two can never
+    disagree about what a line is."""
+    out = []
     for line in numbered.splitlines():
         num, _, rest = line.partition(": ")
         try:
-            n = int(num)
+            out.append((int(num), rest))
         except ValueError:
             continue
-        if line_from <= n <= line_to + 2:
-            span_lines.append(rest)
+    return out
+
+
+def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
+                    back: int = 2, fwd: int = 2) -> tuple[int, int] | None:
+    """Where the quote actually sits, or None if it cannot be narrowed.
+
+    The verifier widens the reported range before checking containment, so a
+    quote the extractor placed a line or two off still verifies — and the
+    reported coordinates were then persisted as the evidence span. A citation
+    could point at lines that do not contain the text it cites, and anything
+    reading the span back would slice the wrong part of the document.
+
+    That was already true of the forward slack before the range became
+    symmetric; widening both ends doubles the exposure and puts it at the end
+    a reader looks at first. So the span is corrected rather than the slack
+    withdrawn: the tolerance is what lets a faithful quote through, and the
+    coordinates are what a reader needs to be true.
+
+    Narrowest window wins. Scanning starts at each candidate line and extends
+    only as far as it must, so a quote that fits in one line is recorded as
+    one line rather than as the range the model guessed.
+
+    Pure: text in, a pair of line numbers out.
+    """
+    full = _canonical(quoted)
+    if len(full) < 20:
+        return None
+    rows = [(n, t) for n, t in _numbered_pairs(numbered)
+            if line_from - back <= n <= line_to + fwd]
+
+    def window(want: str) -> tuple[int, int] | None:
+        best: tuple[int, int] | None = None
+        for i in range(len(rows)):
+            acc: list[str] = []
+            for j in range(i, len(rows)):
+                acc.append(rows[j][1])
+                if want in _canonical(" ".join(acc)):
+                    # Narrowest wins, earliest breaking the tie. Taking the
+                    # first window that matches would return the earliest
+                    # start instead, and a quote sitting on one line would be
+                    # recorded as the several lines that happen to precede it.
+                    if best is None or (j - i) < (best[1] - best[0]):
+                        best = (i, j)
+                    break
+        return best
+
+    # The whole quote first. Verification matches on the first 200 characters
+    # and up to 2,000 are stored, so locating on the prefix alone would end the
+    # span before the text it is meant to cover — a citation shorter than the
+    # passage it cites, which is this function's own defect reappearing at the
+    # other end.
+    #
+    # The prefix is the fallback, not the rule: it is what verification
+    # actually guaranteed, so anything the verifier accepted stays locatable
+    # and the span never falls back to coordinates already called approximate.
+    best = window(full) or window(full[:200])
+    return (rows[best[0]][0], rows[best[1]][0]) if best else None
+
+
+def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str,
+                    back: int = 2, fwd: int = 2) -> bool:
+    """Deterministic anti-hallucination: the quoted text must actually occur
+    in the claimed line range (containment, normalized by _canonical).
+
+    The range is widened by a couple of lines at both ends. The extractor
+    reports where it believes the quote sits, and that estimate is off by a
+    line or two in either direction; nothing about the error is directional.
+    It used to be widened forward only — `line_from <= n <= line_to + 2` —
+    which arrived as a passenger in the commit that built extract drafting and
+    was never argued for. `_anchors_for` assumes the opposite three lines
+    away, taking `lines[0] - 3` when it builds the reviser's windows, so the
+    codebase already treats text before the matched line as part of it.
+
+    `back` is a parameter so the caller can re-run a passage under the old
+    asymmetric rule and record which ones only the symmetry recovered. That is
+    the measurement the change was made without: rejected passages were never
+    persisted, so the size of the loss could only be estimated from a sample
+    of five.
+
+    Widening cannot admit a fabrication. The quote still has to occur
+    verbatim, in the chunk the model was shown; two more lines of real
+    document is more text to match against, not weaker matching.
+    """
+    want = _canonical(quoted)
+    if len(want) < 20:
+        return False
+    span_lines = [t for n, t in _numbered_pairs(numbered)
+                  if line_from - back <= n <= line_to + fwd]
     return want[:200] in _canonical(" ".join(span_lines))
+
+
+def _reject_reason(shown: dict, fn: str, lf: int | None, lt: int | None,
+                   quoted: str) -> str | None:
+    """Why this proposed passage was not kept, or None if it was.
+
+    The check exists to stop a fabricated quote and it rejects 1,043 of 3,933
+    proposed passages across the stored runs — 27% — with nothing recorded but
+    the two counts. A gap that size is worth a reason each: a quote the model
+    invented and a quote it copied faithfully while misreporting its line
+    number are different failures, and only one of them is the check working.
+
+    Pure: dicts and strings in, a string or None out.
+    """
+    if fn not in shown:
+        return "document not among those shown"
+    if lf is None or lt is None:
+        return "line range not readable"
+    if len(_canonical(quoted)) < 20:
+        return "quote under the length floor"
+    if not _verify_passage(shown[fn]["text"], lf, lt, quoted):
+        return "not found in the claimed lines"
+    return None
 
 
 async def _content_anchors(
@@ -1197,6 +1305,9 @@ async def _extract_passages(
         ]
 
         good: list[dict] = []
+        rejected: list[dict] = []
+        recovered = 0
+        corrected = 0
         seen_spans: set[tuple[str, int, int]] = set()
         owed_empty = False
         proposed_total = 0
@@ -1279,31 +1390,54 @@ async def _extract_passages(
                 try:
                     lf, lt = int(p.get("line_from")), int(p.get("line_to"))
                 except (TypeError, ValueError):
-                    continue
+                    lf = lt = None
+                text = str(p.get("text") or "")
                 # Verified against the chunk the model was actually shown, not
                 # the whole document: a quote it could not have seen is not
                 # grounded, however true it happens to be.
-                # The owed document is now shown every round, so the same
-                # span can come back more than once. Kept once: a repeated
-                # passage is not more evidence, and the drafter would read it
-                # as two.
-                if (fn, lf, lt) in seen_spans:
+                why = _reject_reason(shown, fn, lf, lt, text)
+                if why is not None:
+                    rejected.append({"filename": fn, "line_from": lf,
+                                     "line_to": lt, "reason": why,
+                                     "quote": text[:200]})
                     continue
-                if fn in shown and _verify_passage(
-                    shown[fn]["text"], lf, lt, str(p.get("text") or "")
-                ):
-                    seen_spans.add((fn, lf, lt))
-                    good.append({"filename": fn, "line_from": lf, "line_to": lt,
-                                 "text": str(p.get("text"))[:2000]})
+                # Kept, but would the old forward-only rule have kept it? The
+                # answer is the whole point of making the range symmetric, and
+                # it can only be asked at the moment the passage is judged.
+                if not _verify_passage(shown[fn]["text"], lf, lt, text, back=0):
+                    recovered += 1
+                # Recorded where the quote is, not where it was said to be.
+                # The tolerance is what lets a faithful quote through; the
+                # coordinates are what a reader needs to be true, and they
+                # become the persisted evidence span. Falls back to the
+                # reported pair only if the window cannot be narrowed, which
+                # verification already says should not happen.
+                found = _locate_passage(shown[fn]["text"], lf, lt, text)
+                if found and found != (lf, lt):
+                    corrected += 1
+                alf, alt = found or (lf, lt)
+                # The owed document is shown every round, so the same span can
+                # come back more than once. Deduplicated on the corrected span
+                # — the one persisted — so two reports that locate to the same
+                # text are one passage, not two.
+                if (fn, alf, alt) in seen_spans:
+                    continue
+                seen_spans.add((fn, alf, alt))
+                good.append({"filename": fn, "line_from": alf, "line_to": alt,
+                             "text": text[:2000]})
 
         # Only a failure with nothing to show for it is an error: one bad round
         # out of several still leaves the claim grounded.
         if last_error and not good:
             return {"n": c.get("n"), "passages": [], "proposed": proposed_total,
                     "read": len(docs), "error": last_error,
+                    "rejected": rejected, "recovered_by_symmetry": recovered,
+                    "spans_corrected": corrected,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": proposed_total,
+                "rejected": rejected, "recovered_by_symmetry": recovered,
+                "spans_corrected": corrected,
                 "owed": owed, "owed_empty": owed_empty,
                 "read": len(docs), "truncated": truncated, "chunked": chunked}
 
@@ -1375,6 +1509,21 @@ async def _extract_passages(
                     1 for r in out if r.get("owed_empty") and not any(
                         p["filename"] == r.get("owed")
                         for p in (r.get("passages") or []))),
+                # The 27% that never reach the drafter, with a reason
+                # each. Capped because this is a JSONB column a person reads,
+                # not a log: the count is exact, the sample is for looking at.
+                "passages_rejected": sum(
+                    len(r.get("rejected") or []) for r in out),
+                "rejected_sample": [
+                    x for r in out for x in (r.get("rejected") or [])][:20],
+                # Passages the symmetric range kept that the old forward-only
+                # one would have thrown away — counted, not estimated.
+                "recovered_by_symmetry": sum(
+                    r.get("recovered_by_symmetry", 0) for r in out),
+                # Passages whose recorded span differs from the one the
+                # extractor reported: how often the coordinates needed
+                # correcting to point at the text they cite.
+                "spans_corrected": sum(r.get("spans_corrected", 0) for r in out),
                 "extraction_errors": len(errors),
                 "documents_truncated": len(cut_by_file),
                 "characters_dropped": sum(

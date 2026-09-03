@@ -14,7 +14,12 @@ Run from the backend directory:
 `python -m pytest tests/test_passage_quote_verification.py`
 """
 
-from app.services.query_runner import _canonical, _verify_passage
+from app.services.query_runner import (
+    _canonical,
+    _locate_passage,
+    _reject_reason,
+    _verify_passage,
+)
 
 # Every non-ASCII character here is written as an escape, and this file is
 # ASCII. These tests are ABOUT character identity: a source file that reached
@@ -220,3 +225,215 @@ def test_canonical_does_not_join_words_across_a_dash():
 def test_canonical_tolerates_no_text():
     assert _canonical(None) == ""
     assert _canonical("") == ""
+
+
+# -- the range is symmetric ---------------------------------------------------
+#
+# It used to be widened forward only. The extractor reports where it believes
+# a quote sits and is off by a line or two either way; nothing about that error
+# is directional. The forward-only rule arrived as a passenger in the commit
+# that built extract drafting and was never argued for, while `_anchors_for`
+# assumes the opposite three lines away, taking `lines[0] - 3` for its windows.
+
+
+def test_a_quote_starting_a_line_early_verifies():
+    """The case the old rule threw away: the text is verbatim, in the document,
+    and the reported start is one line late."""
+    assert _verify_passage(SOURCE, 2, 3, "The authority may not rely on a document")
+
+
+def test_a_quote_starting_two_lines_early_verifies():
+    assert _verify_passage(SOURCE, 3, 4, "The authority may not rely on a document")
+
+
+def test_the_old_rule_rejected_exactly_that():
+    """Pinned so the asymmetry cannot come back unnoticed: with back=0 the
+    same passage fails, which is what `recovered_by_symmetry` counts."""
+    assert not _verify_passage(
+        SOURCE, 2, 3, "The authority may not rely on a document", back=0)
+
+
+def test_forward_slack_is_unchanged():
+    assert _verify_passage(SOURCE, 1, 1, "party concerned, and the")
+
+
+def test_three_lines_early_still_fails():
+    """Widened, not opened. Two lines each way is the tolerance; a quote from
+    somewhere else in the document is still not evidence for this span."""
+    assert not _verify_passage(SOURCE, 4, 5, "The authority may not rely on a document")
+
+
+def test_provenance_still_holds_at_distance():
+    """The guarantee the check exists for: the right words in the wrong place
+    are not evidence for a claim bound to that place."""
+    assert not _verify_passage(SOURCE, 1, 2, "shall be noted in paragraph 42")
+
+
+def test_symmetry_does_not_admit_a_fabrication():
+    """Two more lines of real document is more text to match against, not
+    weaker matching."""
+    assert not _verify_passage(
+        SOURCE, 2, 3, "The undertaking is entitled to compensation for the delay")
+
+
+# -- why a passage was rejected ------------------------------------------------
+#
+# 1,043 of 3,933 proposed passages were rejected across the stored runs with
+# nothing recorded but the two counts. A quote the model invented and a quote
+# it copied faithfully while misreporting its line number are different
+# failures, and only one of them is the check working.
+
+
+def shown_one() -> dict:
+    return {"a.md": {"text": SOURCE, "strategy": "whole"}}
+
+
+def test_a_kept_passage_has_no_reason():
+    assert _reject_reason(
+        shown_one(), "a.md", 1, 2, "The authority may not rely on a document") is None
+
+
+def test_a_document_not_shown_says_so():
+    """The model can name a file it was never given; that is not the same
+    failure as quoting one it was."""
+    assert _reject_reason(shown_one(), "other.md", 1, 2, "x" * 40) \
+        == "document not among those shown"
+
+
+def test_an_unreadable_line_range_says_so():
+    assert _reject_reason(shown_one(), "a.md", None, None, "x" * 40) \
+        == "line range not readable"
+
+
+def test_a_quote_under_the_floor_says_so():
+    assert _reject_reason(shown_one(), "a.md", 1, 2, "a rule") \
+        == "quote under the length floor"
+
+
+def test_a_quote_not_in_the_lines_says_so():
+    """The interesting one: the text may be real and elsewhere, or invented.
+    Both land here, which is why the sample is kept alongside the count."""
+    assert _reject_reason(shown_one(), "a.md", 1, 2, "shall be noted in paragraph 42") \
+        == "not found in the claimed lines"
+
+
+def test_the_reasons_are_checked_in_a_useful_order():
+    """A passage that is both from an unshown document and too short reports
+    the document, because that is the actionable half."""
+    assert _reject_reason(shown_one(), "other.md", 1, 2, "short") \
+        == "document not among those shown"
+
+
+# -- the recorded span is where the quote is ------------------------------------
+#
+# The verifier widens the reported range before checking containment, so a
+# quote placed a line or two off still verifies — and the reported coordinates
+# were then persisted as the evidence span, so a citation could point at lines
+# that do not contain the text it cites. That was already true of the forward
+# slack; making the range symmetric doubles the exposure and puts it at the end
+# a reader looks at first. The span is corrected rather than the slack
+# withdrawn: the tolerance lets a faithful quote through, the coordinates have
+# to be true.
+
+
+def test_a_span_reported_late_is_corrected_back():
+    """The case the symmetry admits: the quote is on line 1, reported as 2."""
+    assert _locate_passage(
+        SOURCE, 2, 3, "The authority may not rely on a document") == (1, 1)
+
+
+def test_a_span_reported_early_is_corrected_forward():
+    """The case the old forward slack already admitted, and already recorded
+    wrongly."""
+    assert _locate_passage(
+        SOURCE, 4, 4, "A record shall be kept") == (5, 5)
+
+
+def test_an_accurate_span_is_left_alone():
+    assert _locate_passage(
+        SOURCE, 1, 1, "The authority may not rely on a document") == (1, 1)
+
+
+def test_a_quote_spanning_two_lines_reports_both():
+    assert _locate_passage(
+        SOURCE, 1, 4,
+        f"party concerned, and the {LDQUO}right to be heard{RDQUO} applies to "
+        f"an inspection at the undertaking{RSQUO}s premises") == (2, 3)
+
+
+def test_the_narrowest_window_wins():
+    """A quote that fits in one line is recorded as one line, not as the range
+    the model guessed around it."""
+    assert _locate_passage(
+        SOURCE, 1, 6, "shall be noted in paragraph 42 of the report") == (6, 6)
+
+
+def test_text_outside_the_tolerance_locates_nothing():
+    assert _locate_passage(
+        SOURCE, 8, 9, "The authority may not rely on a document") is None
+
+
+def test_a_quote_under_the_floor_locates_nothing():
+    """Same floor as the verifier, so the two cannot disagree about whether a
+    passage exists."""
+    assert _locate_passage(SOURCE, 1, 2, "a rule") is None
+
+
+def test_locating_agrees_with_verifying():
+    """The pair has to move together: anything the verifier accepts must be
+    locatable, or the span would fall back to coordinates the verifier just
+    said were approximate."""
+    cases = [
+        (2, 3, "The authority may not rely on a document"),
+        (1, 1, "party concerned, and the"),
+        (4, 5, "court has applied since 2011-2012 without exception"),
+        (5, 6, "A record shall be kept, and any cooperation offered"),
+    ]
+    for lf, lt, q in cases:
+        assert _verify_passage(SOURCE, lf, lt, q)
+        assert _locate_passage(SOURCE, lf, lt, q) is not None
+
+
+def test_what_the_verifier_rejects_is_not_located():
+    for lf, lt, q in [
+        (1, 2, "shall be noted in paragraph 42 of the report"),
+        (1, 9, "The undertaking is entitled to compensation for the delay"),
+    ]:
+        assert not _verify_passage(SOURCE, lf, lt, q)
+        assert _locate_passage(SOURCE, lf, lt, q) is None
+
+
+# -- a long quote gets its whole span ------------------------------------------
+#
+# Verification matches on the first 200 canonical characters and up to 2,000
+# are stored. Locating on the prefix alone ended the span before the text it
+# was meant to cover: a citation shorter than the passage it cites, which is
+# what the locator exists to prevent, reappearing at the other end.
+
+
+LONG = numbered(*[f"Paragraph {i}. " + "the authority shall record the matter "
+                  f"in the file as item {i} of the annex." for i in range(1, 9)])
+
+
+def test_a_quote_longer_than_the_match_prefix_spans_all_its_lines():
+    """Four lines of quote, well past 200 characters. The span has to reach
+    the fourth, not stop at whichever line the first 200 end on."""
+    quote = " ".join(row.split(": ", 1)[1] for row in LONG.splitlines()[1:5])
+    assert len(_canonical(quote)) > 200
+    assert _locate_passage(LONG, 2, 5, quote) == (2, 5)
+
+
+def test_the_prefix_is_only_a_fallback():
+    """When the whole quote is not inside the tolerance but its first 200
+    characters are, the span still lands — verification accepted on that
+    prefix, so the locator must not come back empty and drop to the reported
+    coordinates it just called approximate."""
+    quote = " ".join(row.split(": ", 1)[1] for row in LONG.splitlines()[1:5])
+    assert _verify_passage(LONG, 2, 3, quote)
+    assert _locate_passage(LONG, 2, 3, quote) is not None
+
+
+def test_a_short_quote_is_unaffected():
+    """Under 200 characters the two paths are the same search."""
+    assert _locate_passage(
+        SOURCE, 2, 3, "The authority may not rely on a document") == (1, 1)

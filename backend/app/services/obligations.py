@@ -214,3 +214,35 @@ async def unmet(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[dict[str, Any]]
         {"doc": d, "note": e.get("note") or "", "fed": int(e.get("fed") or 0)}
         for d, e in live.items() if d not in cited
     ]
+
+
+@_best_effort(list)
+async def unaccounted(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[str]:
+    """Documents the gate named that the answer has not accounted for.
+
+    Distinct from `unmet`, and the difference is the whole point: a waiver
+    discharges an obligation only when a reviser made it. `waive` records who
+    decided, and the two kinds do not mean the same thing.
+
+    A reviser waiver is a judgment. It can only be written after reading the
+    document's passages, it carries a rationale, and it says the document does
+    not carry a point this answer needs. That is the mechanism working, and it
+    accounts for the source.
+
+    The system waiver is not a judgment. `MAX_FEEDS` retires an obligation the
+    run failed to ground after three attempts, with the rationale "not grounded
+    after N revision attempts" — a record of giving up. Reading it as an
+    account would let a run launder its own exhaustion into a clean answer,
+    which is the reverse of what the ledger is for.
+
+    So: cited discharges, a reviser waiver discharges, and nothing else does.
+    """
+    entries = await _load(run_id)
+    if not entries:
+        return []
+    cited = await _cited(answer_id)
+    return [
+        doc for doc, e in entries.items()
+        if doc not in cited
+        and (e.get("waived") or {}).get("by") != "reviser"
+    ]

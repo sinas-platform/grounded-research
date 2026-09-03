@@ -142,6 +142,39 @@ def _iso() -> str:
     return _now().isoformat()
 
 
+# Waits between invoke retries, in seconds. Deliberately long: the Anthropic
+# SDK underneath already retries twice with sub-second backoff on anything
+# >= 500, so a fast retry here would only repeat what it just exhausted. What
+# gets through that and reaches us is an overload lasting longer than a couple
+# of seconds, and these are sized for it. Two attempts, not more: an overload
+# that survives twenty seconds is not going to yield to a third.
+INVOKE_RETRY_WAITS = (5.0, 15.0)
+
+
+def _is_transient(exc: Exception) -> bool:
+    """Whether this invoke failure is worth waiting out.
+
+    Only a 5xx from Sinas and a connection failure. A 5xx is the shape an
+    upstream provider overload arrives in — Sinas surfaces it as a 500 — and a
+    connection error never carries a judgment about the request.
+
+    Everything else is ours. A 4xx means the call was wrong, and retrying it
+    hides the defect while paying for it twice; 429 is deliberately not here,
+    because the SDK below already honours `retry-after` and a rate limit we
+    still hit after that wants a smaller run, not a slower one.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        return exc.response.status_code >= 500
+    # Connect-side only. An invoke is not idempotent — it starts model work
+    # and opens a chat — so a failure is safe to repeat exactly when it is
+    # certain the request never arrived. A refused connection and a timeout
+    # while connecting are that. A read timeout is not: Sinas may have
+    # accepted and be running it, and retrying would start the same work
+    # twice while only the attempt whose response arrives gets its chat
+    # recorded, so the run would pay for both and see one.
+    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+
+
 class _Sinas:
     """Minimal async Sinas client for chat supervision."""
 
@@ -182,16 +215,55 @@ class _Sinas:
         asyncio.create_task(_fire())
 
     async def invoke(self, agent: str, message: str) -> str:
-        async with httpx.AsyncClient(timeout=600.0) as c:
-            r = await c.post(
-                f"{self.base}/agents/{agent}/invoke",
-                headers=self.headers,
-                json={"message": message},
-            )
-            r.raise_for_status()
-            data = r.json()
-        await record_llm_call(self.run_id, data.get("chat_id"), agent)
-        return data.get("reply", "") or ""
+        """One agent call, retried past a transient upstream failure.
+
+        Two runs died on the same day partway through validation, after the
+        retrieval, the draft and most of the validation rounds were paid for:
+        $2.69 between them, both on an Anthropic overload that Sinas surfaced
+        as a 500. Nothing in this pipeline retried a network failure — the
+        drafter and the gate each retry a malformed reply, which is a
+        different thing — so a call that had already been attempted three
+        times below ended the run.
+
+        The overload arrives spelled two ways, `OverloadedError` and an
+        `APIStatusError` carrying `overloaded_error`, which is why the attempt
+        is recorded: the second cost an hour to recognise as the first.
+        """
+        last: Exception | None = None
+        for attempt, wait in enumerate((*INVOKE_RETRY_WAITS, None)):
+            try:
+                async with httpx.AsyncClient(timeout=600.0) as c:
+                    r = await c.post(
+                        f"{self.base}/agents/{agent}/invoke",
+                        headers=self.headers,
+                        json={"message": message},
+                    )
+                    r.raise_for_status()
+                    data = r.json()
+                if attempt:
+                    await _tele_invoke_retry(self.run_id, agent, attempt,
+                                             last, recovered=True)
+                await record_llm_call(self.run_id, data.get("chat_id"), agent)
+                return data.get("reply", "") or ""
+            except Exception as exc:  # noqa: BLE001
+                if wait is None or not _is_transient(exc):
+                    if attempt:
+                        await _tele_invoke_retry(self.run_id, agent, attempt,
+                                                 exc, recovered=False)
+                    raise
+                last = exc
+                _log.warning("invoke %s failed (%s); retrying in %.0fs",
+                             agent, type(exc).__name__, wait)
+                await asyncio.sleep(wait)
+                # Checked after the wait, not before it. Fifteen seconds is
+                # long enough for an operator to cancel inside one, and
+                # without this the loop would start and pay for another model
+                # call on a run already cancelled. `_check_cancel` raises, so
+                # the cancellation surfaces here rather than at whichever
+                # later checkpoint the pipeline reached next.
+                if self.run_id is not None:
+                    await _check_cancel(self.run_id)
+        raise AssertionError("unreachable")  # pragma: no cover
 
     async def chat_messages(self, chat_id: str) -> list[dict]:
         # 120s: supervision reads must tolerate a Sinas API busy with bulk
@@ -210,6 +282,29 @@ class _Sinas:
                 await c.delete(f"{self.base}/chats/{chat_id}", headers=self.headers)
         except Exception:
             pass
+
+
+async def _tele_invoke_retry(run_id, agent: str, attempts: int,
+                             exc: Exception | None, *, recovered: bool) -> None:
+    """Note that an invoke had to be retried, and how it ended.
+
+    Best-effort, like the rest of the bookkeeping. Recorded because the two
+    failures that motivated the retry cost an hour to diagnose: the same
+    upstream overload reached the logs once as `OverloadedError` and once as
+    an `APIStatusError` whose message was `overloaded_error`, and grepping for
+    the first found nothing on the second. A run should be able to say it hit
+    one without anybody reading Sinas's logs.
+    """
+    if run_id is None:
+        return
+    try:
+        await _tele(run_id, "invoke_retries", **{f"{agent}_{_iso()}": {
+            "attempts": attempts + 1,
+            "recovered": recovered,
+            "error": f"{type(exc).__name__}: {exc}"[:300] if exc else None,
+        }})
+    except Exception:  # noqa: BLE001
+        _log.warning("could not record invoke retry", exc_info=True)
 
 
 async def record_llm_call(run_id, chat_id, agent: str | None) -> None:
@@ -1062,8 +1157,25 @@ async def _extract_passages(
     so the drafter can only ever see text that exists."""
     sem = asyncio.Semaphore(4)
     started = time.monotonic()
+    started_iso = _iso()
+    # Decided once, on the way in, and reused for both writes. Computing it
+    # again at the end would count the key this one just wrote and number the
+    # cycle twice.
+    cycle = (await _next_cycle_key(run_id, "extract", "cycle")
+             if run_id is not None else "cycle_1")
     if run_id is not None:
-        await _tele(run_id, "extract", started=_iso())
+        # Written before the work so an extraction that raises still leaves a
+        # cycle behind. The final write replaces the cycle with a superset.
+        #
+        # `started` stays a stage-level keyword beside it. Every stage records
+        # when it started, when it ended and how long it took — a contract
+        # written after a 52-minute run whose wall clock could not be
+        # attributed to any stage — and it is checked by reading this call's
+        # keywords, so it has to be one. The stage-level copy answers where
+        # the time went; the copy inside the cycle answers what each
+        # extraction did.
+        await _tele(run_id, "extract", started=started_iso,
+                    **{cycle: {"started": started_iso}})
 
     async def one(c: dict) -> dict:
         anchors = [str(a) for a in (c.get("anchors") or [])[:8]]
@@ -1143,6 +1255,13 @@ async def _extract_passages(
                     cleaned = reply.strip().strip("`").removeprefix("json").strip()
                     data = json.loads(
                         cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
+                except CancelledOutcome:
+                    # A cancel is not a transport failure. It reaches here
+                    # because the invoke checks for one after each retry wait,
+                    # and the catch below would read it as "this round failed"
+                    # and start the next chunk — another paid call on a run the
+                    # operator already stopped. It has to travel out.
+                    raise
                 except Exception as exc:  # noqa: BLE001
                     # A transport failure is not "this document says nothing".
                     # Swallowing it produced runs that ended `partial` — which
@@ -1215,44 +1334,59 @@ async def _extract_passages(
         # over the cap is cut before the model sees any of it, so a thin answer
         # can be a corpus that never arrived rather than a corpus with nothing
         # to say. These say which.
+        #
+        # All of it now sits under `cycle_N`. A run extracts once for the
+        # draft and again for every revision cycle that carries a point, and
+        # this dict was written whole each time, so `_tele` replaced it and
+        # only the last extraction survived. Every number here was affected,
+        # not one of them: reading a run's `documents_read` gave whichever
+        # extraction happened to go last, and comparing two runs could compare
+        # a draft extraction against a revision one without anything saying
+        # so. Same shape as round_N and revision_N, and answer_regress already
+        # reads that family by prefix.
         await _tele(
             run_id, "extract",
-            claims=len(out),
-            documents_read=sum(r.get("read", 0) for r in out),
-            passages_proposed=sum(r.get("proposed", 0) for r in out),
-            passages_verified=sum(len(r.get("passages") or []) for r in out),
-            # What the owed documents did. `owed_declared_empty` is the
-            # extractor using the refusal rather than straining, and is the
-            # only signal that separates "the document does not bear on this"
-            # from "nothing was found", which the ledger cannot otherwise
-            # tell apart.
-            owed_points=sum(1 for r in out if r.get("owed")),
-            owed_with_passage=sum(
-                1 for r in out if r.get("owed")
-                and any(p["filename"] == r["owed"] for p in (r.get("passages") or []))),
-            # Only when the refusal stood. A multi-chunk owed document is
-            # shown once per round, so one round can declare its chunk empty
-            # while another returns a verified passage from a different one —
-            # and pinning it into every round, which is what this change does,
-            # is exactly what makes that reachable. Counting the declaration
-            # on its own would put the same point in both this and
-            # `owed_with_passage`, which is the distinction the field exists
-            # to draw.
-            owed_declared_empty=sum(
-                1 for r in out if r.get("owed_empty") and not any(
-                    p["filename"] == r.get("owed")
-                    for p in (r.get("passages") or []))),
-            extraction_errors=len(errors),
-            documents_truncated=len(cut_by_file),
-            characters_dropped=sum(
-                t["dropped_chars"] for t in cut_by_file.values()),
-            lines_dropped=sum(t["dropped_lines"] for t in cut_by_file.values()),
-            truncated_documents=sorted(
-                cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
-            **_chunk_telemetry(out),
             completed=_iso(),
             elapsed_s=round(time.monotonic() - started, 1),
-        )
+            **{cycle: {
+                "started": started_iso,
+                "claims": len(out),
+                "documents_read": sum(r.get("read", 0) for r in out),
+                "passages_proposed": sum(r.get("proposed", 0) for r in out),
+                "passages_verified": sum(
+                    len(r.get("passages") or []) for r in out),
+                # What the owed documents did. `owed_declared_empty` is
+                # the extractor using the refusal rather than straining, and
+                # is the only signal that separates "the document does not
+                # bear on this" from "nothing was found", which the ledger
+                # cannot otherwise tell apart.
+                "owed_points": sum(1 for r in out if r.get("owed")),
+                "owed_with_passage": sum(
+                    1 for r in out if r.get("owed")
+                    and any(p["filename"] == r["owed"]
+                            for p in (r.get("passages") or []))),
+                # Only when the refusal stood. A multi-chunk owed document is
+                # shown once per round, so one round can declare its chunk
+                # empty while another returns a verified passage from a
+                # different one. Counting the declaration on its own would put
+                # the same point in both this and `owed_with_passage`, which
+                # is the distinction the field exists to draw.
+                "owed_declared_empty": sum(
+                    1 for r in out if r.get("owed_empty") and not any(
+                        p["filename"] == r.get("owed")
+                        for p in (r.get("passages") or []))),
+                "extraction_errors": len(errors),
+                "documents_truncated": len(cut_by_file),
+                "characters_dropped": sum(
+                    t["dropped_chars"] for t in cut_by_file.values()),
+                "lines_dropped": sum(
+                    t["dropped_lines"] for t in cut_by_file.values()),
+                "truncated_documents": sorted(
+                    cut_by_file.values(), key=lambda t: -t["dropped_chars"]),
+                **_chunk_telemetry(out),
+                "completed": _iso(),
+                "elapsed_s": round(time.monotonic() - started, 1),
+            }})
     return out
 
 
@@ -1526,6 +1660,7 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
 async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
+    unaccounted: list[str] | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -1551,6 +1686,15 @@ async def _record_gate_cycle(
     False after feeding a repair cycle and the caller re-enters the validate
     loop, which is what makes the staleness reachable rather than theoretical.
 
+    `accounted` on a part is answer-scoped, not part-scoped, and the same
+    value is written onto every part of the cycle. The gate names unused
+    sources as `"<filename>: <why>"` with no reference to a part, so nothing
+    says which limb of the question a named source bears on; a per-part claim
+    would be invented here rather than read. It is written onto the parts
+    anyway because that is where it has to be read against `covered`: a row
+    saying `covered: true, accounted: false` is the contradiction this exists
+    to make legible, and `gate_unaccounted` beside it names the documents.
+
     A key that did not happen is written null rather than omitted, and that
     has a consequence worth stating: once this ships,
     `telemetry->'validate' ? 'gate_unparseable'` is true for every run,
@@ -1558,7 +1702,8 @@ async def _record_gate_cycle(
     consumer in the tree reads them that way already.
     """
     await _tele(run_id, "validate", gate_parts=parts,
-                gate_reparse=reparse, gate_unparseable=unparseable)
+                gate_reparse=reparse, gate_unparseable=unparseable,
+                gate_unaccounted=unaccounted)
 
 
 def _gate_json(reply: str) -> dict:
@@ -1874,29 +2019,11 @@ async def _gate_answer(
         for x in parts if not x.get("covered")
     ]
     uncovered = [u for u in uncovered if u]
-    # The decomposition the check ran on, recorded because nothing else
-    # carries it. `uncovered` names the parts the gate judged and failed; it
-    # says nothing about the parts the gate never wrote down, and a part that
-    # was never written down cannot be uncovered. So an answer that leaves a
-    # limb of the question untouched publishes with an empty gate_redraft and
-    # looks, in telemetry, exactly like an answer that covers everything.
-    #
-    # This changes none of that. It makes the difference countable, which has
-    # to come first: whether the decomposition needs constraining depends on
-    # how often it is thin, and there is currently no way to ask. Truncation
-    # was counted for a release before the chunking that answered it was
-    # written, for the same reason.
-    #
-    # What is stored is the list after the isinstance filter above, which is
-    # what the check actually judged, not the raw field of the reply. And it
-    # is overwritten per cycle, like gate_redraft and gate_issues beside it,
-    # so the three line up: what survives is the verdict that decided the run.
-    await _record_gate_cycle(run_id, reparse=reparse, parts=[
-        {"asks": str(x.get("asks") or "")[:300],
-         "covered": bool(x.get("covered")),
-         "gap": str(x.get("gap") or "")[:300]}
-        for x in parts
-    ])
+    # The decomposition is recorded further down, after the obligation
+    # ledger has been consulted, because a part now carries whether the
+    # answer accounted for the sources the gate named as well as whether the
+    # gate called it covered. Recording it here would mean two writes per
+    # cycle to keep in step, which is the shape #106 removed.
 
     issues: list[str] = []
     # Correctness defects make the answer wrong or incoherent, and must be
@@ -1975,6 +2102,47 @@ async def _gate_answer(
             "nor waived returns every round."
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
+
+    # What the answer has not accounted for, decided from the ledger rather
+    # than asked of the model. The gate is given two jobs in one call and
+    # nothing ties its answers together: it judges each part covered, and it
+    # separately names sources that bear on those parts and sit uncited. Its
+    # own prompt permits both at once — "a part can be covered and still be
+    # poorly served" — and `publishable` reads only the first, so a source the
+    # gate itself called decisive never affected whether the question counted
+    # as answered.
+    #
+    # Measured over eleven runs with a decomposition recorded: in the cycle
+    # that decided publication, 29 of 29 parts were covered, and ten of the
+    # eleven published with at least one named source neither cited nor
+    # waived. That is not the run's whole history — one run did return an
+    # uncovered part in an earlier cycle before converging — but it is the
+    # verdict each run published on.
+    #
+    # The tie is answer-scoped because it cannot honestly be finer: the gate
+    # names sources without saying which part each bears on.
+    unaccounted = await obligations.unaccounted(run_id, answer_id)
+    if unaccounted:
+        # Ahead of the per-source lines, because those read as "a better
+        # source exists" and the reviser is told to add a claim only where the
+        # answer fails to address the question. It has just been told it does
+        # not fail. This says what the per-source lines do not: while a named
+        # source is unaccounted for, the question is not yet fully answered,
+        # so writing a claim that cites one is in scope.
+        issues.insert(0, (
+            f"{len(unaccounted)} source(s) this review named as bearing on "
+            "what the question asks are neither cited nor waived, so the "
+            "answer does not yet account for them and the question is not "
+            "fully answered. Adding a claim that cites one is in scope. "
+            "Waiving it with a rationale you can only give after reading its "
+            "passages is in scope. Leaving it untouched is not."))
+    await _record_gate_cycle(
+        run_id, reparse=reparse, unaccounted=unaccounted,
+        parts=[{"asks": str(x.get("asks") or "")[:300],
+                "covered": bool(x.get("covered")),
+                "accounted": not unaccounted,
+                "gap": str(x.get("gap") or "")[:300]}
+               for x in parts])
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,
@@ -2007,6 +2175,32 @@ def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
     )
 
 
+def _overreach_detail(verdicts: list[dict]) -> list[dict]:
+    """What the coverage check objected to, small enough to store.
+
+    The check judges whether the union of a claim's spans carries the whole
+    claim, and it works: 384 claims marked across 3,777 judged. But its
+    verdicts were the one kind `validate_answer_evidence` returns without
+    persisting — the per-span ones land in `claim_evidence.validated` and
+    `validation_reasoning`, while a coverage verdict is separated off before
+    that and lives only long enough to build the reviser's feedback. Only its
+    count reached telemetry, so 15 answers published with overreach standing
+    in the round that decided them and nothing records which claim it was.
+
+    The claim text is kept beside the sequence deliberately. Revision narrows
+    an overreaching claim to its supported core, so reading the claim back by
+    sequence after the run tells you what it became, not what was objected to.
+
+    Pure: dicts in, dicts out.
+    """
+    return [
+        {"seq": v.get("claim_sequence"),
+         "uncovered": str(v.get("uncovered") or "")[:300],
+         "claim": str(v.get("claim_text") or "")[:300]}
+        for v in verdicts
+    ]
+
+
 async def _pre_publish_sweep(
     run_id: uuid.UUID, sinas: _Sinas, caller, answer_id: uuid.UUID,
     question: str,
@@ -2034,10 +2228,15 @@ async def _pre_publish_sweep(
             s2, caller, answer_id, pending_only=False,
             run_id=run_id, final=True)
     f_over = fv.get("overreaching") or []
+    # Both writes, not one. The sweep is a second overreach finding of the
+    # same kind — 37 across 23 stored runs — and recording the subject in one
+    # place and not the other is how the mirrored defects in #103 and #106
+    # appeared: two writes of the same fact that drift apart.
     await _tele(run_id, "validate", final_sweeps=sweeps + 1,
                 final_sweep_result={
                     "failed": len(fv["failed"]),
-                    "overreaching": len(f_over)})
+                    "overreaching": len(f_over),
+                    "overreaching_claims": _overreach_detail(f_over)})
     if not fv["failed"] and not f_over:
         return True
     fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
@@ -2215,6 +2414,38 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         return None
     return {"revise": revise, "add": add, "drop": drop, "keep": keep,
             "waive": waives}
+
+
+def _cycle_key(existing: dict, prefix: str) -> str:
+    """The next per-cycle telemetry key, `prefix_1` upward.
+
+    `_tele` merges by key and cannot delete, so a stage that writes the same
+    key every cycle keeps only its last one. `round_N` already avoids that by
+    numbering; this is the same trick for stages whose loop has no counter of
+    its own to number by.
+    """
+    return f"{prefix}_{sum(1 for k in existing if k.startswith(prefix + '_')) + 1}"
+
+
+async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        entry = ((run.telemetry if run is not None else None) or {}).get(stage) or {}
+    return _cycle_key(entry, prefix)
+
+
+def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
+    """Split the reviser's additions into those the answer has room for and
+    the count refused, given `live` claims already in it.
+
+    Pure, and separate, because the refusal is silent everywhere else: an
+    answer at MAX_CLAIMS takes nothing, the reviser is not told, and the run
+    continues as though the claim had been written. Returning the refused
+    count is what lets the caller record a cap hit instead of recording an
+    addition that never happened.
+    """
+    room = max(0, MAX_CLAIMS - live)
+    return adds[:room], len(adds) - min(len(adds), room)
 
 
 async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
@@ -2437,6 +2668,10 @@ async def _revise_answer(
 
     by_seq = {c.sequence: c for c, *_ in rows}
     touched = 0
+    # Bound before the add block, which does not run when the patch adds
+    # nothing; the telemetry below reads both either way.
+    admitted: list[dict] = []
+    add_dropped_at_cap = 0
     async with AsyncSessionLocal() as session:
         for seq in patch["drop"]:
             claim = by_seq.get(seq)
@@ -2471,7 +2706,8 @@ async def _revise_answer(
             nxt = ((await session.execute(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id))).scalar() or 0) + 1
-            for item in patch["add"][:max(0, MAX_CLAIMS - live)]:
+            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live)
+            for item in admitted:
                 row = AnswerClaim(answer_id=answer_id, sequence=nxt,
                                   claim_text=item["text"][:4000],
                                   rationale=(item.get("rationale") or "")[:2000]
@@ -2494,15 +2730,30 @@ async def _revise_answer(
                 row.rationale = item["rationale"][:2000]
         await session.commit()
 
-    await _tele(run_id, "validate",
-                revision={"claims": len(by_claim), "revised": len(patch["revise"]),
-                          "kept_with_reason": len(patch.get("keep") or []),
-                          "abstentions": sum(
-                              1 for a in patch["add"]
-                              if a.get("type") == "abstention"),
-                          "dropped": len(patch["drop"]), "added": len(patch["add"]),
-                          "untouched": len(by_claim) - touched,
-                          "feedback_items": len(feedback)})
+    # `added` counts rows written, not rows asked for. It used to be
+    # len(patch["add"]), so a patch whose additions were all refused at the
+    # cap recorded the same number as one where every addition landed.
+    # `add_dropped_at_cap` carries the difference; the two sum to what the
+    # reviser proposed.
+    #
+    # And one key per cycle, like round_N. Recording the right number was not
+    # enough on its own: a single `revision` key kept only the last cycle, so
+    # a run that revised four times threw away three cycles of adds, drops and
+    # cap refusals before anyone could read them. Measured on three runs that
+    # each reached the cap, every one reported add_dropped_at_cap = 0, because
+    # the cycle that survived was not the cycle that hit it. Numbering is what
+    # makes this a history instead of a last-write.
+    cycle = await _next_cycle_key(run_id, "validate", "revision")
+    await _tele(run_id, "validate", **{
+        cycle: {
+            "claims": len(by_claim), "revised": len(patch["revise"]),
+            "kept_with_reason": len(patch.get("keep") or []),
+            "abstentions": sum(1 for a in admitted
+                               if a.get("type") == "abstention"),
+            "dropped": len(patch["drop"]), "added": len(admitted),
+            "add_dropped_at_cap": add_dropped_at_cap,
+            "untouched": len(by_claim) - touched,
+            "feedback_items": len(feedback)}})
     return touched
 
 
@@ -2546,6 +2797,11 @@ async def _stage_validate_publish(
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
             "overreaching": len(verdict.get("overreaching") or []),
+            # The count stays where it is: answer_regress reads it by prefix.
+            # This is the same finding with its subject attached, so a run can
+            # be asked which claim was objected to and on what ground.
+            "overreaching_claims": _overreach_detail(
+                verdict.get("overreaching") or []),
         }})
         # A claim whose every span passes can still assert more than those
         # spans establish — "the whole period" on passages about a second

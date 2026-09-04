@@ -2669,7 +2669,13 @@ def _deleted_claims(validate: dict) -> list[dict]:
         for e in entries:
             if not isinstance(e, dict) or not e.get("claim"):
                 continue
-            fp = (e.get("sequence"), str(e["claim"])[:80])
+            # The whole text, not a prefix. Claims about the same case open
+            # with the same eighty characters more often than not, and a
+            # sequence is reused as claims are added and dropped, so a prefix
+            # can make two different deletions look like one record written
+            # twice. The record already caps the text at 400 characters, so
+            # this compares what was stored.
+            fp = (e.get("sequence"), str(e["claim"]))
             if fp in seen:
                 continue
             seen.add(fp)

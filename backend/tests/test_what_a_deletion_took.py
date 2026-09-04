@@ -119,6 +119,23 @@ def test_two_deletions_of_different_claims_at_one_sequence_both_count():
     assert len(_deleted_claims(v)) == 2
 
 
+def test_two_claims_sharing_an_opening_are_two_deletions():
+    """Claims about the same case open the same way, and a sequence is reused
+    as claims are added and dropped. Comparing a prefix instead of the stored
+    text made a pair like this read as one record written twice, and the
+    second claim's citations never reached either check."""
+    a = ("In Nexans France and Nexans v Commission (T-135/09), the General "
+         "Court recorded that inspectors imaged the drives.")
+    b = ("In Nexans France and Nexans v Commission (T-135/09), the General "
+         "Court recorded that the applicants sought a declaration.")
+    assert a[:80] == b[:80]
+    v = {"revision_1": {"dropped_detail": [claim(3, a, "one.md")]},
+         "revision_2": {"dropped_detail": [claim(3, b, "two.md")]}}
+    assert len(_deleted_claims(v)) == 2
+    lost = _last_citation_losses(_deleted_claims(v), set())
+    assert [e["document"] for e in lost] == ["one.md", "two.md"]
+
+
 def test_a_cycle_that_dropped_nothing_contributes_nothing():
     """`claims` here is the count of claims the cycle saw, not a list of them.
     Reading the shapes by a fallback chain returned that integer as if it were

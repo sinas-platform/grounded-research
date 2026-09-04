@@ -3152,13 +3152,22 @@ async def _revise_answer(
         # Counts are all zero because nothing was applied. `kept_with_reason`
         # is not recorded here even when the patch carried keeps: the early
         # return above means they were not written either.
+        #
+        # Refused drops are the exception, and they have to be. A reply whose
+        # only content is drops with no reason lands here rather than below,
+        # because nothing was applied — and that reply is the whole point of
+        # asking for a reason. If it went unrecorded, the case where the
+        # reviser will remove a claim but not say why would be the one case
+        # invisible in the telemetry.
         cycle = await _next_cycle_key(run_id, "validate", "revision")
         await _tele(run_id, "validate", revision_yielded_no_change=True, **{
             cycle: {
                 "claims": len(by_claim), "revised": 0, "added": 0,
                 "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
                 "add_dropped_at_cap": 0, "untouched": len(by_claim),
-                "feedback_items": len(feedback), "yielded_no_change": True}})
+                "feedback_items": len(feedback), "yielded_no_change": True,
+                "dropped_unexplained": (patch or {}).get("drop_unexplained")
+                or []}})
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}

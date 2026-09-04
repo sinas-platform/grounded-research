@@ -307,3 +307,21 @@ def test_the_reason_rides_with_what_the_claim_said_and_cited():
     s = src()
     assert 'patch.get("drop_reasons") or {}' in s
     assert '"dropped_unexplained": patch.get("drop_unexplained") or []' in s
+def test_a_reply_of_nothing_but_refusals_still_records_them():
+    """The reply that matters most takes the other exit. Nothing is applied,
+    so `_revise_answer` returns through its no-change branch, and until this
+    that branch wrote every count as zero and said nothing about the drops it
+    had refused. A reviser that will remove a claim but not say why would then
+    be the one behaviour the record could not show.
+    """
+    s = src()
+    i = s.index("revision_yielded_no_change=True")
+    branch = s[i:i + 700]
+    assert '"dropped_unexplained": (patch or {}).get("drop_unexplained")' in branch
+
+
+def test_the_no_change_branch_survives_an_unparsable_reply():
+    """It is reached with `patch` None as well, and reads the same key off it."""
+    s = src()
+    i = s.index("revision_yielded_no_change=True")
+    assert "(patch or {})" in s[i:i + 700]

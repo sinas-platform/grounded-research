@@ -1679,7 +1679,7 @@ async def _draft_from_extracts(
 
 async def _argument_plan(
     sinas: _Sinas, run_id: uuid.UUID, question: str, manifest: str
-) -> str:
+) -> tuple[str, list[dict]]:
     """Split drafting: a strong tool-less model designs the ARGUMENT (which
     claims, anchored where) from the briefing manifest alone; the drafter
     then executes claim by claim. Judgment is expensive and small; reading
@@ -1707,7 +1707,14 @@ async def _argument_plan(
         data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
         claims = data.get("claims") or []
         if not claims:
-            return ""
+            # Both halves, like every other exit. Returning the bare string
+            # here made the caller's `_plan_text, plan_claims = await ...`
+            # raise ValueError on a planner that replied `{"claims": []}`, so
+            # the run was recorded as failed. The caller already handles an
+            # empty plan on the next line, and treats it as a judgment about
+            # the corpus rather than a crash; that branch was unreachable
+            # through this path.
+            return "", []
         lines = []
         for c in claims[:12]:
             anchors = ", ".join(str(a) for a in (c.get("anchors") or [])[:4])

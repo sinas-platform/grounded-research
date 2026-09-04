@@ -84,6 +84,31 @@ async def test_an_unparseable_plan_is_still_fail_open():
     assert await qr._argument_plan(sinas, uuid.uuid4(), "q", "m") == ("", [])
 
 
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_tele")
+async def test_an_empty_plan_returns_both_halves():
+    """A planner replying `{"claims": []}` used to return a bare string, and
+    the caller unpacks into two names, so the run died on a ValueError and was
+    recorded as failed. The caller's own handling of an empty plan, which
+    treats it as a judgment about the corpus, could never be reached this way.
+    """
+    sinas = FakeSinas(json.dumps({"claims": []}))
+    assert await qr._argument_plan(sinas, uuid.uuid4(), "q", "m") == ("", [])
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("_no_tele")
+async def test_every_exit_returns_a_pair():
+    """What the ValueError above was really about. Pinned across all three
+    non-raising exits so a fourth cannot go back to a bare string."""
+    for outcome in ("not json", json.dumps({"claims": []}),
+                    json.dumps({"claims": [{"n": 1, "establishes": "x",
+                                            "anchors": ["a.md"]}]})):
+        got = await qr._argument_plan(FakeSinas(outcome), uuid.uuid4(), "q", "m")
+        assert isinstance(got, tuple) and len(got) == 2, outcome
+        assert isinstance(got[0], str) and isinstance(got[1], list)
+
+
 # -- _mark_partial: the one that must NOT re-raise -----------------------------
 
 

@@ -19,6 +19,7 @@ import ast
 import inspect
 import json
 import pathlib
+import re
 import uuid
 
 import httpx
@@ -154,20 +155,38 @@ def functions_in(tree):
             if isinstance(n, ast.FunctionDef | ast.AsyncFunctionDef)}
 
 
+# The only receiver in this module carrying a cancellable `invoke`. Matching
+# on the bare method name instead would classify any unrelated object's
+# `invoke` as cancellation-capable, and a valid generic handler around one of
+# those would fail the sweep for no reason.
+SINAS_INVOKE = "sinas.invoke"
+RECEIVER_RE = '([A-Za-z_][A-Za-z0-9_.]*)\\.invoke\\('
+NL = chr(10)
+
+
 def called_names(node) -> set[str]:
+    """Plain function names, plus the dotted form for attribute calls, so a
+    receiver can be told apart from a same-named method on something else."""
     out = set()
     for x in ast.walk(node):
-        if isinstance(x, ast.Call):
-            f = x.func
-            out.add(f.attr if isinstance(f, ast.Attribute)
-                    else (f.id if isinstance(f, ast.Name) else ""))
+        if not isinstance(x, ast.Call):
+            continue
+        f = x.func
+        if isinstance(f, ast.Name):
+            out.add(f.id)
+        elif isinstance(f, ast.Attribute):
+            out.add(ast.unparse(f))
     return out
 
 
 def cancellable(tree) -> set[str]:
     """Every function that can propagate a cancel, by transitive closure over
     the call graph. `_check_cancel` raises it; `invoke` calls that."""
-    out = {"_check_cancel", "invoke"}
+    # `_Sinas.invoke` calls `_check_cancel` after a retry wait, so a call
+    # through the sinas client can raise. Seeded by its dotted form rather than
+    # by the method name, which the closure below would otherwise spread to
+    # every `.invoke` in the file.
+    out = {"_check_cancel", SINAS_INVOKE}
     funcs = functions_in(tree)
     changed = True
     while changed:
@@ -237,3 +256,26 @@ def test_the_sweep_would_actually_catch_one():
              for h in n.handlers
              if h.type is not None and ast.unparse(h.type) == "Exception"]
     assert found, "the sweep missed a handler it was written to find"
+
+
+def test_the_sinas_receiver_is_still_the_only_one():
+    """The sweep matches `sinas.invoke` by its receiver, so it would miss a
+    cancellable call made through a differently named one. This fails loudly
+    instead, which is the point: a sweep that quietly stops covering the thing
+    it was written for is worse than no sweep."""
+    src = pathlib.Path(inspect.getfile(qr)).read_text(encoding="utf-8")
+    receivers = set(re.findall(RECEIVER_RE, src))
+    assert receivers == {"sinas"}, (
+        f"a cancellable invoke is reached through {receivers - {'sinas'}}; add "
+        "it to the sweep's seeds, or the sweep no longer covers it")
+
+
+def test_an_unrelated_invoke_is_not_treated_as_cancellable():
+    """What the receiver check buys. Some other object's `invoke` must not drag
+    its callers into the cancellable set and fail their handlers."""
+    tree = ast.parse(
+        "async def _check_cancel(r):" + NL
+        + "    raise CancelledOutcome()" + NL
+        + "async def uses_other(client):" + NL
+        + "    await client.invoke('x')" + NL)
+    assert "uses_other" not in cancellable(tree)

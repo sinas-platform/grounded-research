@@ -2609,6 +2609,133 @@ async def _compact_claim_sequences(session, answer_id: uuid.UUID) -> None:
             c.sequence = i
 
 
+# An identifier is a token carrying a digit and joined by a separator:
+# T-135/09, C-606/18, 41(1), 1/2003, C/1072/19, M.11936. The pattern is
+# structural, not legal — it knows nothing about courts or articles, and the
+# same shape picks up a Spanish CNMC case number and an EU merger number that
+# a pattern written for EU court references would miss. Measured over 44
+# published runs it recognises 31 distinct tokens, 30 of them real citations
+# and one COVID-19.
+_IDENTIFIER = re.compile(r"\b(?=[^\s]*\d)[A-Za-z0-9]+(?:[-/.]\w+|\(\w+\))+")
+# A filename is a citation, and citations are counted separately and exactly.
+_FILE_SUFFIX = re.compile(r"\.[a-z]{2,4}$")
+
+
+def _identifiers(text: str) -> set[str]:
+    """Identifier-shaped tokens in a claim. Pure.
+
+    Two exclusions, both to stop this counting something the other check
+    already counts exactly, or something that is not an identifier at all:
+    a filename belongs to the citation check, and a token of digits and dots
+    alone is a decimal or a line range.
+    """
+    return {
+        t for t in _IDENTIFIER.findall(text or "")
+        if not _FILE_SUFFIX.search(t) and not re.fullmatch(r"[\d.\-]+", t)
+    }
+
+
+def _deleted_claims(validate: dict) -> list[dict]:
+    """Every claim a run deleted, gathered from the shapes that record one.
+
+    Four keys hold deletions and two pairs of them overlap: the sweep writes
+    its claims to both `final_sweep_dropped_detail` and a numbered `removed_N`,
+    and the rounds-exhausted path writes both a flat `dropped_detail` and a
+    numbered one. Deduplicated on the sequence and the opening of the text,
+    which is what distinguishes two deletions of different claims.
+
+    Reads the flat legacy keys as well as the numbered ones, so a run recorded
+    before the numbering existed is still readable here — those records carry
+    no citations, so only the mention check can say anything about them.
+
+    Pure: telemetry in, records out.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for key in sorted(validate):
+        v = validate[key]
+        # Each shape names its own list. Read by a fallback chain instead and
+        # `revision_N` hands back its `claims` count, which is an integer.
+        if key in ("dropped_detail", "final_sweep_dropped_detail"):
+            entries = v
+        elif re.fullmatch(r"revision_\d+", key) and isinstance(v, dict):
+            entries = v.get("dropped_detail")
+        elif re.fullmatch(r"removed_\d+", key) and isinstance(v, dict):
+            entries = v.get("claims")
+        else:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("claim"):
+                continue
+            fp = (e.get("sequence"), str(e["claim"])[:80])
+            if fp in seen:
+                continue
+            seen.add(fp)
+            out.append(e)
+    return out
+
+
+def _seqs(entries: list[dict]) -> list[int]:
+    out = []
+    for e in entries:
+        try:
+            out.append(int(e.get("sequence")))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def _last_citation_losses(deleted: list[dict], live: set[str]) -> list[dict]:
+    """Documents the answer cited before a deletion and does not cite now.
+
+    NOT a coverage check. It does not know whether the point the deleted claim
+    made survives somewhere else, and it is not evidence that anything is
+    missing. It says one thing exactly: a document that was carrying a citation
+    in this answer is no longer carrying one.
+
+    That is worth its own record because nothing else in the pipeline would
+    ever mention it. An answer that quietly stops citing a publisher's own
+    material still reads as a good answer.
+
+    Pure.
+    """
+    by: dict[str, list[dict]] = {}
+    for e in deleted:
+        for d in (e.get("cites") or []):
+            if d and d not in live:
+                by.setdefault(str(d), []).append(e)
+    return [{"document": d, "sequences": _seqs(v)} for d, v in sorted(by.items())]
+
+
+def _last_mention_losses(deleted: list[dict], live: set[str]) -> list[dict]:
+    """Identifiers a deleted claim named that no surviving claim names.
+
+    The companion to the citation check and the same kind of statement: the
+    answer stopped naming T-135/09, not the answer no longer covers T-135/09.
+    The two do not coincide. A deletion can take the last citation of a
+    document while the identifier survives in a claim citing something else,
+    and it can take the last mention of a case while the document it cited
+    stays cited by a different claim.
+
+    Neither check sees the case that prompted both. Q41 deleted a claim
+    recording that inspectors imaged employees' drives and indexed them
+    overnight, on the reasoning that a later judgment superseded it. Both the
+    document and the case number survive elsewhere in that answer; what left
+    was a fact inside a document still cited, and no set difference over
+    citations or identifiers can see that.
+
+    Pure.
+    """
+    by: dict[str, list[dict]] = {}
+    for e in deleted:
+        for t in _identifiers(str(e.get("claim") or "")):
+            if t not in live:
+                by.setdefault(t, []).append(e)
+    return [{"identifier": t, "sequences": _seqs(v)} for t, v in sorted(by.items())]
+
+
 async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) -> None:
     from app.models import Answer
 
@@ -2618,7 +2745,32 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
         row.published_at = _now()
         await _compact_claim_sequences(session, answer_id)
         await session.commit()
-    await _tele(run_id, "validate", published=_iso(), **tele)
+        # Read after the commit, and only here. "Last" is a claim about the
+        # finished answer: during revision a document can lose its last
+        # citation and get another one two cycles later, so the same
+        # comparison made at deletion time reports losses that did not happen
+        # and misses ones that had not happened yet.
+        live = (await session.execute(
+            select(AnswerClaim.claim_text, Document.filename)
+            .outerjoin(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
+            .outerjoin(Document, Document.id == ClaimEvidence.document_id)
+            .where(AnswerClaim.answer_id == answer_id)
+        )).all()
+        run = await session.get(QueryRun, run_id)
+        validate = ((run.telemetry if run is not None else None)
+                    or {}).get("validate") or {}
+    deleted = _deleted_claims(validate)
+    live_docs = {fn for _, fn in live if fn}
+    live_ids: set[str] = set()
+    for text, _ in live:
+        live_ids |= _identifiers(text or "")
+    # Written on every publish, empty lists included. An empty list says the
+    # comparison ran and found nothing; a missing key says the run predates
+    # the comparison. Those are different facts and a reader needs both.
+    await _tele(run_id, "validate", published=_iso(),
+                lost_last_citation=_last_citation_losses(deleted, live_docs),
+                lost_last_mention=_last_mention_losses(deleted, live_ids),
+                **tele)
 
 
 def _spans_of(obj: dict) -> list[dict]:

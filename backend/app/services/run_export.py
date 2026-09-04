@@ -10,6 +10,7 @@ field paths are a CONTRACT:
 
     /schema                       "sgr-review/1"
     /question_id                  the run's reference (see below)
+    /title                        the benchmark's name for the question, or null
     /run_id                       unique per export unit; idempotency key
     /question                     plain text
     /outcome/status               "published" | "partial" | ...
@@ -133,6 +134,7 @@ async def export_run(session, run: QueryRun) -> dict[str, Any]:
     return {
         "schema": SCHEMA,
         "question_id": run.reference,
+        "title": run.title,
         "run_id": str(run.id),
         "tags": list(run.tags or []),
         "question": run.question,

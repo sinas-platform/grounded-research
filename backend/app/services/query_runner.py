@@ -3135,6 +3135,54 @@ async def _revise_answer(
     return touched
 
 
+def _overreach_seqs(verdict: dict) -> set[int]:
+    """The claim numbers this round found overreaching. Pure.
+
+    A verdict entry carries `claim_sequence`; anything that is not a whole
+    number names no claim and is dropped rather than guessed at.
+    """
+    out: set[int] = set()
+    for o in (verdict.get("overreaching") or []):
+        if not isinstance(o, dict):
+            continue
+        raw = o.get("claim_sequence")
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if n.is_integer():
+            out.add(int(n))
+    return out
+
+
+def _still_narrowing(history: list[set[int]]) -> bool:
+    """Whether a claim marked overreaching last round was marked again this one.
+
+    That repetition can only mean the reviser rewrote it. Evidence is judged
+    with `pending_only=True`, so a claim whose spans have all passed is not
+    re-judged and produces no coverage verdict at all: an untouched claim stops
+    being reported rather than being reported again. The only way the same
+    sequence comes back is that the revision bound new spans, which arrive
+    `validated=False` from `_bind_spans` and put the claim back in front of the
+    judge.
+
+    So this says the claim is moving. It does not say how far. The coverage
+    verdict is `full` or `partial` with no degree, so "partial again" reads the
+    same whether the claim shrank by half or barely changed. Reliable as a
+    signal of work in progress, useless as a measure of progress.
+
+    Measured before this existed: Q53 claim 14 was marked in round 3, marked
+    again in round 4, and deleted when the budget ran out at four — the
+    narrowing was working and it ran out of attempts. `failed_history` could
+    not see it, because a coverage verdict never fails an evidence row.
+
+    Pure.
+    """
+    return len(history) >= 2 and bool(history[-1] & history[-2])
+
+
 async def _stage_validate_publish(
     run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int | None = None
 ) -> None:
@@ -3152,6 +3200,11 @@ async def _stage_validate_publish(
 
     await _mark(run_id, status="validating")
     failed_history: list[int] = []
+    # Kept apart from `failed_history` on purpose. That list counts failed
+    # evidence rows and `answer_regress` reads the same counts out of
+    # `round_N` by prefix; folding overreach into it would change what every
+    # stored run means after the fact.
+    overreach_history: list[set[int]] = []
     round_no = 0
     while True:
         round_no += 1
@@ -3161,20 +3214,33 @@ async def _stage_validate_publish(
                 "budget_ceiling",
                 f"run spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) "
                 f"in validation round {round_no}")
+        extended_because = None
         if round_no > MAX_VALIDATE_ROUNDS:
             converging = (len(failed_history) >= 2
                           and failed_history[-1] < failed_history[-2])
-            if round_no > HARD_VALIDATE_ROUNDS or not converging:
+            # A second reason to grant a round, disjoint from the first rather
+            # than folded into it: a claim marked overreaching twice running is
+            # a claim the reviser is rewriting, and the failed-row count cannot
+            # see that because a coverage verdict never fails a row.
+            narrowing = _still_narrowing(overreach_history)
+            if round_no > HARD_VALIDATE_ROUNDS or not (converging or narrowing):
                 break
+            extended_because = "converging" if converging else "narrowing"
             await _tele(run_id, "validate", extended_to_round=round_no)
         async with AsyncSessionLocal() as session:
             verdict = await validate_answer_evidence(session, caller, answer_id,
                                               pending_only=True, run_id=run_id)
         failed_history.append(len(verdict["failed"]))
+        overreach_history.append(_overreach_seqs(verdict))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
             "overreaching": len(verdict.get("overreaching") or []),
+            # Why this round exists at all, when it is past the base budget.
+            # Carried in a local from the decision to the one write at the end
+            # of the round, rather than written where it happens: a flat key
+            # would keep only the last extension of the run.
+            **({"extended_because": extended_because} if extended_because else {}),
             # The count stays where it is: answer_regress reads it by prefix.
             # This is the same finding with its subject attached, so a run can
             # be asked which claim was objected to and on what ground.

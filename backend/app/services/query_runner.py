@@ -2473,8 +2473,15 @@ async def _pre_publish_sweep(
         # survives still answers the question. If it does, publish; the
         # partial state is reserved for the corpus genuinely not answering,
         # not for the repair budget running out one claim short.
-        ok, missing, _issues, correctness, _pts = await _gate_answer(
+        ok, missing, issues, correctness, _pts = await _gate_answer(
             sinas, question, answer_id, run_id)
+        # This pass opens a cycle like any other, and used to discard its
+        # issues because the caller had no use for them. The record did: a
+        # cycle holding a fed list and no issues cannot be read, and this one
+        # is the re-ask after claims were dropped, which is the cycle a reader
+        # most wants the reasons for.
+        await _amend_gate_cycle(run_id, redraft=missing, issues=issues,
+                                after_drop=True)
         if ok and not correctness:
             await _tele(run_id, "validate", final_sweep_published_after_drop=True)
             return True

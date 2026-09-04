@@ -241,12 +241,12 @@ def test_the_amend_is_the_statement_after_the_gate_call():
         for n, stmt in enumerate(body[:-1]):
             if not is_gate_call(stmt):
                 continue
-            if "_issues" in ast.unparse(stmt):
-                # The read-only caller discards the issues and opens no cycle.
-                continue
             nxt = ast.unparse(body[n + 1])
             assert "_amend_gate_cycle" in nxt, (
                 "a branch sits between the gate call and its amend: " + nxt[:120])
             assert "redraft=missing" in nxt and "issues=issues" in nxt, nxt[:160]
             recording += 1
-    assert recording == 2, f"expected both recording call sites, saw {recording}"
+    # All three: the two in the validation loop, and the sweep's re-ask after
+    # dropping claims, which discarded its issues until it turned out that a
+    # cycle carrying a fed list and no issues cannot be read.
+    assert recording == 3, f"expected every gate call to amend, saw {recording}"

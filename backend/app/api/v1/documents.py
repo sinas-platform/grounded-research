@@ -28,6 +28,7 @@ from app.schemas.runtime import (
     EntityMentionWithEntityOut,
     PropertyValueOut,
 )
+from app.services.document_identity import document_title_subquery
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -134,14 +135,18 @@ async def get_document(
     caller: CallerIdentity = Depends(get_caller),
 ):
     stmt = (
-        select(Document)
+        select(Document, document_title_subquery())
         .where(Document.id == doc_id)
         .where(await _document_visibility(Document, caller))
     )
-    row = (await session.execute(stmt)).scalar_one_or_none()
-    if row is None:
+    pair = (await session.execute(stmt)).first()
+    if pair is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
-    return row
+    row, title = pair
+    return DocumentOut(
+        **DocumentOut.model_validate(row).model_dump(exclude={"title"}),
+        title=title,
+    )
 
 
 @router.patch(

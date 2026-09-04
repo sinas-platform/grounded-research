@@ -200,8 +200,9 @@ async def test_get_result_documents_returns_rows_when_visible():
         document_id=uuid.uuid4(),
     )
     rd.created_at = rd.updated_at = datetime.now(UTC)
-    # (row, filename, class_name, summary_preview) — the identify join from #14
-    docs = [(rd, "doc.md", "Some Class", "a summary")]
+    # (row, filename, class_name, summary_preview, external_ref, title) — the
+    # identity join from #14, widened with the human identities.
+    docs = [(rd, "doc.md", "Some Class", "a summary", None, None)]
     session = _FakeSession([_ExecResult(scalar=object()), _ExecResult(rows=docs)])
     out = await get_result_documents(uuid.uuid4(), session=session, caller=_FakeCaller())
     assert [d.document_id for d in out] == [rd.document_id]

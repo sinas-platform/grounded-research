@@ -64,7 +64,7 @@ def _row(rank=None):
         rank=rank,
     )
     rd.created_at = rd.updated_at = datetime.now(UTC)
-    return (rd, "doc.md", "Some Class", "a summary")
+    return (rd, "doc.md", "Some Class", "a summary", "AT.40795", "A Readable Title")
 
 
 @pytest.mark.asyncio
@@ -79,6 +79,10 @@ async def test_default_call_returns_full_rows_unpaged():
     assert out[0].filename == "doc.md"
     assert out[0].document_class_name == "Some Class"
     assert out[0].summary == "a summary"
+    # The identities a person can use, joined in: without them a reader is
+    # left citing the storage filename, which is often a bare numeric id.
+    assert out[0].title == "A Readable Title"
+    assert out[0].external_ref == "AT.40795"
     # unpaged: the statement carries no LIMIT and no OFFSET
     stmt = session.statements[1]
     assert stmt._limit_clause is None

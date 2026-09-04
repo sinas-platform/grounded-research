@@ -2739,6 +2739,41 @@ async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
     return _cycle_key(entry, prefix)
 
 
+def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
+    """What the reviser may add, said before it writes rather than after.
+
+    `_admit_adds` refuses an addition once the answer is at MAX_CLAIMS and
+    tells nobody: the claim is not written, the reviser is not informed, and
+    the run continues as though it had been. Measured over 131 revision cycles,
+    23 of the 56 additions the reviser proposed were discarded that way, 41% of
+    everything it tried to add. Three cycles changed nothing at all and all
+    three were cap refusals, so the run paid for a model call and got back a
+    byte-identical answer. 38 of the 131 ran with the answer already full.
+
+    The consequence is not that the reviser deletes too much. It dropped 14
+    claims across those same cycles, fewer than the cap silently refused. It is
+    that a full answer cannot take back anything an earlier revision narrowed
+    away, and the only move that makes room is a drop, which is the one
+    disposition that costs nothing to write.
+
+    Pure: two counts in, the sentence out.
+    """
+    room = max(0, MAX_CLAIMS - live)
+    out = f"The answer holds {live} claims and the hard maximum is {MAX_CLAIMS}. "
+    if room:
+        out += (f"You may add up to {room}. An addition beyond that is "
+                "discarded, not queued. ")
+    else:
+        out += ("It is FULL. Any claim you add is discarded unless the same "
+                "patch drops one to make room, so an addition you want must "
+                'come with a "drop". ')
+    if refused_last_cycle:
+        out += (f"Your previous reply proposed {refused_last_cycle} addition(s) "
+                "that were discarded for exactly this reason; they were never "
+                "written. Free a slot if you still want them. ")
+    return out + "Aim for about 12 claims.\n\n"
+
+
 def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
     """Split the reviser's additions into those the answer has room for and
     the count refused, given `live` claims already in it.
@@ -2766,6 +2801,26 @@ async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
             span={"line_from": sp["line_from"], "line_to": sp["line_to"],
                   "char_from": None, "char_to": None, "note": None},
             validated=False))
+
+
+async def _cap_refusals_last_cycle(run_id: uuid.UUID) -> int:
+    """How many additions the previous revision cycle lost to the cap.
+
+    Read from `revision_N` rather than threaded through the caller: the refusal
+    happens after the reviser has already replied, so the only place to tell it
+    is the next prompt, and by then the number lives in telemetry. Highest
+    cycle by number, not by string, since `revision_10` sorts before
+    `revision_2` and runs pass ten cycles.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        v = ((run.telemetry if run is not None else None) or {}).get("validate") or {}
+    cycles = [k for k in v
+              if k.startswith("revision_") and k[len("revision_"):].isdigit()]
+    if not cycles:
+        return 0
+    latest = max(cycles, key=lambda k: int(k[len("revision_"):]))
+    return int((v.get(latest) or {}).get("add_dropped_at_cap") or 0)
 
 
 async def _revise_answer(
@@ -2915,8 +2970,10 @@ async def _revise_answer(
         "drop it if no passage can carry it. Add a claim only where the answer "
         "fails to address the question. Every claim you write must be carried "
         "entirely by the passages you cite for it, and you may cite only "
-        "passages shown below. Keep the answer at about 12 claims.\n\n"
-        "Where the feedback names a stronger source and you judge the current "
+        "passages shown below. "
+        + _claim_budget_line(len(by_claim),
+                             await _cap_refusals_last_cycle(run_id))
+        + "Where the feedback names a stronger source and you judge the current "
         "citation to be the better one, say so instead of changing nothing: "
         'put the claim in "keep" with a rationale giving the reason. A keep '
         "changes neither the claim nor its evidence. Use it only when you "
@@ -2968,7 +3025,23 @@ async def _revise_answer(
         for w in patch.get("waive") or []:
             await obligations.waive(run_id, w["doc"], w["rationale"])
     if not patch or not (patch["revise"] or patch["add"] or patch["drop"]):
-        await _tele(run_id, "validate", revision_yielded_no_change=True)
+        # Numbered like any other cycle, though it changed nothing. The reviser
+        # replied, so this IS a cycle, and `_cap_refusals_last_cycle` reads the
+        # latest one as "your previous reply". Leaving it unnumbered left an
+        # older cycle as the latest, and the next prompt then told the reviser
+        # that its last reply had lost additions it never proposed, which is an
+        # invitation to drop a sound claim to make room for nothing.
+        #
+        # Counts are all zero because nothing was applied. `kept_with_reason`
+        # is not recorded here even when the patch carried keeps: the early
+        # return above means they were not written either.
+        cycle = await _next_cycle_key(run_id, "validate", "revision")
+        await _tele(run_id, "validate", revision_yielded_no_change=True, **{
+            cycle: {
+                "claims": len(by_claim), "revised": 0, "added": 0,
+                "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
+                "add_dropped_at_cap": 0, "untouched": len(by_claim),
+                "feedback_items": len(feedback), "yielded_no_change": True}})
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}

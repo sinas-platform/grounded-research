@@ -260,7 +260,7 @@ def test_a_boolean_is_not_claim_one():
 
 
 def test_an_object_names_nothing():
-    assert _seq_list({"n": 3}) == [] and _seq_list(3.5) == [3]
+    assert _seq_list({"n": 3}) == []
 
 
 def test_a_tuple_is_a_list():
@@ -277,3 +277,12 @@ def test_the_coverage_summary_is_recorded_per_cycle_not_only_flat():
     j = s.index("gate_parts=parts", i)
     assert '"coverage": coverage or {},' in s[i:j]
     assert "gate_coverage=coverage)" in s          # the flat one stays too
+
+
+def test_a_fractional_sequence_names_no_claim():
+    """int() would truncate 3.7 to 3 and attribute the verdict to a claim
+    the gate did not name. Dropped instead: the part stays uncovered, which
+    is the conservative direction."""
+    assert _seq_list([3.7]) == []
+    assert _seq_list(3.5) == []
+    assert _seq_list([3.0, 4]) == [3, 4]  # an integral float is claim 3

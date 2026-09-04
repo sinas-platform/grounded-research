@@ -2170,9 +2170,16 @@ def _seq_list(raw) -> list[int]:
         if isinstance(x, bool):
             continue
         try:
-            n = int(x)
+            f = float(x)
         except (TypeError, ValueError):
             continue
+        # A fractional value names no claim. int() would truncate 3.7 to 3
+        # and attribute the verdict to a claim the gate did not name, which
+        # is worse than dropping it: a dropped covered_by leaves the part
+        # uncovered, the conservative direction.
+        if not f.is_integer():
+            continue
+        n = int(f)
         if n not in out:
             out.append(n)
     return out

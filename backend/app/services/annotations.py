@@ -646,6 +646,15 @@ async def annotations_for_documents(
                 )
             )
         ).all()
+        # Diagnosed per definition, poisoning the whole entity — both on
+        # purpose. Per definition, because three one-document identities
+        # through three definitions are healthy and 1,135 through one are
+        # not. Entity-wide, because the hazard is the entity's own edges:
+        # a hub's supersession and jurisdiction came from whichever merged
+        # decisions happened to carry them, and they are equally wrong for
+        # a document arriving through a healthy definition. Excluding only
+        # the broken (entity, definition) pair would hand that document the
+        # very values this guard exists to withhold.
         broken = {eid for eid, _rdef, n in counts if n > MAX_IDENTITY_DOCS}
 
     subject_by_doc = _pick_subjects(pairs, broken)

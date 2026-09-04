@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,11 +13,12 @@ from app.api.v1.annotations import _load_definitions
 from app.auth import CallerIdentity, get_caller
 from app.db import get_session
 from app.models import Document, DocumentClass, Result, ResultDocument, ResultTrace
-from app.services.annotations import annotations_for_documents
-from app.services.introspect import SUMMARY_PREVIEW_CHARS
-from app.services.result_filter import load_visible_result
 from app.schemas.common import TraceOut
 from app.schemas.runtime import ResultDocumentCompactOut, ResultDocumentOut, ResultOut
+from app.services.annotations import annotations_for_documents
+from app.services.document_identity import document_title_subquery
+from app.services.introspect import SUMMARY_PREVIEW_CHARS
+from app.services.result_filter import load_visible_result
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/results", tags=["results"])
@@ -90,6 +91,8 @@ async def get_result_documents(
             Document.filename,
             DocumentClass.name,
             func.left(Document.summary, SUMMARY_PREVIEW_CHARS),
+            Document.external_ref,
+            document_title_subquery(),
         )
         .join(Document, Document.id == ResultDocument.document_id)
         .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -119,19 +122,28 @@ async def get_result_documents(
                 rank=rd.rank,
                 annotations=annotations_by_doc.get(rd.document_id),
             )
-            for rd, filename, class_name, _ in rows
+            for rd, filename, class_name, *_ in rows
         ]
     return [
         ResultDocumentOut(
             **ResultDocumentOut.model_validate(rd).model_dump(
-                exclude={"filename", "document_class_name", "summary", "annotations"}
+                exclude={
+                    "filename",
+                    "document_class_name",
+                    "summary",
+                    "annotations",
+                    "title",
+                    "external_ref",
+                }
             ),
             filename=filename,
             document_class_name=class_name,
             summary=summary,
+            title=title,
+            external_ref=external_ref,
             annotations=annotations_by_doc.get(rd.document_id),
         )
-        for rd, filename, class_name, summary in rows
+        for rd, filename, class_name, summary, external_ref, title in rows
     ]
 
 

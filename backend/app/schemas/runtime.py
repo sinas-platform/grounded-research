@@ -14,6 +14,12 @@ from app.schemas.common import ORMModel, OwnedOut, Span, TimestampedOut
 # ─────────────────────────────────────────────────────────────
 class DocumentOut(OwnedOut):
     filename: str
+    # The identities a person can use: the title extracted at ingestion and
+    # the source's own natural key (case number, ECLI, CELEX, publication
+    # number). Filenames are often bare numeric ids, so readers should
+    # prefer these where present.
+    title: str | None = None
+    external_ref: str | None = None
     summary: str | None = None
     toc: dict[str, Any] | None = None
     document_class_id: uuid.UUID | None = None
@@ -211,6 +217,11 @@ class ResultDocumentOut(TimestampedOut):
     filename: str | None = None
     document_class_name: str | None = None
     summary: str | None = None
+    # Same identity treatment as DocumentOut: the extracted title and the
+    # source's natural key, joined in so a reader is not left citing a
+    # numeric filename.
+    title: str | None = None
+    external_ref: str | None = None
     # Present only when the read asked for it (?annotate=): derived graph
     # fields for the case entity this document is the full text of —
     # {"subject_entity_id": ..., "values": {name: value | None}}.

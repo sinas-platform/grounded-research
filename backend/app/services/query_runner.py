@@ -2669,13 +2669,15 @@ def _deleted_claims(validate: dict) -> list[dict]:
         for e in entries:
             if not isinstance(e, dict) or not e.get("claim"):
                 continue
-            # The whole text, not a prefix. Claims about the same case open
-            # with the same eighty characters more often than not, and a
-            # sequence is reused as claims are added and dropped, so a prefix
-            # can make two different deletions look like one record written
-            # twice. The record already caps the text at 400 characters, so
-            # this compares what was stored.
-            fp = (e.get("sequence"), str(e["claim"]))
+            # Everything the record holds, because a sequence is reused as
+            # claims are added and dropped and the text alone does not identify
+            # a claim: `_removal_record` stores 400 characters, and 23 of the
+            # 70 stored records are at that cap. Two long claims differing only
+            # past it would read as one record written twice, and the second
+            # one's citations would reach neither check. The citations are the
+            # field these checks consume, so they belong in the identity.
+            fp = (e.get("sequence"), str(e["claim"]),
+                  tuple(sorted(str(c) for c in (e.get("cites") or []))))
             if fp in seen:
                 continue
             seen.add(fp)

@@ -136,6 +136,26 @@ def test_two_claims_sharing_an_opening_are_two_deletions():
     assert [e["document"] for e in lost] == ["one.md", "two.md"]
 
 
+def test_records_alike_but_for_their_citations_are_two_deletions():
+    """`_removal_record` stores 400 characters of claim text and 23 of the 70
+    stored records are at that cap, so two long claims can differ only past
+    what was kept. The citations are what these checks read, so they are part
+    of what identifies a record."""
+    long = "The General Court recorded the following at length. " * 8
+    v = {"revision_1": {"dropped_detail": [claim(3, long, "one.md")]},
+         "revision_2": {"dropped_detail": [claim(3, long, "two.md")]}}
+    lost = _last_citation_losses(_deleted_claims(v), set())
+    assert [e["document"] for e in lost] == ["one.md", "two.md"]
+
+
+def test_one_deletion_recorded_twice_is_still_one():
+    """The pair this dedupe exists for. Both writes hold the same citations,
+    so widening the identity does not stop them collapsing."""
+    e = claim(9, "a swept claim", "a.md", "b.md")
+    v = {"final_sweep_dropped_detail": [e], "removed_1": {"claims": [dict(e)]}}
+    assert len(_deleted_claims(v)) == 1
+
+
 def test_a_cycle_that_dropped_nothing_contributes_nothing():
     """`claims` here is the count of claims the cycle saw, not a list of them.
     Reading the shapes by a fallback chain returned that integer as if it were

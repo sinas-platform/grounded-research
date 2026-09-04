@@ -228,3 +228,40 @@ def test_a_ghost_keeps_a_part_out_of_only_unsupported_by_arithmetic():
     assert len(p["covered_by_unsupported"]) != len(p["covered_by"])
     assert _coverage_summary([p])["only_unsupported"] == 0
     assert _coverage_summary([p])["naming_missing"] == 1
+
+
+# -- a verdict field that is not a list ----------------------------------------
+#
+# The field is specified as a list and a model does not always send one. Both
+# ways a scalar goes wrong are worse than merely wrong: a bare int raises
+# TypeError and fails the run, and the string "10" iterates to its characters,
+# so a part records claims 1 and 0 — corrupting the telemetry this exists to
+# produce, silently.
+
+
+def test_a_bare_number_is_read_as_one_claim():
+    assert _seq_list(7) == [7]
+
+
+def test_a_bare_string_is_not_split_into_digits():
+    """`"10"` is claim ten, not claims one and zero."""
+    assert _seq_list("10") == [10]
+
+
+def test_a_bare_number_does_not_raise():
+    for raw in (7, "7", "10"):
+        assert isinstance(_seq_list(raw), list)
+
+
+def test_a_boolean_is_not_claim_one():
+    """`True` is an int in Python. A gate answering `covered_by: true` has
+    named nothing."""
+    assert _seq_list(True) == [] and _seq_list([True, 3]) == [3]
+
+
+def test_an_object_names_nothing():
+    assert _seq_list({"n": 3}) == [] and _seq_list(3.5) == [3]
+
+
+def test_a_tuple_is_a_list():
+    assert _seq_list((3, 7)) == [3, 7]

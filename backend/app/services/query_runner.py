@@ -2142,9 +2142,28 @@ async def _question_parts(
 def _seq_list(raw) -> list[int]:
     """Claim sequence numbers out of a verdict field: ints only, order kept,
     duplicates dropped. The gate returns them as numbers or as strings
-    depending on the reply, and a repeat means nothing. Pure."""
+    depending on the reply, and a repeat means nothing.
+
+    A scalar is read as a list of one. The field is specified as a list, but a
+    model that answers `covered_by: 7` plainly means claim 7, and the two ways
+    a scalar goes wrong are both silent or fatal rather than merely wrong:
+    iterating a bare int raises TypeError and fails the run, and iterating the
+    string "10" yields the characters, so the part records claims 1 and 0 —
+    corrupting the very telemetry this exists to produce.
+
+    A bool is not a sequence number. `True` is an int in Python and would
+    otherwise be read as claim 1.
+
+    Pure.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple, set)):
+        raw = [raw]
     out: list[int] = []
-    for x in (raw or []):
+    for x in raw:
+        if isinstance(x, bool):
+            continue
         try:
             n = int(x)
         except (TypeError, ValueError):

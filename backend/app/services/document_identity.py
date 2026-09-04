@@ -33,6 +33,11 @@ def document_title_subquery() -> Select:
         )
         .where(PropertyValue.document_id == Document.id)
         .where(DocumentClassProperty.name == "title")
+        # A document holds one title value today, but LIMIT 1 without an
+        # order would hand back an arbitrary row the day a re-ingestion
+        # leaves two. Newest wins, id as the tiebreak, so the identity an
+        # API serves cannot flap between requests.
+        .order_by(PropertyValue.created_at.desc(), PropertyValue.id)
         .limit(1)
         .scalar_subquery()
     )

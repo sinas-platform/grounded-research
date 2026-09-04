@@ -1991,6 +1991,11 @@ async def _record_gate_cycle(
         # a running total and no dates, so this is the only place the arrival
         # of an obligation is recorded.
         "fed": fed or [], "system_waived": system_waived or [],
+        # Beside the parts it summarises, not only as a flat key. The parts in
+        # this dict already carry the per-part audit, so leaving the summary
+        # flat would put a last-write count next to a per-cycle history and
+        # invite reading one as the other.
+        "coverage": coverage or {},
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,

@@ -265,3 +265,15 @@ def test_an_object_names_nothing():
 
 def test_a_tuple_is_a_list():
     assert _seq_list((3, 7)) == [3, 7]
+
+
+def test_the_coverage_summary_is_recorded_per_cycle_not_only_flat():
+    """`gate_N` numbers the cycle and its parts already carry the per-part
+    audit. A flat `gate_coverage` alone would be a last-write count sitting
+    next to a per-cycle history, which is the shape that has needed fixing six
+    times in this file."""
+    s = src()
+    i = s.index('cycle = await _next_cycle_key(run_id, "validate", "gate")')
+    j = s.index("gate_parts=parts", i)
+    assert '"coverage": coverage or {},' in s[i:j]
+    assert "gate_coverage=coverage)" in s          # the flat one stays too

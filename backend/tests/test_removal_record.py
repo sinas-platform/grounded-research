@@ -249,6 +249,36 @@ def test_a_drop_with_no_sequence_is_neither():
     assert parse('{"drop": [{"rationale": "a reason long enough to clear it"}]}') is None
 
 
+def test_a_fractional_sequence_names_no_claim():
+    """int(9.5) is 9, and a drop is applied by deleting the claim it names. A
+    sequence the reply did not write as a whole number is not rounded into one
+    — the same guard revise and keep already apply, where the cost of getting
+    it wrong is only a rewrite."""
+    assert parse('{"drop": [{"seq": 9.5, "rationale": "no passage available '
+                 'carries this assertion"}]}') is None
+
+
+def test_a_boolean_sequence_names_no_claim():
+    """int(True) is 1, so a JSON true would delete the first claim."""
+    assert parse('{"drop": [{"seq": true, "rationale": "no passage available '
+                 'carries this assertion"}]}') is None
+
+
+def test_a_sequence_written_as_a_string_still_names_its_claim():
+    """Models quote numbers. revise and keep accept it, so drop does too."""
+    p = parse('{"drop": [{"seq": "9", "rationale": "no passage available '
+              'carries this assertion"}]}')
+    assert p["drop"] == [9]
+
+
+def test_a_rejected_sequence_is_not_recorded_as_a_refusal_to_explain():
+    """It came with a reason. What it lacked was a claim to apply it to, so
+    reporting it beside the reviser's refusals would misread the failure."""
+    p = parse('{"drop": [{"seq": 9.5, "rationale": "no passage available '
+              'carries this assertion"}, 2]}')
+    assert p["drop"] == [] and p["drop_unexplained"] == [2]
+
+
 def test_explained_and_unexplained_drops_can_arrive_together():
     p = parse('{"drop": [{"seq": 1, "rationale": "this claim rests on a passage '
               'that does not mention it"}, 2, {"seq": 3, "rationale": "no"}]}')

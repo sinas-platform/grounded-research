@@ -2713,10 +2713,13 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
     drop, drop_unexplained = [], []
     for x in (data.get("drop") or []):
         if isinstance(x, dict):
-            try:
-                seq = int(x.get("seq"))
-            except (TypeError, ValueError):
+            # The same digit test revise and keep apply to a sequence, for the
+            # same reason and with more at stake: int() reads 9.5 as claim 9
+            # and True as claim 1, and what comes out of here gets deleted.
+            # A sequence that is not written as a whole number names no claim.
+            if not str(x.get("seq", "")).lstrip("-").isdigit():
                 continue
+            seq = int(x["seq"])
             why = str(x.get("rationale") or "").strip()
             (drop if len(why) >= 20 else drop_unexplained).append(seq)
             if len(why) >= 20:

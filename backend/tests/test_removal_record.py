@@ -206,3 +206,122 @@ def test_the_revisers_drop_is_not_double_recorded():
     too would put the same deletion in the telemetry twice."""
     s = src()
     assert s.count("await _record_removal(") == 2
+
+
+# -- a drop costs a reason -----------------------------------------------------
+#
+# Every other disposition pays for itself: revise needs text and spans, add
+# needs those plus a type, keep needs a rationale, waive needs twenty
+# characters of one. Drop was a bare integer — the cheapest thing the reviser
+# could write, and the only one that removed a claim with no record of why.
+
+
+def parse(payload):
+    from app.services.query_runner import _parse_patch
+
+    return _parse_patch(payload)
+
+
+def test_a_drop_with_a_reason_is_applied_and_the_reason_kept():
+    p = parse('{"drop": [{"seq": 3, "rationale": "no passage available carries '
+              'the assertion about time limits"}]}')
+    assert p["drop"] == [3]
+    assert p["drop_reasons"][3].startswith("no passage available")
+
+
+def test_a_bare_integer_is_a_drop_the_reviser_declined_to_explain():
+    """The old shape. Recorded and not applied, so a reviser that will not
+    explain shows up as a refusal rather than as a parse failure."""
+    p = parse('{"drop": [9]}')
+    assert p["drop"] == [] and p["drop_unexplained"] == [9]
+
+
+def test_a_short_reason_does_not_count():
+    """The same twenty-character floor a waive already has to clear."""
+    p = parse('{"drop": [{"seq": 9, "rationale": "wrong"}]}')
+    assert p["drop"] == [] and p["drop_unexplained"] == [9]
+
+
+def test_a_drop_with_no_sequence_is_neither():
+    """It names no claim, so it is not a drop and not a refusal to explain one.
+    A patch with nothing else in it is no patch at all, which is what the
+    parser already returns for a reply that changes nothing."""
+    assert parse('{"drop": [{"rationale": "a reason long enough to clear it"}]}') is None
+
+
+def test_a_fractional_sequence_names_no_claim():
+    """int(9.5) is 9, and a drop is applied by deleting the claim it names. A
+    sequence the reply did not write as a whole number is not rounded into one
+    — the same guard revise and keep already apply, where the cost of getting
+    it wrong is only a rewrite."""
+    assert parse('{"drop": [{"seq": 9.5, "rationale": "no passage available '
+                 'carries this assertion"}]}') is None
+
+
+def test_a_boolean_sequence_names_no_claim():
+    """int(True) is 1, so a JSON true would delete the first claim."""
+    assert parse('{"drop": [{"seq": true, "rationale": "no passage available '
+                 'carries this assertion"}]}') is None
+
+
+def test_a_sequence_written_as_a_string_still_names_its_claim():
+    """Models quote numbers. revise and keep accept it, so drop does too."""
+    p = parse('{"drop": [{"seq": "9", "rationale": "no passage available '
+              'carries this assertion"}]}')
+    assert p["drop"] == [9]
+
+
+def test_a_rejected_sequence_is_not_recorded_as_a_refusal_to_explain():
+    """It came with a reason. What it lacked was a claim to apply it to, so
+    reporting it beside the reviser's refusals would misread the failure."""
+    p = parse('{"drop": [{"seq": 9.5, "rationale": "no passage available '
+              'carries this assertion"}, 2]}')
+    assert p["drop"] == [] and p["drop_unexplained"] == [2]
+
+
+def test_explained_and_unexplained_drops_can_arrive_together():
+    p = parse('{"drop": [{"seq": 1, "rationale": "this claim rests on a passage '
+              'that does not mention it"}, 2, {"seq": 3, "rationale": "no"}]}')
+    assert p["drop"] == [1] and sorted(p["drop_unexplained"]) == [2, 3]
+
+
+def test_an_unexplained_drop_alone_is_still_a_patch():
+    """Otherwise the reply reads as unusable and the reviser is asked to repeat
+    itself, when what it did was make one disposition that did not count."""
+    assert parse('{"drop": [9]}') is not None
+
+
+def test_the_prompt_asks_for_the_shape_and_says_the_price():
+    s = src()
+    assert '"drop": [{"seq": <int>, "rationale":' in s
+    # Asserted in fragments: the sentence is wrapped across source lines, and
+    # pinning the contiguous string would fail on a reformat that changes
+    # nothing about what the reviser reads.
+    assert "Dropping a claim costs a reason" in s
+    assert "with no reason is not applied and the claim stays." in s
+
+
+def test_the_reason_rides_with_what_the_claim_said_and_cited():
+    """`_removal_record` reads the database and cannot know the reviser's
+    words, so they are merged in at the call site."""
+    s = src()
+    assert 'patch.get("drop_reasons") or {}' in s
+    assert '"dropped_unexplained": patch.get("drop_unexplained") or []' in s
+def test_a_reply_of_nothing_but_refusals_still_records_them():
+    """The reply that matters most takes the other exit. Nothing is applied,
+    so `_revise_answer` returns through its no-change branch, and until this
+    that branch wrote every count as zero and said nothing about the drops it
+    had refused. A reviser that will remove a claim but not say why would then
+    be the one behaviour the record could not show.
+    """
+    s = src()
+    i = s.index("revision_yielded_no_change=True")
+    branch = s[i:i + 700]
+    assert '"dropped_unexplained": (patch or {}).get("drop_unexplained")' in branch
+
+
+def test_the_no_change_branch_survives_an_unparsable_reply():
+    """It is reached with `patch` None as well, and reads the same key off it."""
+    s = src()
+    i = s.index("revision_yielded_no_change=True")
+    assert "(patch or {})" in s[i:i + 700]

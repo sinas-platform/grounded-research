@@ -3157,30 +3157,57 @@ def _overreach_seqs(verdict: dict) -> set[int]:
     return out
 
 
-def _still_narrowing(history: list[set[int]]) -> bool:
-    """Whether a claim marked overreaching last round was marked again this one.
+def _failed_seqs(verdict: dict) -> set[int]:
+    """The claim numbers with a span that failed validation this round. Pure."""
+    out: set[int] = set()
+    for f in (verdict.get("failed") or []):
+        if not isinstance(f, dict):
+            continue
+        raw = f.get("claim_sequence")
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if n.is_integer():
+            out.add(int(n))
+    return out
 
-    That repetition can only mean the reviser rewrote it. Evidence is judged
-    with `pending_only=True`, so a claim whose spans have all passed is not
-    re-judged and produces no coverage verdict at all: an untouched claim stops
-    being reported rather than being reported again. The only way the same
-    sequence comes back is that the revision bound new spans, which arrive
-    `validated=False` from `_bind_spans` and put the claim back in front of the
-    judge.
 
-    So this says the claim is moving. It does not say how far. The coverage
+def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
+    """Whether a claim was re-marked overreaching *because it was rewritten*.
+
+    Repetition alone does not prove a rewrite, and the difference is the whole
+    correctness of this criterion.
+
+    Evidence is judged with `pending_only=True`. A claim whose spans have ALL
+    PASSED holds no pending row, is not re-judged, and produces no coverage
+    verdict, so it stops being reported rather than being reported again. For
+    that claim, a repeat can only mean the revision bound new spans — revising
+    deletes the claim's evidence and re-binds it, and `_bind_spans` writes
+    `validated=False` — which puts it back in front of the judge. Repetition is
+    proof of movement.
+
+    But a claim carrying a FAILING span keeps that row pending whether anybody
+    touches it or not. It is re-judged every round for free, and its coverage
+    verdict comes back with it. Repetition there proves nothing, and counting
+    it would buy rounds for a claim nobody is working on.
+
+    So a sequence that failed a span in either of the two rounds is excluded.
+    What survives is a claim that was clean on the evidence, was re-judged
+    anyway, and can only have been re-judged because it was rebuilt.
+
+    What this still cannot say is how much better the claim got: the coverage
     verdict is `full` or `partial` with no degree, so "partial again" reads the
-    same whether the claim shrank by half or barely changed. Reliable as a
-    signal of work in progress, useless as a measure of progress.
-
-    Measured before this existed: Q53 claim 14 was marked in round 3, marked
-    again in round 4, and deleted when the budget ran out at four — the
-    narrowing was working and it ran out of attempts. `failed_history` could
-    not see it, because a coverage verdict never fails an evidence row.
+    same whether the claim shrank by half or barely changed. Reliable that work
+    is happening, silent on how much.
 
     Pure.
     """
-    return len(history) >= 2 and bool(history[-1] & history[-2])
+    if len(overreach) < 2 or len(failed) < 2:
+        return False
+    return bool((overreach[-1] & overreach[-2]) - (failed[-1] | failed[-2]))
 
 
 async def _stage_validate_publish(
@@ -3205,6 +3232,10 @@ async def _stage_validate_publish(
     # `round_N` by prefix; folding overreach into it would change what every
     # stored run means after the fact.
     overreach_history: list[set[int]] = []
+    # Which claims failed a span, per round. A claim with a failing row is
+    # re-judged every round whether or not anybody touched it, so its coverage
+    # verdict repeating says nothing about revision.
+    failed_seq_history: list[set[int]] = []
     round_no = 0
     while True:
         round_no += 1
@@ -3222,7 +3253,7 @@ async def _stage_validate_publish(
             # than folded into it: a claim marked overreaching twice running is
             # a claim the reviser is rewriting, and the failed-row count cannot
             # see that because a coverage verdict never fails a row.
-            narrowing = _still_narrowing(overreach_history)
+            narrowing = _still_narrowing(overreach_history, failed_seq_history)
             if round_no > HARD_VALIDATE_ROUNDS or not (converging or narrowing):
                 break
             extended_because = "converging" if converging else "narrowing"
@@ -3232,6 +3263,7 @@ async def _stage_validate_publish(
                                               pending_only=True, run_id=run_id)
         failed_history.append(len(verdict["failed"]))
         overreach_history.append(_overreach_seqs(verdict))
+        failed_seq_history.append(_failed_seqs(verdict))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),

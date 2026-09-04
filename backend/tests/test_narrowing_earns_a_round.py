@@ -5,20 +5,30 @@ that is converging — `failed_history[-1] < failed_history[-2]`, a count of
 failed evidence rows. A coverage verdict never fails an evidence row, so a
 claim being narrowed contributes nothing to that count and buys no time.
 
-Measured: Q53 claim 14 was marked overreaching in round 3, marked again in
-round 4, and deleted when the budget ran out at four. The narrowing was
-working and it ran out of attempts.
+WHAT MAKES A REPEAT MEAN SOMETHING, AND WHEN IT MEANS NOTHING
 
-Why the repetition is a reliable signal, and the only one available: evidence
-is judged with `pending_only=True`, so a claim whose spans have all passed is
-not re-judged and produces no coverage verdict. An untouched claim stops being
-reported rather than being reported again. The only way the same sequence comes
-back is that the revision bound new spans, which `_bind_spans` writes with
-`validated=False`, putting the claim back in front of the judge.
+Evidence is judged with `pending_only=True`. A claim whose spans have ALL
+PASSED holds no pending row, is not re-judged, and produces no coverage
+verdict, so it stops being reported rather than being reported again. For that
+claim, a repeat can only mean the revision bound new spans — revising deletes
+the claim's evidence and re-binds it, `validated=False` — which puts it back in
+front of the judge. Repetition is proof it was rewritten.
 
-What it cannot tell us is how much better the claim got. The verdict is `full`
-or `partial` with no degree, so "partial again" reads the same whether the
-claim shrank by half or barely moved.
+A claim carrying a FAILING span is different: that row stays pending whether
+anybody touches it or not, so the claim is re-judged every round for free and
+its coverage verdict returns with it. Repetition there proves nothing, and
+counting it would buy rounds for a claim nobody is working on. Such claims are
+excluded, per claim rather than per round.
+
+That exclusion disqualifies the case that motivated this. Q53 claim 14 was
+marked in rounds 3 and 4 and then removed by the rounds-exhausted path, which
+selects claims with an unvalidated row — so it carried a failing span
+throughout and its repetition was free. The criterion is narrower than the
+example that prompted it, and correct rather than convenient.
+
+What none of this can say is how much better a claim got: the coverage verdict
+is `full` or `partial` with no degree, so "partial again" reads the same
+whether the claim shrank by half or barely moved.
 
 Pure: no DB, no network.
 
@@ -29,7 +39,11 @@ Run from the backend directory:
 import inspect
 import pathlib
 
-from app.services.query_runner import _overreach_seqs, _still_narrowing
+from app.services.query_runner import (
+    _failed_seqs,
+    _overreach_seqs,
+    _still_narrowing,
+)
 
 
 def v(*seqs):
@@ -79,44 +93,44 @@ def test_a_missing_key_does_not_raise():
 
 def test_the_same_claim_twice_running_is_narrowing():
     """Q53's shape: claim 14 in round 3 and again in round 4."""
-    assert _still_narrowing([{14}, {14}])
+    assert _still_narrowing([{14}, {14}], [set(), set()])
 
 
 def test_one_of_several_returning_is_enough():
     """A run does not have to be narrowing everything to be narrowing
     something, and the something is what needs the round."""
-    assert _still_narrowing([{3, 14}, {14, 21}])
+    assert _still_narrowing([{3, 14}, {14, 21}], [set(), set()])
 
 
 def test_a_different_claim_each_round_is_not_narrowing():
     """New findings on new claims are not one claim being worked. Granting a
     round for that would extend a run that keeps discovering problems rather
     than one that is closing them."""
-    assert not _still_narrowing([{3}, {14}])
+    assert not _still_narrowing([{3}, {14}], [set(), set()])
 
 
 def test_overreach_that_cleared_is_not_narrowing():
     """A claim marked and then not marked is a claim that was fixed, and needs
     no extra round."""
-    assert not _still_narrowing([{14}, set()])
+    assert not _still_narrowing([{14}, set()], [set(), set()])
 
 
 def test_a_first_marking_is_not_yet_narrowing():
     """One round cannot show repetition. The claim gets the rounds still left
     in the base budget."""
-    assert not _still_narrowing([{14}])
-    assert not _still_narrowing([set(), {14}])
+    assert not _still_narrowing([{14}], [set()])
+    assert not _still_narrowing([set(), {14}], [set(), set()])
 
 
 def test_no_history_is_not_narrowing():
-    assert not _still_narrowing([])
+    assert not _still_narrowing([], [])
 
 
 def test_only_the_last_two_rounds_count():
     """A claim marked in round 1, absent in 2, marked again in 3 is not being
     worked continuously, and the criterion is about the round just spent."""
-    assert not _still_narrowing([{14}, set(), {14}][:2])
-    assert _still_narrowing([{14}, set(), {14}][1:]) is False
+    assert not _still_narrowing([{14}, set(), {14}][:2], [set(), set()])
+    assert _still_narrowing([{14}, set(), {14}][1:], [set(), set()]) is False
 
 
 # -- how it is wired -----------------------------------------------------------
@@ -161,3 +175,65 @@ def test_the_reason_is_recorded_in_the_round_it_bought():
     i = s.index("extended_because = None")
     j = s.index('"extended_because": extended_because', i)
     assert '"overreaching": len(verdict.get("overreaching") or []),' in s[i:j]
+
+
+# -- a failing span makes repetition meaningless -------------------------------
+#
+# Revising a claim deletes its evidence and re-binds it, so a revised claim
+# arrives with fresh pending rows. But a claim carrying a FAILING span keeps
+# that row pending whether anybody touches it or not: it is re-judged every
+# round for free, and its coverage verdict comes back with it. Counting that as
+# narrowing would buy rounds for a claim nobody is working on.
+
+
+def test_a_claim_that_failed_a_span_does_not_count_as_narrowing():
+    """It was re-judged because its row was still pending, not because it was
+    rewritten."""
+    assert not _still_narrowing([{14}, {14}], [{14}, {14}])
+
+
+def test_failing_in_either_round_is_enough_to_exclude_it():
+    assert not _still_narrowing([{14}, {14}], [{14}, set()])
+    assert not _still_narrowing([{14}, {14}], [set(), {14}])
+
+
+def test_another_claim_failing_does_not_exclude_a_clean_one():
+    """The exclusion is per claim, not per round. A run can have one claim
+    failing spans and another genuinely being narrowed."""
+    assert _still_narrowing([{9, 14}, {9, 14}], [{9}, {9}])
+
+
+def test_the_motivating_case_no_longer_qualifies():
+    """Q53 claim 14 was marked in rounds 3 and 4 and then dropped by the
+    rounds-exhausted path, which selects claims with an unvalidated row — so it
+    had a failing span throughout and its repetition proved nothing. The
+    example that motivated this criterion is exactly what the criterion now
+    excludes."""
+    assert not _still_narrowing([{14}, {14}], [{14}, {14}])
+
+
+def test_failed_sequences_are_read_the_same_way_as_overreach_ones():
+    v = {"failed": [{"claim_sequence": 3}, {"claim_sequence": "7"},
+                    {"claim_sequence": 2.5}, {"claim_sequence": True},
+                    {"claim_sequence": None}, "nonsense"]}
+    assert _failed_seqs(v) == {3, 7}
+
+
+def test_no_failures_is_an_empty_set():
+    assert _failed_seqs({}) == set() and _failed_seqs({"failed": []}) == set()
+
+
+def test_the_two_histories_stay_in_step():
+    """Both are appended once per round, after the verdict. A criterion reading
+    index -1 and -2 of two lists is wrong the moment they can differ in
+    length."""
+    s = src()
+    i = s.index('failed_history.append(len(verdict["failed"]))')
+    window = s[i:i + 260]
+    assert "overreach_history.append(_overreach_seqs(verdict))" in window
+    assert "failed_seq_history.append(_failed_seqs(verdict))" in window
+
+
+def test_a_short_history_is_not_narrowing():
+    assert not _still_narrowing([{14}], [set(), set()])
+    assert not _still_narrowing([{14}, {14}], [set()])

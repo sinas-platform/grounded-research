@@ -24,18 +24,26 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from sqlalchemy import func, select
 
-from app.services import claim_naming, obligations
 from app.auth import CallerIdentity
 from app.config import get_settings
 from app.db import AsyncSessionLocal
-from app.models import AnswerClaim, ClaimEvidence, Document, DocumentClass, DocumentVersion, Result, ResultDocument
+from app.models import (
+    AnswerClaim,
+    ClaimEvidence,
+    Document,
+    DocumentClass,
+    DocumentVersion,
+    Result,
+    ResultDocument,
+)
 from app.models.query import QueryRun
+from app.services import claim_naming, obligations
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -135,7 +143,7 @@ def _domain_article() -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso() -> str:
@@ -2658,6 +2666,7 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
     if not isinstance(data, dict):
         return None
 
+    drop_reasons: dict[int, str] = {}
     revise = []
     for c in (data.get("revise") or []):
         if not isinstance(c, dict):
@@ -2687,8 +2696,39 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             add.append({"text": text, "type": "abstention", "evidence": [],
                         "rationale": str(c.get("rationale") or "").strip()})
 
-    drop = [int(x) for x in (data.get("drop") or [])
-            if str(x).lstrip("-").isdigit()]
+    # A drop costs a reason, like every other disposition. Revising needs text
+    # and spans, adding needs those plus a type, keeping needs a rationale, and
+    # waiving needs twenty characters of one. Dropping was a bare integer, and
+    # it is the disposition that removed two claims from Q41 — a reasonable
+    # time limit under Article 41(1), and the legality of copying a medium in
+    # its entirety — with nothing recorded about why, and nothing surviving
+    # that covers either.
+    #
+    # A drop without a reason is not applied, which is what this file already
+    # does to a waive whose rationale is too short: a disposition that does not
+    # meet its contract does not take effect. The refused sequences are
+    # returned so the caller can record them, because the interesting failure
+    # is the reviser declining to explain rather than the claim surviving one
+    # more cycle.
+    drop, drop_unexplained = [], []
+    for x in (data.get("drop") or []):
+        if isinstance(x, dict):
+            # The same digit test revise and keep apply to a sequence, for the
+            # same reason and with more at stake: int() reads 9.5 as claim 9
+            # and True as claim 1, and what comes out of here gets deleted.
+            # A sequence that is not written as a whole number names no claim.
+            if not str(x.get("seq", "")).lstrip("-").isdigit():
+                continue
+            seq = int(x["seq"])
+            why = str(x.get("rationale") or "").strip()
+            (drop if len(why) >= 20 else drop_unexplained).append(seq)
+            if len(why) >= 20:
+                drop_reasons[seq] = why[:400]
+        elif str(x).lstrip("-").isdigit():
+            # The old bare-integer shape. Read as a drop the reviser declined
+            # to explain rather than rejected outright, so the refusal is
+            # visible in the telemetry instead of looking like a parse failure.
+            drop_unexplained.append(int(x))
 
     # Keeping a claim the gate objected to is an answer, not a non-answer.
     # When the gate names a stronger source, the draft's citation is often
@@ -2710,9 +2750,10 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
                 and len(str(w.get("rationale") or "").strip()) >= 20:
             waives.append({"doc": str(w["doc"]).strip(),
                            "rationale": str(w["rationale"]).strip()})
-    if not (revise or add or drop or keep or waives):
+    if not (revise or add or drop or keep or waives or drop_unexplained):
         return None
     return {"revise": revise, "add": add, "drop": drop, "keep": keep,
+            "drop_reasons": drop_reasons, "drop_unexplained": drop_unexplained,
             "waive": waives}
 
 
@@ -3037,6 +3078,9 @@ async def _revise_answer(
         "Change ONLY what the feedback identifies. Leave every other claim "
         "alone — do not restate it, do not rephrase it, do not return it. "
         "A claim you do not mention is kept exactly as it is.\n\n"
+        "Dropping a claim costs a reason, like every other change: say what "
+        "the claim asserted and why no passage available can carry it. A drop "
+        "with no reason is not applied and the claim stays.\n\n"
         "For each claim you do change: narrow it if it asserts more than its "
         "passages establish, rewrite it if it contradicts another claim, and "
         "drop it if no passage can carry it. Add a claim only where the answer "
@@ -3074,7 +3118,8 @@ async def _revise_answer(
         + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
         '"rationale": "<why this claim rests on this source>", '
         '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
-        '"drop": [<seq>], '
+        '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
+        'and why no passage available can carry it>"}], '
         '"keep": [{"seq": <int>, "rationale": "<why the current citation '
         'stands despite the feedback>"}], '
         '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
@@ -3107,13 +3152,22 @@ async def _revise_answer(
         # Counts are all zero because nothing was applied. `kept_with_reason`
         # is not recorded here even when the patch carried keeps: the early
         # return above means they were not written either.
+        #
+        # Refused drops are the exception, and they have to be. A reply whose
+        # only content is drops with no reason lands here rather than below,
+        # because nothing was applied — and that reply is the whole point of
+        # asking for a reason. If it went unrecorded, the case where the
+        # reviser will remove a claim but not say why would be the one case
+        # invisible in the telemetry.
         cycle = await _next_cycle_key(run_id, "validate", "revision")
         await _tele(run_id, "validate", revision_yielded_no_change=True, **{
             cycle: {
                 "claims": len(by_claim), "revised": 0, "added": 0,
                 "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
                 "add_dropped_at_cap": 0, "untouched": len(by_claim),
-                "feedback_items": len(feedback), "yielded_no_change": True}})
+                "feedback_items": len(feedback), "yielded_no_change": True,
+                "dropped_unexplained": (patch or {}).get("drop_unexplained")
+                or []}})
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}
@@ -3129,6 +3183,12 @@ async def _revise_answer(
         dropped_here = await _removal_record(
             session, [c.id for c in (by_seq.get(s) for s in patch["drop"])
                       if c is not None])
+        # The reviser's own words for why, beside what the claim said and
+        # cited. `_removal_record` reads the database and cannot know them.
+        for entry in dropped_here:
+            why = (patch.get("drop_reasons") or {}).get(entry["sequence"])
+            if why:
+                entry["why"] = [why]
         for seq in patch["drop"]:
             claim = by_seq.get(seq)
             if claim is None:
@@ -3207,6 +3267,11 @@ async def _revise_answer(
             "abstentions": sum(1 for a in admitted
                                if a.get("type") == "abstention"),
             "dropped": len(patch["drop"]), "dropped_detail": dropped_here,
+            # Claims the reviser asked to drop and declined to explain. They
+            # were not removed. If this is where the drops go, the requirement
+            # is suppressing the disposition rather than documenting it, and
+            # that is the thing to know first.
+            "dropped_unexplained": patch.get("drop_unexplained") or [],
             "added": len(admitted),
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,

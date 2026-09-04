@@ -3037,6 +3037,15 @@ async def _stage_validate_publish(
                     question = (await session.get(QueryRun, run_id)).question
                 ok, missing, issues, correctness, points = await _gate_answer(
                     sinas, question, answer_id, run_id)
+                # Amended here, where the gate's output is final, rather than
+                # on the branches below. `issues` is complete the moment
+                # `_gate_answer` returns and is only read afterwards, and two
+                # paths out of this block return before any later write:
+                # publishing, and the sweep asking for a repair cycle, which
+                # recurses into a fresh validate. Amending on the branches left
+                # those cycles recorded without the issues that produced them,
+                # which is this same gap in a smaller place.
+                await _amend_gate_cycle(run_id, redraft=missing, issues=issues)
                 if ok and not correctness and (not issues or gate_cycles <= 0):
                     if not await _pre_publish_sweep(
                             run_id, sinas, caller, answer_id, question):
@@ -3051,9 +3060,7 @@ async def _stage_validate_publish(
                     if await _gate_point_is_new(run_id, key):
                         await _tele(run_id, "validate", gate_redraft=missing,
                                     gate_issues=issues, bonus_cycle=True)
-                        await _amend_gate_cycle(
-                            run_id, redraft=missing, issues=issues,
-                            bonus_cycle=True)
+                        await _amend_gate_cycle(run_id, bonus_cycle=True)
                         await _record_fed(run_id, key, bonus=True)
                         await _revise_answer(
                             sinas, run_id, answer_id, question,
@@ -3073,7 +3080,6 @@ async def _stage_validate_publish(
                         "the answer could not be made internally consistent — "
                         + " ".join(correctness)[:600])
                 await _tele(run_id, "validate", gate_redraft=missing, gate_issues=issues)
-                await _amend_gate_cycle(run_id, redraft=missing, issues=issues)
                 # A gap the reviser was already fed once is a gap it could
                 # not close from the corpus. Allowing the declared-gap claim
                 # only on the very last attempt meant the run burned every
@@ -3148,6 +3154,9 @@ async def _stage_validate_publish(
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues, correctness, points = await _gate_answer(
         sinas, question, answer_id, run_id)
+    # Same reason as the other call site: final here, and some paths below
+    # return before any later write.
+    await _amend_gate_cycle(run_id, redraft=missing, issues=issues)
     if ok and not correctness and (not issues or gate_cycles <= 0):
         async with AsyncSessionLocal() as session:
             caller = _runner_caller(await session.get(QueryRun, run_id))
@@ -3164,8 +3173,7 @@ async def _stage_validate_publish(
         if await _gate_point_is_new(run_id, key):
             await _tele(run_id, "validate", gate_redraft=missing,
                         gate_issues=issues, bonus_cycle=True)
-            await _amend_gate_cycle(run_id, redraft=missing, issues=issues,
-                                    bonus_cycle=True)
+            await _amend_gate_cycle(run_id, bonus_cycle=True)
             await _record_fed(run_id, key, bonus=True)
             await _revise_answer(sinas, run_id, answer_id, question,
                                  correctness + issues,
@@ -3182,8 +3190,7 @@ async def _stage_validate_publish(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
-    await _amend_gate_cycle(run_id, redraft=missing, issues=issues,
-                            dropped_claims=len(failing_ids))
+    await _amend_gate_cycle(run_id, dropped_claims=len(failing_ids))
     await _record_fed(run_id, key)
     await _revise_answer(sinas, run_id, answer_id, question,
                          correctness + issues,

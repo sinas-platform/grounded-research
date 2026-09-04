@@ -197,3 +197,56 @@ async def test_a_cycle_with_nothing_fed_records_an_empty_list(telemetry):
     await qr._record_gate_cycle("run-1", parts=[])
     assert telemetry["validate"]["gate_1"]["fed"] == []
     assert telemetry["validate"]["gate_1"]["system_waived"] == []
+
+
+# -- the amend must not sit behind an early return -----------------------------
+
+
+def runner_tree():
+    import ast
+    import inspect
+    import pathlib as _p
+
+    return ast.parse(_p.Path(inspect.getfile(qr)).read_text(encoding="utf-8"))
+
+
+def test_the_amend_is_the_statement_after_the_gate_call():
+    """Two paths out of the validation block return before any later write:
+    publishing, and the sweep asking for a repair cycle, which recurses into a
+    fresh validate. Amending on the branches left those cycles recorded with
+    their fed list and no issues, which is this same gap in a smaller place.
+
+    `issues` is final the moment `_gate_answer` returns and is only read after,
+    so the amend belongs immediately next to the call. Checked on the tree
+    rather than on offsets: the prose around these lines says "returns" often
+    enough that string search reads a comment as control flow.
+    """
+    import ast
+
+    def is_gate_call(stmt) -> bool:
+        """The assignment itself, not every block that encloses it. Matching on
+        unparsed text counted the function, the loop and the branch around it
+        as three more call sites."""
+        val = getattr(stmt, "value", None)
+        if isinstance(val, ast.Await):
+            val = val.value
+        return isinstance(val, ast.Call) and getattr(val.func, "id", "") == "_gate_answer"
+
+    tree = runner_tree()
+    recording = 0
+    for node in ast.walk(tree):
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        for n, stmt in enumerate(body[:-1]):
+            if not is_gate_call(stmt):
+                continue
+            if "_issues" in ast.unparse(stmt):
+                # The read-only caller discards the issues and opens no cycle.
+                continue
+            nxt = ast.unparse(body[n + 1])
+            assert "_amend_gate_cycle" in nxt, (
+                "a branch sits between the gate call and its amend: " + nxt[:120])
+            assert "redraft=missing" in nxt and "issues=issues" in nxt, nxt[:160]
+            recording += 1
+    assert recording == 2, f"expected both recording call sites, saw {recording}"

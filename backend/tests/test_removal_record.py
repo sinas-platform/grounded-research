@@ -167,16 +167,24 @@ def test_deletions_outside_a_revision_cycle_are_numbered():
     assert '_next_cycle_key(run_id, "validate", "removed")' in s
 
 
-def test_the_prefix_avoids_the_flat_keys_it_would_have_counted():
-    """`_cycle_key` counts any key starting with the prefix, and
-    `dropped_claims` and `dropped_detail` are both flat keys under `validate`,
-    so numbering as `dropped_N` would have opened a run's history at
-    `dropped_3`."""
+def test_the_prefix_numbers_from_one_beside_the_flat_keys():
+    """`removed_` was chosen when `_cycle_key` counted any key starting with
+    the prefix: `dropped_claims` and `dropped_detail` are both flat keys under
+    `validate`, so `dropped_N` would have opened a run's history at
+    `dropped_3`. The gate-cycle change has since tightened the helper to
+    `prefix_<digits>`, so that hazard is gone and `dropped_` would number
+    correctly too.
+
+    The prefix stays anyway, and this pins what it now buys: the history is a
+    different thing from the two flat keys, which carry only the latest state.
+    """
     from app.services.query_runner import _cycle_key
 
     flat = {"dropped_claims": 2, "dropped_detail": [], "final_sweep_dropped": 1}
     assert _cycle_key(flat, "removed") == "removed_1"
-    assert _cycle_key(flat, "dropped") != "dropped_1"   # why the prefix differs
+    # No longer load-bearing, and recorded as such rather than left asserting
+    # a hazard that another branch removed.
+    assert _cycle_key(flat, "dropped") == "dropped_1"
 
 
 def test_each_record_names_which_path_deleted():

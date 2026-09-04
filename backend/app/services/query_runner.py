@@ -2839,10 +2839,14 @@ async def _record_removal(run_id: uuid.UUID, path: str,
     earlier claims and their citations vanished from the telemetry that exists
     to keep them.
 
-    Numbered `removed_N` rather than `dropped_N`: `_cycle_key` counts any key
-    starting with the prefix, and `dropped_claims` and `dropped_detail` are
-    both flat keys under `validate`, so a run's first deletion would have been
-    called `dropped_3`. `removed_` collides with nothing.
+    Numbered `removed_N` rather than `dropped_N`. When this was written
+    `_cycle_key` counted any key starting with the prefix, and `dropped_claims`
+    and `dropped_detail` are both flat keys under `validate`, so a run's first
+    deletion would have been called `dropped_3`. The gate-cycle change has
+    since tightened `_cycle_key` to `prefix_<digits>`, so `dropped_` would work
+    now too; `removed_` stays because the history is a different thing from
+    those two flat keys, which carry only the latest state, and one prefix per
+    meaning keeps them apart when read.
 
     The reviser's drop is not written here. It already sits inside `revision_N`,
     which is numbered, and that is where a reader of a revision cycle looks for

@@ -1893,12 +1893,45 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     return answer_id
 
 
+def _coverage_summary(parts: list[dict]) -> dict:
+    """Counts over the parts the gate called covered, for reading without
+    walking every part.
+
+    `only_*` rather than `any_*`: a part covered by three claims of which one
+    lacks evidence is not the finding. A part every one of whose named claims
+    lacks evidence is. Pure.
+    """
+    cov = [p for p in parts if p.get("covered")]
+
+    def only(key: str) -> int:
+        # Length equality already excludes a part that named a claim which does
+        # not exist: a missing sequence is never put in the unsupported or
+        # unresponsive lists, so the two lengths cannot match while one is
+        # there. Guarding on `covered_by_missing` as well would be a condition
+        # that can never fire.
+        return sum(1 for p in cov
+                   if (p.get("covered_by")
+                       and len(p.get(key) or []) == len(p.get("covered_by") or [])))
+
+    return {
+        "parts": len(parts),
+        "covered": len(cov),
+        "naming_nothing": sum(1 for p in cov if not p.get("covered_by")),
+        "naming_missing": sum(1 for p in cov if p.get("covered_by_missing")),
+        "only_unsupported": only("covered_by_unsupported"),
+        "only_unresponsive": only("covered_by_unresponsive"),
+    }
+
+
 async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
     unaccounted: list[str] | None = None,
     fed: list[dict] | None = None,
     system_waived: list[str] | None = None,
+
+
+    coverage: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -1961,7 +1994,7 @@ async def _record_gate_cycle(
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
-                gate_unaccounted=unaccounted)
+                gate_unaccounted=unaccounted, gate_coverage=coverage)
 
 
 async def _amend_gate_cycle(run_id: uuid.UUID, **detail: Any) -> None:
@@ -2106,6 +2139,51 @@ async def _question_parts(
     return parts
 
 
+def _seq_list(raw) -> list[int]:
+    """Claim sequence numbers out of a verdict field: ints only, order kept,
+    duplicates dropped. The gate returns them as numbers or as strings
+    depending on the reply, and a repeat means nothing. Pure."""
+    out: list[int] = []
+    for x in (raw or []):
+        try:
+            n = int(x)
+        except (TypeError, ValueError):
+            continue
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def _audit_coverage(named: list[int], claim_seqs: set, with_evidence: set,
+                    unresponsive: list[int]) -> dict:
+    """What the claims a part names turn out to be.
+
+    The gate declares a part covered and, from here, has to say which claims
+    cover it. That turns an assertion into three questions arithmetic can
+    answer with no model: does the claim exist, does it carry any evidence, and
+    did the gate itself already call it merely descriptive.
+
+    The three are kept apart because they mean different things. Naming nothing
+    is the gate declining to point. Naming a claim that is not in the answer is
+    the gate pointing at something that is not there, which is worse. Naming
+    claims that all lack evidence is a part resting on assertion. Naming claims
+    the verdict also listed as `unresponsive` is a part resting on text that
+    only describes its source — the one finding class the gate records and then
+    lets through, because `unresponsive` goes to `issues` and never blocks.
+
+    Nothing here blocks anything. It is recorded so the next batch can say how
+    often each happens, and the decision comes after. Pure.
+    """
+    missing = [n for n in named if n not in claim_seqs]
+    present = [n for n in named if n in claim_seqs]
+    return {
+        "covered_by": named,
+        "covered_by_missing": missing,
+        "covered_by_unsupported": [n for n in present if n not in with_evidence],
+        "covered_by_unresponsive": [n for n in present if n in unresponsive],
+    }
+
+
 async def _gate_answer(
     sinas: _Sinas, run_question: str, answer_id: uuid.UUID, run_id: uuid.UUID
 ) -> tuple[bool, str, list[str], list[str], list[str]]:
@@ -2145,6 +2223,14 @@ async def _gate_answer(
                 )
             ).scalars().all()
         )
+        # Which claims carry any evidence at all. `cited` above is a flat set
+        # of filenames and cannot answer it per claim, and a part resting on a
+        # claim with no bound passage is a part resting on an assertion.
+        with_evidence = set((await session.execute(
+            select(AnswerClaim.sequence)
+            .join(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
+            .where(AnswerClaim.answer_id == answer_id)
+        )).scalars().all())
         parent_result_id = (
             await session.execute(
                 select(QueryRun.parent_result_id).where(QueryRun.answer_id == answer_id)
@@ -2203,10 +2289,15 @@ async def _gate_answer(
         'acceptable to leave unread.'
         '\n\nReply ONLY JSON: {"publishable": true|false,'
         + (' "parts": [{"n": <the number of the part above>, "covered": '
-           'true|false, "gap": "<what is missing, if not covered>"}],'
+           'true|false, "covered_by": [<the sequence numbers of the claims '
+           'that answer this part — name every one, and name none if the part '
+           'is not covered>], '
+           '"gap": "<what is missing, if not covered>"}],'
            if fixed else
            ' "parts": [{"asks": "<one thing the question asks>", "covered": '
-           'true|false, "gap": "<what is missing, if not covered>"}],')
+           'true|false, "covered_by": [<the sequence numbers of the claims '
+           'that answer this part>], '
+           '"gap": "<what is missing, if not covered>"}],')
         + ' "missing": "<if not publishable: what the claims fail to deliver on>",'
         ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
         ' "tension": "<ONLY a pair of claims that CANNOT BOTH BE TRUE — quote the '
@@ -2273,6 +2364,11 @@ async def _gate_answer(
     # addressing two of a question's three parts publish, and named one
     # gap at a time when it failed — so revision fixed them one cycle
     # each, or the run ran out of cycles first.
+    #
+    # Read before the parts because a part now records which of the claims it
+    # names the verdict had already called merely descriptive. One derivation,
+    # used twice: the `issues` line below reads the same list.
+    unresponsive_seqs = _seq_list(data.get("unresponsive"))
     if fixed:
         # The list is what the runner asked about, not what came back. A
         # verdict naming a part outside it is dropped, and a part it does not
@@ -2280,6 +2376,7 @@ async def _gate_answer(
         # a fixed decomposition binding instead of advisory. Without them the
         # drift returns through the verdict, which is how a part the question
         # does not ask was once added and immediately marked covered.
+        claim_seqs = {seq for seq, _ in rows}
         seen: dict[int, dict] = {}
         for x in (data.get("parts") or []):
             if not isinstance(x, dict):
@@ -2294,11 +2391,19 @@ async def _gate_answer(
             {"asks": a, "covered": bool((seen.get(n) or {}).get("covered")),
              "gap": str((seen.get(n) or {}).get("gap") or "").strip()
                     or ("" if n in seen else
-                        "the review returned no verdict for this part")}
+                        "the review returned no verdict for this part"),
+             **_audit_coverage(
+                 _seq_list((seen.get(n) or {}).get("covered_by")),
+                 claim_seqs, with_evidence, unresponsive_seqs)}
             for n, a in enumerate(fixed, start=1)
         ]
     else:
-        parts = [x for x in (data.get("parts") or []) if isinstance(x, dict)]
+        claim_seqs = {seq for seq, _ in rows}
+        parts = [
+            {**x, **_audit_coverage(_seq_list(x.get("covered_by")), claim_seqs,
+                                    with_evidence, unresponsive_seqs)}
+            for x in (data.get("parts") or []) if isinstance(x, dict)
+        ]
     uncovered = [
         str(x.get("gap") or x.get("asks") or "").strip()
         for x in parts if not x.get("covered")
@@ -2318,7 +2423,7 @@ async def _gate_answer(
     # "the answer contradicts itself" carried the same weight as "you
     # could have cited a stronger source", and shipped.
     correctness: list[str] = []
-    seqs = [s for s in (data.get("unresponsive") or []) if isinstance(s, (int, str))]
+    seqs = unresponsive_seqs
     if seqs:
         issues.append(
             "Claims " + ", ".join(str(s) for s in seqs) + " only describe their source "
@@ -2428,8 +2533,13 @@ async def _gate_answer(
         parts=[{"asks": str(x.get("asks") or "")[:300],
                 "covered": bool(x.get("covered")),
                 "accounted": not unaccounted,
-                "gap": str(x.get("gap") or "")[:300]}
-               for x in parts])
+                "gap": str(x.get("gap") or "")[:300],
+                "covered_by": x.get("covered_by") or [],
+                "covered_by_missing": x.get("covered_by_missing") or [],
+                "covered_by_unsupported": x.get("covered_by_unsupported") or [],
+                "covered_by_unresponsive": x.get("covered_by_unresponsive") or []}
+               for x in parts],
+        coverage=_coverage_summary(parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

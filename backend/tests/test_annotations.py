@@ -392,8 +392,10 @@ def test_the_pick_is_deterministic_lowest_id():
 
 
 def test_the_identity_bound_is_two():
-    """Cardinality "one" read from the entity's side: a decision may
-    legitimately be two documents (a regulatory and a court text, one per
-    identity definition), and past that the entity is a resolution failure.
-    Pinned so a change to the bound is a decision, not an accident."""
+    """Cardinality "one" read from the entity's side, PER DEFINITION: an
+    entity may hold one healthy identity through each identity definition,
+    and within one definition a re-ingestion may legitimately leave a second
+    in-service document behind. Past two through the same definition the
+    entity is a resolution failure. Pinned so a change to the bound is a
+    decision, not an accident."""
     assert MAX_IDENTITY_DOCS == 2

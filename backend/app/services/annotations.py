@@ -51,12 +51,15 @@ from app.models import (
 REDUCERS = {"first", "terminal", "length"}
 RESERVED_REDUCERS = {"exists", "count", "path", "agg"}
 # The dual of an identity definition's cardinality "one": at most this many
-# documents may share an identity entity before it stops being an identity.
-# Two, not one, because a deployment may declare several identity definitions
-# over the same entity type (a decision with a regulatory text and a court
-# text is legitimately two documents). Past the bound the entity is an
-# entity-resolution failure, and computing annotations from it would smear
-# one entity's facts across every document resolved into it.
+# in-service documents may claim an entity THROUGH ONE identity definition
+# before that identity stops being one. Counted per definition, so an entity
+# with a regulatory text, a court text and a transcript — one document each
+# through three identity definitions — is three healthy identities, not a
+# hub. Two rather than one because a re-ingestion can legitimately leave a
+# second in-service document behind (observed: the same decision ingested
+# under two filenames). Past the bound the entity is an entity-resolution
+# failure, and computing annotations from it would smear one entity's facts
+# across every document resolved into it.
 MAX_IDENTITY_DOCS = 2
 _NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _MAX_STAR_ITERATIONS = 64
@@ -546,18 +549,23 @@ async def annotations_for_documents(
     (is_full_text_of and friends). Citation-shaped definitions are not
     subject edges — a document that cites five cases is not any one of
     them, and the old any-edge pick silently elected the lowest id.
+    Cardinality "one" IS the identity declaration: a definition meant as
+    an identity but declared with the default "many" has not declared one,
+    and its documents get no subject — that is the contract, not a gap, so
+    a deployment writing an identity definition must say cardinality: one.
     Documents with no such edge, and subjects whose path reaches nothing,
     report every annotation as None — absence is an answer, not an error.
 
-    An entity that is the identity of more than MAX_IDENTITY_DOCS documents
-    yields no subject either. Cardinality "one" already says each document
-    is the full text of one entity; the dual bound is the same schema
-    intent read from the entity's side — one document per identity
-    definition, so a decision with a regulatory and a court text is two.
-    Beyond that the entity is a resolution failure (a hub named "Decision"
-    was the identity of 1,135 documents), and every annotation computed
-    from it would smear one entity's facts across unrelated documents.
-    Absence over arbitrary, again.
+    An entity claimed by more than MAX_IDENTITY_DOCS in-service documents
+    THROUGH ONE identity definition yields no subject either. Cardinality
+    "one" already says each document is the full text of one entity; the
+    dual bound is the same schema intent read from the entity's side, per
+    definition — so a decision with a regulatory text, a court text and a
+    transcript through three identity definitions is three healthy
+    identities, while a hub named "Decision" claimed by 1,135 documents
+    through one definition is a resolution failure whose annotations would
+    smear one entity's facts across unrelated documents. Absence over
+    arbitrary, again.
 
     Values come from the materialized store where present; anything else
     (non-materialized definitions, subjects not yet backfilled) is
@@ -608,7 +616,11 @@ async def annotations_for_documents(
         # having been re-ingested — the same filter retrieval applies.
         counts = (
             await session.execute(
-                select(Relationship.target_id, func.count(Relationship.source_id.distinct()))
+                select(
+                    Relationship.target_id,
+                    Relationship.relationship_definition_id,
+                    func.count(Relationship.source_id.distinct()),
+                )
                 .join(
                     RelationshipDefinition,
                     RelationshipDefinition.id == Relationship.relationship_definition_id,
@@ -628,10 +640,13 @@ async def annotations_for_documents(
                     (Relationship.current_state_id.is_(None))
                     | (RelationshipState.counts_as_active.is_(True)),
                 )
-                .group_by(Relationship.target_id)
+                .group_by(
+                    Relationship.target_id,
+                    Relationship.relationship_definition_id,
+                )
             )
         ).all()
-        broken = {eid for eid, n in counts if n > MAX_IDENTITY_DOCS}
+        broken = {eid for eid, _rdef, n in counts if n > MAX_IDENTITY_DOCS}
 
     subject_by_doc = _pick_subjects(pairs, broken)
     if not subject_by_doc:

@@ -2544,8 +2544,9 @@ async def _pre_publish_sweep(
                        if f.get("claim_id")}
         flagged_ids |= {o["claim_id"] for o in f_over if o.get("claim_id")}
         async with AsyncSessionLocal() as s3:
-            for cid in flagged_ids:
-                cid = uuid.UUID(str(cid))
+            ids = [uuid.UUID(str(c)) for c in flagged_ids]
+            swept = await _removal_record(s3, ids)
+            for cid in ids:
                 await s3.execute(
                     ClaimEvidence.__table__.delete()
                     .where(ClaimEvidence.claim_id == cid))
@@ -2553,7 +2554,12 @@ async def _pre_publish_sweep(
                     AnswerClaim.__table__.delete()
                     .where(AnswerClaim.id == cid))
             await s3.commit()
-        await _tele(run_id, "validate", final_sweep_dropped=len(flagged_ids))
+        # An overreach verdict never fails an evidence row, so these claims are
+        # removed on the sweep's judgment alone and nothing downstream would
+        # otherwise say which they were.
+        await _tele(run_id, "validate", final_sweep_dropped=len(flagged_ids),
+                    final_sweep_dropped_detail=swept)
+        await _record_removal(run_id, "final_sweep", swept)
         # A fixable defect in one claim must not demote the whole answer.
         # The flagged claims are gone — visibly: the drop is recorded and
         # the numbering keeps the gap — so re-ask the gate whether what
@@ -2823,6 +2829,72 @@ async def _cap_refusals_last_cycle(run_id: uuid.UUID) -> int:
     return int((v.get(latest) or {}).get("add_dropped_at_cap") or 0)
 
 
+async def _record_removal(run_id: uuid.UUID, path: str,
+                          entries: list[dict]) -> None:
+    """One numbered record per deletion event.
+
+    `_tele` merges by key, and both paths that delete outside a revision cycle
+    wrote a flat key. `_stage_validate_publish` recurses and the pre-publish
+    sweep runs more than once, so a second deletion overwrote the first and the
+    earlier claims and their citations vanished from the telemetry that exists
+    to keep them.
+
+    Numbered `removed_N` rather than `dropped_N`. When this was written
+    `_cycle_key` counted any key starting with the prefix, and `dropped_claims`
+    and `dropped_detail` are both flat keys under `validate`, so a run's first
+    deletion would have been called `dropped_3`. The gate-cycle change has
+    since tightened `_cycle_key` to `prefix_<digits>`, so `dropped_` would work
+    now too; `removed_` stays because the history is a different thing from
+    those two flat keys, which carry only the latest state, and one prefix per
+    meaning keeps them apart when read.
+
+    The reviser's drop is not written here. It already sits inside `revision_N`,
+    which is numbered, and that is where a reader of a revision cycle looks for
+    what that cycle removed.
+    """
+    if not entries:
+        return
+    key = await _next_cycle_key(run_id, "validate", "removed")
+    await _tele(run_id, "validate", **{key: {
+        "at": _iso(), "path": path, "count": len(entries), "claims": entries}})
+
+
+async def _removal_record(session, claim_ids: list) -> list[dict]:
+    """What these claims say and cite, read before they are deleted.
+
+    Three paths delete a claim and each recorded something different: the
+    reviser's drop kept a count, the sweep's forced drop kept a count, and only
+    the rounds-exhausted drop kept the text. None of the three kept what the
+    claim cited, and the evidence rows go with the claim, so afterwards there
+    is no way to ask whether a deletion took the last citation of a source the
+    gate had named. Measured over the stored runs: 160 claims deleted, 123 with
+    their text, 0 with their citations.
+
+    Called before the delete, in the caller's session, so what is recorded is
+    what was actually there.
+
+    `why` is only ever present on the rounds-exhausted path, where a failing
+    verdict explains itself; the other two paths delete for a reason the caller
+    already knows and states separately.
+    """
+    if not claim_ids:
+        return []
+    rows = (await session.execute(
+        select(AnswerClaim.id, AnswerClaim.sequence, AnswerClaim.claim_text,
+               Document.filename)
+        .outerjoin(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
+        .outerjoin(Document, Document.id == ClaimEvidence.document_id)
+        .where(AnswerClaim.id.in_(list(claim_ids)))
+    )).all()
+    out: dict = {}
+    for cid, seq, text, fn in rows:
+        e = out.setdefault(cid, {"sequence": seq,
+                                 "claim": (text or "")[:400], "cites": []})
+        if fn and fn not in e["cites"]:
+            e["cites"].append(fn)
+    return sorted(out.values(), key=lambda d: d["sequence"])
+
+
 async def _revise_answer(
     sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID, question: str,
     feedback: list[str], extra_points: list[str] | None = None,
@@ -3051,6 +3123,12 @@ async def _revise_answer(
     admitted: list[dict] = []
     add_dropped_at_cap = 0
     async with AsyncSessionLocal() as session:
+        # Read before deleting. A drop is the one disposition the reviser can
+        # write without a rationale, so the text and the citations are the only
+        # account there will ever be of what left the answer here.
+        dropped_here = await _removal_record(
+            session, [c.id for c in (by_seq.get(s) for s in patch["drop"])
+                      if c is not None])
         for seq in patch["drop"]:
             claim = by_seq.get(seq)
             if claim is None:
@@ -3128,7 +3206,8 @@ async def _revise_answer(
             "kept_with_reason": len(patch.get("keep") or []),
             "abstentions": sum(1 for a in admitted
                                if a.get("type") == "abstention"),
-            "dropped": len(patch["drop"]), "added": len(admitted),
+            "dropped": len(patch["drop"]), "dropped_detail": dropped_here,
+            "added": len(admitted),
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,
             "feedback_items": len(feedback)}})
@@ -3293,7 +3372,8 @@ async def _stage_validate_publish(
         # kept, so a reader of the published answer saw claim numbering jump
         # from 1 to 3 to 10 with nothing to explain the gap, and no way to
         # tell a dropped claim from an export fault.
-        dropped = []
+        dropped = await _removal_record(session, list(failing_ids))
+        by_seq_dropped = {d["sequence"]: d for d in dropped}
         for cid in failing_ids:
             claim = await session.get(AnswerClaim, cid)
             if claim is not None:
@@ -3302,11 +3382,9 @@ async def _stage_validate_publish(
                     .where(ClaimEvidence.claim_id == cid)
                     .where(ClaimEvidence.validated.is_(False))
                 )).scalars().all()
-                dropped.append({
-                    "sequence": claim.sequence,
-                    "claim": (claim.claim_text or "")[:400],
-                    "why": [r for r in reasons if r][:3],
-                })
+                entry = by_seq_dropped.get(claim.sequence)
+                if entry is not None:
+                    entry["why"] = [r for r in reasons if r][:3]
             await session.execute(
                 ClaimEvidence.__table__.delete().where(ClaimEvidence.claim_id == cid)
             )
@@ -3315,8 +3393,10 @@ async def _stage_validate_publish(
             )
         await session.commit()
     if dropped:
-        await _tele(run_id, "validate",
-                    dropped_detail=sorted(dropped, key=lambda d: d["sequence"]))
+        # The flat key stays: `answer_regress` reads `dropped_claims` beside it
+        # and both describe the latest state. The numbered record is the history.
+        await _tele(run_id, "validate", dropped_detail=dropped)
+        await _record_removal(run_id, "rounds_exhausted", dropped)
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues, correctness, points = await _gate_answer(

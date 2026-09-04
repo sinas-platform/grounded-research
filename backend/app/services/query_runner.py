@@ -1897,6 +1897,8 @@ async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
     unaccounted: list[str] | None = None,
+    fed: list[dict] | None = None,
+    system_waived: list[str] | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -1937,9 +1939,56 @@ async def _record_gate_cycle(
     because the key is always present. These are truthiness fields. The one
     consumer in the tree reads them that way already.
     """
+    # The flat keys stay: `answer_regress` reads `gate_redraft` and the run
+    # export reads `gate_issues`, and both want the final state. What they
+    # cannot give is a history, because merging by key leaves only the last
+    # cycle, so a numbered copy goes beside them.
+    #
+    # This is the fourth field in this file to need it, after `round_N`,
+    # `revision_N` and `cycle_N`. It is the one that was asked for: with only
+    # the flat keys, a still-owed source could be shown its note and its feed
+    # count and nothing about WHEN the gate first named it, so "first cycle or
+    # last" had no answer. `fed` below is that answer.
+    cycle = await _next_cycle_key(run_id, "validate", "gate")
+    await _tele(run_id, "validate", **{cycle: {
+        "at": _iso(), "parts": parts, "reparse": reparse,
+        "unparseable": unparseable, "unaccounted": unaccounted or [],
+        # Which obligations were put in front of the reviser this cycle, and
+        # how many times each has been fed counting this one. The ledger keeps
+        # a running total and no dates, so this is the only place the arrival
+        # of an obligation is recorded.
+        "fed": fed or [], "system_waived": system_waived or [],
+    }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
                 gate_unaccounted=unaccounted)
+
+
+async def _amend_gate_cycle(run_id: uuid.UUID, **detail: Any) -> None:
+    """The rest of a gate cycle's outcome, merged into the cycle it belongs to.
+
+    A gate pass is recorded in two halves and they cannot be one write. The
+    first half is everything the gate itself decided; the second is `issues`,
+    which is only complete after the caller has added the deterministic
+    provenance check that runs outside the gate, and `redraft`, which the
+    caller derives. Writing the second half as flat keys is what made it a
+    last-write.
+
+    Amends the highest-numbered cycle rather than taking the key as an
+    argument, which would mean threading it back through `_gate_answer`'s
+    return type and every one of its call sites. Every path into the caller
+    has been through `_record_gate_cycle` first, including the unparseable
+    one, so there is always a cycle open to amend.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        entry = ((run.telemetry if run is not None else None) or {}).get("validate") or {}
+    cycles = [k for k in entry if _is_numbered(k, "gate")]
+    if not cycles:
+        return
+    latest = max(cycles, key=lambda k: int(k[len("gate_"):]))
+    merged = {**(entry.get(latest) or {}), **detail}
+    await _tele(run_id, "validate", **{latest: merged})
 
 
 def _gate_json(reply: str) -> dict:
@@ -2374,6 +2423,8 @@ async def _gate_answer(
             "passages is in scope. Leaving it untouched is not."))
     await _record_gate_cycle(
         run_id, reparse=reparse, unaccounted=unaccounted,
+        fed=[{"doc": u["doc"], "feeds": int(u["fed"]) + 1} for u in feed],
+        system_waived=[u["doc"] for u in capped],
         parts=[{"asks": str(x.get("asks") or "")[:300],
                 "covered": bool(x.get("covered")),
                 "accounted": not unaccounted,
@@ -2509,8 +2560,15 @@ async def _pre_publish_sweep(
         # survives still answers the question. If it does, publish; the
         # partial state is reserved for the corpus genuinely not answering,
         # not for the repair budget running out one claim short.
-        ok, missing, _issues, correctness, _pts = await _gate_answer(
+        ok, missing, issues, correctness, _pts = await _gate_answer(
             sinas, question, answer_id, run_id)
+        # This pass opens a cycle like any other, and used to discard its
+        # issues because the caller had no use for them. The record did: a
+        # cycle holding a fed list and no issues cannot be read, and this one
+        # is the re-ask after claims were dropped, which is the cycle a reader
+        # most wants the reasons for.
+        await _amend_gate_cycle(run_id, redraft=missing, issues=issues,
+                                after_drop=True)
         if ok and not correctness:
             await _tele(run_id, "validate", final_sweep_published_after_drop=True)
             return True
@@ -2659,8 +2717,19 @@ def _cycle_key(existing: dict, prefix: str) -> str:
     key every cycle keeps only its last one. `round_N` already avoids that by
     numbering; this is the same trick for stages whose loop has no counter of
     its own to number by.
+
+    Only `prefix_<digits>` counts. Matching on the prefix alone was safe while
+    no flat key shared one, and stopped being safe the moment `gate` needed
+    numbering: `gate_parts`, `gate_issues`, `gate_redraft`, `gate_reparse`,
+    `gate_unaccounted` and `gate_unparseable` all start with `gate_`, so the
+    first cycle of a run would have been called `gate_7`.
     """
-    return f"{prefix}_{sum(1 for k in existing if k.startswith(prefix + '_')) + 1}"
+    return f"{prefix}_{sum(1 for k in existing if _is_numbered(k, prefix)) + 1}"
+
+
+def _is_numbered(key: str, prefix: str) -> bool:
+    """`prefix_12` yes, `prefix_parts` no. Pure."""
+    return key.startswith(prefix + "_") and key[len(prefix) + 1:].isdigit()
 
 
 async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
@@ -3062,6 +3131,15 @@ async def _stage_validate_publish(
                     question = (await session.get(QueryRun, run_id)).question
                 ok, missing, issues, correctness, points = await _gate_answer(
                     sinas, question, answer_id, run_id)
+                # Amended here, where the gate's output is final, rather than
+                # on the branches below. `issues` is complete the moment
+                # `_gate_answer` returns and is only read afterwards, and two
+                # paths out of this block return before any later write:
+                # publishing, and the sweep asking for a repair cycle, which
+                # recurses into a fresh validate. Amending on the branches left
+                # those cycles recorded without the issues that produced them,
+                # which is this same gap in a smaller place.
+                await _amend_gate_cycle(run_id, redraft=missing, issues=issues)
                 if ok and not correctness and (not issues or gate_cycles <= 0):
                     if not await _pre_publish_sweep(
                             run_id, sinas, caller, answer_id, question):
@@ -3076,6 +3154,7 @@ async def _stage_validate_publish(
                     if await _gate_point_is_new(run_id, key):
                         await _tele(run_id, "validate", gate_redraft=missing,
                                     gate_issues=issues, bonus_cycle=True)
+                        await _amend_gate_cycle(run_id, bonus_cycle=True)
                         await _record_fed(run_id, key, bonus=True)
                         await _revise_answer(
                             sinas, run_id, answer_id, question,
@@ -3169,6 +3248,9 @@ async def _stage_validate_publish(
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues, correctness, points = await _gate_answer(
         sinas, question, answer_id, run_id)
+    # Same reason as the other call site: final here, and some paths below
+    # return before any later write.
+    await _amend_gate_cycle(run_id, redraft=missing, issues=issues)
     if ok and not correctness and (not issues or gate_cycles <= 0):
         async with AsyncSessionLocal() as session:
             caller = _runner_caller(await session.get(QueryRun, run_id))
@@ -3185,6 +3267,7 @@ async def _stage_validate_publish(
         if await _gate_point_is_new(run_id, key):
             await _tele(run_id, "validate", gate_redraft=missing,
                         gate_issues=issues, bonus_cycle=True)
+            await _amend_gate_cycle(run_id, bonus_cycle=True)
             await _record_fed(run_id, key, bonus=True)
             await _revise_answer(sinas, run_id, answer_id, question,
                                  correctness + issues,
@@ -3201,6 +3284,7 @@ async def _stage_validate_publish(
         run_id, "validate",
         gate_redraft=missing, gate_issues=issues, dropped_claims=len(failing_ids),
     )
+    await _amend_gate_cycle(run_id, dropped_claims=len(failing_ids))
     await _record_fed(run_id, key)
     await _revise_answer(sinas, run_id, answer_id, question,
                          correctness + issues,

@@ -354,3 +354,48 @@ def test_order_never_drops_or_adds():
     subjects = {_subject(i): {} for i in range(1, 6)}
     ordered = order_subjects(list(subjects), subjects, then_by=[OrderKey(by="nope.deep")])
     assert sorted(ordered, key=str) == sorted(subjects, key=str)
+
+
+# ─────────────────────────────────────────────────────────────
+# Subject pick (documents → identity entity)
+# ─────────────────────────────────────────────────────────────
+from app.services.annotations import MAX_IDENTITY_DOCS, _pick_subjects  # noqa: E402
+
+
+def _u(i):
+    return uuid.UUID(int=i)
+
+
+def test_a_document_stands_for_its_identity_entity():
+    assert _pick_subjects([(_u(1), _u(10))], set()) == {_u(1): _u(10)}
+
+
+def test_a_broken_identity_yields_no_subject():
+    """The measured case: a hub entity named "Decision" was the identity of
+    1,135 documents, and every annotation computed from it smeared one
+    entity's supersession and jurisdiction across all of them. Absence over
+    arbitrary."""
+    assert _pick_subjects([(_u(1), _u(10))], {_u(10)}) == {}
+
+
+def test_a_healthy_edge_survives_beside_a_hub_one():
+    """A document holding both keeps the healthy subject rather than losing
+    its annotations to the hub — which is why broken entities are dropped
+    before the pick, not after it."""
+    picked = _pick_subjects([(_u(1), _u(10)), (_u(1), _u(20))], {_u(10)})
+    assert picked == {_u(1): _u(20)}
+
+
+def test_the_pick_is_deterministic_lowest_id():
+    picked = _pick_subjects([(_u(1), _u(30)), (_u(1), _u(20))], set())
+    assert picked == {_u(1): _u(20)}
+
+
+def test_the_identity_bound_is_two():
+    """Cardinality "one" read from the entity's side, PER DEFINITION: an
+    entity may hold one healthy identity through each identity definition,
+    and within one definition a re-ingestion may legitimately leave a second
+    in-service document behind. Past two through the same definition the
+    entity is a resolution failure. Pinned so a change to the bound is a
+    decision, not an accident."""
+    assert MAX_IDENTITY_DOCS == 2

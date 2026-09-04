@@ -2869,7 +2869,23 @@ async def _revise_answer(
         for w in patch.get("waive") or []:
             await obligations.waive(run_id, w["doc"], w["rationale"])
     if not patch or not (patch["revise"] or patch["add"] or patch["drop"]):
-        await _tele(run_id, "validate", revision_yielded_no_change=True)
+        # Numbered like any other cycle, though it changed nothing. The reviser
+        # replied, so this IS a cycle, and `_cap_refusals_last_cycle` reads the
+        # latest one as "your previous reply". Leaving it unnumbered left an
+        # older cycle as the latest, and the next prompt then told the reviser
+        # that its last reply had lost additions it never proposed, which is an
+        # invitation to drop a sound claim to make room for nothing.
+        #
+        # Counts are all zero because nothing was applied. `kept_with_reason`
+        # is not recorded here even when the patch carried keeps: the early
+        # return above means they were not written either.
+        cycle = await _next_cycle_key(run_id, "validate", "revision")
+        await _tele(run_id, "validate", revision_yielded_no_change=True, **{
+            cycle: {
+                "claims": len(by_claim), "revised": 0, "added": 0,
+                "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
+                "add_dropped_at_cap": 0, "untouched": len(by_claim),
+                "feedback_items": len(feedback), "yielded_no_change": True}})
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}

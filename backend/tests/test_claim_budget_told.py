@@ -183,3 +183,43 @@ def test_the_budget_is_computed_from_the_live_claims():
     src = runner_source()
     i = src.index("_claim_budget_line(len(by_claim)")
     assert src.index("by_claim: dict[int, dict] = {}") < i
+
+
+# -- a reply that changed nothing is still a reply ------------------------------
+#
+# The no-change path used to return before writing a numbered cycle, so an
+# older cycle stayed the latest and the next prompt attributed its refusals to
+# a reply that proposed nothing. Telling the reviser it lost four additions it
+# never made invites it to drop a sound claim to make room for nothing, which
+# is the behaviour this whole change exists to stop.
+
+
+def test_a_no_change_cycle_is_numbered():
+    src = runner_source()
+    i = src.index("revision_yielded_no_change=True")
+    window = src[i - 700:i + 700]
+    assert '_next_cycle_key(run_id, "validate", "revision")' in window
+    assert '"yielded_no_change": True' in window
+
+
+def test_the_no_change_cycle_records_zeros():
+    """It reports what was applied, and nothing was. Recording the patch's
+    keeps here would claim they landed; the early return means they did not."""
+    src = runner_source()
+    i = src.index('"yielded_no_change": True')
+    window = src[i - 400:i]
+    for field in ('"revised": 0', '"added": 0', '"dropped": 0',
+                  '"add_dropped_at_cap": 0', '"kept_with_reason": 0'):
+        assert field in window, field
+
+
+@pytest.mark.asyncio
+async def test_a_no_change_cycle_clears_the_stale_count(telemetry):
+    """The sequence the finding describes: a cycle refuses four additions, the
+    next reply yields nothing, and the prompt after that must not still be
+    talking about the four."""
+    telemetry["validate"] = {
+        "revision_1": {"add_dropped_at_cap": 4},
+        "revision_2": {"add_dropped_at_cap": 0, "yielded_no_change": True},
+    }
+    assert await qr._cap_refusals_last_cycle("run-1") == 0

@@ -1724,6 +1724,15 @@ async def _argument_plan(
             "anchor documents, write the claim, bind its evidence; do not add "
             "claims beyond the plan):\n" + "\n".join(lines) + "\n\n"
         ), claims[:12]
+    except CancelledOutcome:
+        # Not a planning failure. The catch below turns anything that is not a
+        # JSON problem into RuntimeError("argument planning failed"), which
+        # `run_pipeline` records as `failed` with that as the run's error text.
+        # A run the operator stopped would then read, to anyone looking at it
+        # later, as a run whose planner broke. It has to travel out to the
+        # `except CancelledOutcome` in `run_pipeline`, which is reachable from
+        # here: this is called from `_stage_synthesize`, inside that try.
+        raise
     except json.JSONDecodeError:
         # the planner answered, just not in the shape asked for
         _log.warning("argument plan unparseable for run %s", run_id)
@@ -3292,6 +3301,24 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
             + claims_part
             + "\n\nSOURCES:\n" + src_lines,
         )
+    except CancelledOutcome:
+        # Deliberately NOT re-raised, which is the opposite of what the same
+        # shape needs everywhere else in this file, so it is spelled out.
+        #
+        # `_mark_partial` is called from inside `run_pipeline`'s
+        # `except PartialOutcome` handler. An exception raised there does not
+        # reach the sibling `except CancelledOutcome`; sibling handlers do not
+        # catch each other. It would leave `run_pipeline` entirely with the run
+        # row never marked, stranding it in its in-flight status forever, which
+        # is the exact failure `CancelledOutcome`'s own docstring exists to
+        # avoid.
+        #
+        # Nothing is lost by stopping here. The outcome is already decided by
+        # the time this runs, a cancel cannot un-decide it, and the phrasing
+        # call is the last billable work: falling through to the canned message
+        # is what a cancel wanted anyway.
+        _log.info("cancelled while phrasing the partial note for run %s; "
+                  "using the canned message", run_id)
     except Exception:  # noqa: BLE001 — phrasing is best-effort
         pass
     if not message.strip():

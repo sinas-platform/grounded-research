@@ -17,6 +17,7 @@ Run from the backend directory:
 from app.services.query_runner import (
     _canonical,
     _locate_passage,
+    _quote_whole,
     _reject_reason,
     _verify_passage,
 )
@@ -437,3 +438,164 @@ def test_a_short_quote_is_unaffected():
     """Under 200 characters the two paths are the same search."""
     assert _locate_passage(
         SOURCE, 2, 3, "The authority may not rely on a document") == (1, 1)
+
+
+# -- narrowed is not moved -----------------------------------------------------
+#
+# `spans_corrected` counts both, and they are different things. Narrowing a
+# range that already held the quote makes a citation read better; moving one
+# that did not is a citation that pointed at lines without the text it cited.
+# Only the second is a provenance defect, and the combined figure (49 of 171
+# verified passages across two runs) reads as a fault rate until they are
+# separated.
+
+
+def moved(reported: tuple[int, int], located: tuple[int, int]) -> bool:
+    """The runner's test, in one place so the tests and the code agree."""
+    return located[0] < reported[0] or located[1] > reported[1]
+
+
+def test_a_narrowing_is_not_a_move():
+    """The extractor guessed a wide range; the quote was inside it all along.
+    This is the only kind the old forward-only rule could produce."""
+    assert not moved((1, 9), (6, 6))
+
+
+def test_an_exact_narrowing_at_one_end_is_not_a_move():
+    assert not moved((4, 9), (4, 5))
+    assert not moved((4, 9), (7, 9))
+
+
+def test_a_start_before_the_reported_range_is_a_move():
+    """What the symmetric range admits and the old one rejected: the quote
+    begins before the line the extractor named."""
+    assert moved((3, 5), (1, 2))
+
+
+def test_an_end_after_the_reported_range_is_a_move():
+    """Possible under the old rule too, through its forward slack, and stored
+    wrongly for as long as that slack existed."""
+    assert moved((3, 5), (4, 7))
+
+
+def test_the_runner_counts_them_apart():
+    src = runner_source()
+    assert "if alf < lf or alt > lt:" in src
+    assert '"spans_moved": sum(r.get("spans_moved", 0) for r in out),' in src
+    # Beside the combined count, never instead of it: the pair is read as
+    # moved-out-of-corrected.
+    assert '"spans_corrected": sum(r.get("spans_corrected", 0) for r in out),' in src
+
+
+def runner_source() -> str:
+    """The runner as text. Several of these assert on where a line sits
+    relative to another, which is a property of the source and not of any
+    value the module exposes."""
+    from pathlib import Path
+
+    from app.services import obligations
+
+    return Path(obligations.__file__).with_name("query_runner.py").read_text(
+        encoding="utf-8")
+
+
+# -- a span that starts right and stops short -----------------------------------
+#
+# The verifier and the locator both compare only the first 200 canonical
+# characters. A longer quote whose tail runs past `line_to + 2` is accepted on
+# its prefix and its span recorded from that prefix, so the span begins where
+# the quote begins and ends before the quote does. That is neither narrowed nor
+# moved, and `_quote_whole` is what keeps it off both piles.
+
+# Lines wide enough that the quote's first 200 characters fit inside line 2
+# alone, so the prefix locates to a narrower range than the one reported while
+# the whole quote needs a line the window cannot reach.
+WIDE = chr(10).join(
+    f"{i}: {w}" for i, w in enumerate(
+        ["alpha " * 40, "bravo " * 40, "charlie " * 40, "delta " * 40,
+         "echo " * 40, "foxtrot " * 40, "golf " * 40], start=1))
+
+
+def long_quote() -> str:
+    """Lines 2 to 6. A reported range of 2-3 reaches line 5 at most."""
+    return " ".join(["bravo " * 40, "charlie " * 40, "delta " * 40,
+                     "echo " * 40, "foxtrot " * 40]).strip()
+
+
+def test_a_short_quote_inside_the_window_is_whole():
+    assert _quote_whole(WIDE, 2, 3, "bravo bravo bravo bravo bravo")
+
+
+def test_a_quote_whose_tail_runs_past_the_window_is_not_whole():
+    """Lines 2 to 3 plus two of slack reaches line 5. The quote needs line 6,
+    so only its opening can be located and the span stops short."""
+    quote = long_quote()
+    assert len(quote) > 200
+    assert not _quote_whole(WIDE, 2, 3, quote)
+
+
+def test_the_prefix_of_that_quote_is_accepted_and_reads_as_a_narrowing():
+    """Why the case needs a counter of its own. The passage is verified on its
+    prefix, the span is recorded from the prefix, and the result looks to
+    anything comparing coordinates like a tidy narrowing of 2-3 down to 2-2.
+    The span is not wrong about where the quote starts. It just does not reach
+    the end of what it cites, and neither of the other two counters says so."""
+    quote = long_quote()
+    assert _verify_passage(WIDE, 2, 3, quote)
+    found = _locate_passage(WIDE, 2, 3, quote)
+    assert found == (2, 2)
+    assert not (found[0] < 2 or found[1] > 3)      # no cuenta como movido
+    assert found != (2, 3)                         # si cuenta como corregido
+    assert not _quote_whole(WIDE, 2, 3, quote)     # y solo esto lo delata
+
+
+def test_a_quote_too_short_to_place_counts_as_whole():
+    """Under 20 characters the locator declines to place it at all, so there is
+    nothing to report and the counter stays quiet."""
+    assert _quote_whole(WIDE, 1, 2, "alpha")
+
+
+def test_the_runner_counts_the_prefix_case_on_its_own():
+    assert "if not _quote_whole(shown[fn]" in runner_source()
+    assert '"spans_prefix_only": sum(' in runner_source()
+
+
+# -- counted after the duplicate is dropped ------------------------------------
+#
+# The owed document is shown every round, so the same span comes back. These
+# counters used to increment before `seen_spans` discarded it, which made them
+# describe proposals while `passages_verified` described retained passages: 15
+# of the 229 proposals in the two runs that first reported them were
+# duplicates, so a ratio of the two was a ratio of nothing.
+
+
+def test_the_counters_sit_below_the_dedup_check():
+    src = runner_source()
+    dedup = src.index("seen_spans.add((fn, alf, alt))")
+    for counter in ("recovered += 1", "corrected += 1", "moved += 1",
+                    "prefix_only += 1"):
+        assert src.index(counter) > dedup, counter
+
+
+def test_the_dedup_still_happens_once_and_on_the_corrected_span():
+    src = runner_source()
+    assert src.count("seen_spans.add(") == 1
+    assert src.count("if (fn, alf, alt) in seen_spans:") == 1
+
+
+def test_prefix_only_and_moved_overlap_on_purpose():
+    """The two counters are different axes, not three exclusive buckets.
+
+    `spans_moved` asks whether the reported range held the quote.
+    `spans_prefix_only` asks whether the recorded span covers all of it. A
+    quote that starts before the reported range and also runs past the window
+    fails both, and both must say so: made exclusive, the second would stop
+    answering "how many spans fall short of what they cite", which is the only
+    question it exists for. Pinned so nobody tidies the overlap away.
+    """
+    quote = " ".join(["alpha " * 40, "bravo " * 40, "charlie " * 40,
+                      "delta " * 40, "echo " * 40, "foxtrot " * 40]).strip()
+    found = _locate_passage(WIDE, 2, 3, quote)
+    assert found is not None
+    assert found[0] < 2                             # movido
+    assert not _quote_whole(WIDE, 2, 3, quote)      # y ademas corto

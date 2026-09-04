@@ -991,6 +991,38 @@ def _numbered_pairs(numbered: str) -> list[tuple[int, str]]:
     return out
 
 
+def _quote_whole(numbered: str, line_from: int, line_to: int, quoted: str,
+                 back: int = 2, fwd: int = 2) -> bool:
+    """Whether the whole quote sits in the window, not just its opening.
+
+    The verifier and the locator both compare only the first 200 canonical
+    characters, so a long quote whose tail runs past `line_to + fwd` is
+    accepted and its span recorded from that prefix alone. The span then
+    starts in the right place and stops short of the text it cites.
+
+    A tail running past the window is one way to get here. The other is a
+    quote that stops being verbatim after its opening, spliced or paraphrased
+    from that point on, which the 200-character comparison cannot see either.
+    This does not separate the two, and says only that the whole quote was not
+    found where the span points.
+
+    This is a different axis from the narrowed/moved split, not a third
+    bucket in it. That split asks whether the reported range held the quote;
+    this asks whether the recorded span covers all of it. A span can be moved
+    and also fall short, so the counters overlap by design and must not be
+    added together. Kept separate because a reader wants both answers: where
+    the citation points, and how much of the quote it reaches.
+
+    Pure: text in, a verdict out.
+    """
+    full = _canonical(quoted)
+    if len(full) < 20:
+        return True
+    rows = [t for n, t in _numbered_pairs(numbered)
+            if line_from - back <= n <= line_to + fwd]
+    return full in _canonical(" ".join(rows))
+
+
 def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
                     back: int = 2, fwd: int = 2) -> tuple[int, int] | None:
     """Where the quote actually sits, or None if it cannot be narrowed.
@@ -1308,6 +1340,8 @@ async def _extract_passages(
         rejected: list[dict] = []
         recovered = 0
         corrected = 0
+        moved = 0
+        prefix_only = 0
         seen_spans: set[tuple[str, int, int]] = set()
         owed_empty = False
         proposed_total = 0
@@ -1401,11 +1435,6 @@ async def _extract_passages(
                                      "line_to": lt, "reason": why,
                                      "quote": text[:200]})
                     continue
-                # Kept, but would the old forward-only rule have kept it? The
-                # answer is the whole point of making the range symmetric, and
-                # it can only be asked at the moment the passage is judged.
-                if not _verify_passage(shown[fn]["text"], lf, lt, text, back=0):
-                    recovered += 1
                 # Recorded where the quote is, not where it was said to be.
                 # The tolerance is what lets a faithful quote through; the
                 # coordinates are what a reader needs to be true, and they
@@ -1413,16 +1442,45 @@ async def _extract_passages(
                 # reported pair only if the window cannot be narrowed, which
                 # verification already says should not happen.
                 found = _locate_passage(shown[fn]["text"], lf, lt, text)
-                if found and found != (lf, lt):
-                    corrected += 1
                 alf, alt = found or (lf, lt)
                 # The owed document is shown every round, so the same span can
-                # come back more than once. Deduplicated on the corrected span
-                # — the one persisted — so two reports that locate to the same
-                # text are one passage, not two.
+                # come back more than once. Deduplicated on the corrected span,
+                # the one persisted, so two reports that locate to the same
+                # text are one passage and not two.
                 if (fn, alf, alt) in seen_spans:
                     continue
                 seen_spans.add((fn, alf, alt))
+                # Everything below is counted after the duplicate is dropped,
+                # so it shares a denominator with `passages_verified`. Counted
+                # above it, these described proposals while that field
+                # described retained passages, and a ratio of the two was a
+                # ratio of nothing: 15 of the 229 proposals in the two runs
+                # that first reported these numbers were duplicates.
+                # Would the old forward-only rule have kept this one? The
+                # answer is the whole point of making the range symmetric, and
+                # it can only be asked where the passage is judged.
+                if not _verify_passage(shown[fn]["text"], lf, lt, text, back=0):
+                    recovered += 1
+                if found and (alf, alt) != (lf, lt):
+                    corrected += 1
+                    # Two different things wear the same number. Narrowing a
+                    # range that already held the quote improves how a citation
+                    # reads; moving one that did not is a citation that pointed
+                    # at lines without the text it cited. Only the second is a
+                    # provenance defect, and only the second became possible
+                    # when the range stopped being forward-only. Under the old
+                    # rule an accepted quote was always inside
+                    # [line_from, line_to + 2], so the reported start could
+                    # never fall after it.
+                    if alf < lf or alt > lt:
+                        moved += 1
+                # A separate axis, deliberately overlapping the two above
+                # rather than excluding them: those ask whether the reported
+                # range held the quote, this asks whether the recorded span
+                # covers all of it. A moved span can also fall short. Do not
+                # add these together.
+                if not _quote_whole(shown[fn]["text"], lf, lt, text):
+                    prefix_only += 1
                 good.append({"filename": fn, "line_from": alf, "line_to": alt,
                              "text": text[:2000]})
 
@@ -1432,12 +1490,14 @@ async def _extract_passages(
             return {"n": c.get("n"), "passages": [], "proposed": proposed_total,
                     "read": len(docs), "error": last_error,
                     "rejected": rejected, "recovered_by_symmetry": recovered,
-                    "spans_corrected": corrected,
+                    "spans_corrected": corrected, "spans_moved": moved,
+                    "spans_prefix_only": prefix_only,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
                 "passages": good, "proposed": proposed_total,
                 "rejected": rejected, "recovered_by_symmetry": recovered,
-                "spans_corrected": corrected,
+                "spans_corrected": corrected, "spans_moved": moved,
+                "spans_prefix_only": prefix_only,
                 "owed": owed, "owed_empty": owed_empty,
                 "read": len(docs), "truncated": truncated, "chunked": chunked}
 
@@ -1524,6 +1584,17 @@ async def _extract_passages(
                 # extractor reported: how often the coordinates needed
                 # correcting to point at the text they cite.
                 "spans_corrected": sum(r.get("spans_corrected", 0) for r in out),
+                # The half of `spans_corrected` that is a provenance defect:
+                # the reported range did not contain the whole quote. The rest
+                # is narrowing, which only makes a citation read better.
+                "spans_moved": sum(r.get("spans_moved", 0) for r in out),
+                # Only the quote's first 200 characters were found, so the
+                # span does not cover all of what it cites. Either the quote
+                # runs past the window, or it stops being verbatim after its
+                # opening. Overlaps `spans_moved` on purpose: this is coverage,
+                # that is location, and a span can fail both.
+                "spans_prefix_only": sum(
+                    r.get("spans_prefix_only", 0) for r in out),
                 "extraction_errors": len(errors),
                 "documents_truncated": len(cut_by_file),
                 "characters_dropped": sum(

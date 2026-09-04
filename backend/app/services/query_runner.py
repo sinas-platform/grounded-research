@@ -2559,6 +2559,7 @@ async def _pre_publish_sweep(
         # otherwise say which they were.
         await _tele(run_id, "validate", final_sweep_dropped=len(flagged_ids),
                     final_sweep_dropped_detail=swept)
+        await _record_removal(run_id, "final_sweep", swept)
         # A fixable defect in one claim must not demote the whole answer.
         # The flagged claims are gone — visibly: the drop is recorded and
         # the numbering keeps the gap — so re-ask the gate whether what
@@ -2826,6 +2827,32 @@ async def _cap_refusals_last_cycle(run_id: uuid.UUID) -> int:
         return 0
     latest = max(cycles, key=lambda k: int(k[len("revision_"):]))
     return int((v.get(latest) or {}).get("add_dropped_at_cap") or 0)
+
+
+async def _record_removal(run_id: uuid.UUID, path: str,
+                          entries: list[dict]) -> None:
+    """One numbered record per deletion event.
+
+    `_tele` merges by key, and both paths that delete outside a revision cycle
+    wrote a flat key. `_stage_validate_publish` recurses and the pre-publish
+    sweep runs more than once, so a second deletion overwrote the first and the
+    earlier claims and their citations vanished from the telemetry that exists
+    to keep them.
+
+    Numbered `removed_N` rather than `dropped_N`: `_cycle_key` counts any key
+    starting with the prefix, and `dropped_claims` and `dropped_detail` are
+    both flat keys under `validate`, so a run's first deletion would have been
+    called `dropped_3`. `removed_` collides with nothing.
+
+    The reviser's drop is not written here. It already sits inside `revision_N`,
+    which is numbered, and that is where a reader of a revision cycle looks for
+    what that cycle removed.
+    """
+    if not entries:
+        return
+    key = await _next_cycle_key(run_id, "validate", "removed")
+    await _tele(run_id, "validate", **{key: {
+        "at": _iso(), "path": path, "count": len(entries), "claims": entries}})
 
 
 async def _removal_record(session, claim_ids: list) -> list[dict]:
@@ -3362,7 +3389,10 @@ async def _stage_validate_publish(
             )
         await session.commit()
     if dropped:
+        # The flat key stays: `answer_regress` reads `dropped_claims` beside it
+        # and both describe the latest state. The numbered record is the history.
         await _tele(run_id, "validate", dropped_detail=dropped)
+        await _record_removal(run_id, "rounds_exhausted", dropped)
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues, correctness, points = await _gate_answer(

@@ -150,3 +150,51 @@ def test_the_three_paths_share_one_recorder():
     """Three call sites, one function. Three near-copies is how they came to
     record three different things in the first place."""
     assert src().count("await _removal_record(") == 3
+
+
+# -- a second deletion must not erase the first --------------------------------
+#
+# `_tele` merges by key, and both paths that delete outside a revision cycle
+# wrote a flat one. `_stage_validate_publish` recurses and the sweep runs more
+# than once, so the second deletion overwrote the first and the earlier claims
+# and their citations vanished from the telemetry that exists to keep them.
+
+
+def test_deletions_outside_a_revision_cycle_are_numbered():
+    s = src()
+    assert 'await _record_removal(run_id, "rounds_exhausted", dropped)' in s
+    assert 'await _record_removal(run_id, "final_sweep", swept)' in s
+    assert '_next_cycle_key(run_id, "validate", "removed")' in s
+
+
+def test_the_prefix_avoids_the_flat_keys_it_would_have_counted():
+    """`_cycle_key` counts any key starting with the prefix, and
+    `dropped_claims` and `dropped_detail` are both flat keys under `validate`,
+    so numbering as `dropped_N` would have opened a run's history at
+    `dropped_3`."""
+    from app.services.query_runner import _cycle_key
+
+    flat = {"dropped_claims": 2, "dropped_detail": [], "final_sweep_dropped": 1}
+    assert _cycle_key(flat, "removed") == "removed_1"
+    assert _cycle_key(flat, "dropped") != "dropped_1"   # why the prefix differs
+
+
+def test_each_record_names_which_path_deleted():
+    """Three paths delete for different reasons and the count alone never said
+    which one had run."""
+    s = src()
+    assert '"path": path' in s
+    assert '"rounds_exhausted"' in s and '"final_sweep"' in s
+
+
+def test_nothing_to_record_writes_no_key():
+    s = src()
+    i = s.index("async def _record_removal")
+    assert "if not entries:\n        return" in s[i:i + 1400]
+
+
+def test_the_revisers_drop_is_not_double_recorded():
+    """It already sits inside `revision_N`, which is numbered. Writing it here
+    too would put the same deletion in the telemetry twice."""
+    s = src()
+    assert s.count("await _record_removal(") == 2

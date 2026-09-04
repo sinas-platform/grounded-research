@@ -52,6 +52,9 @@ class QueryRunIn(BaseModel):
     # "Q16 — Dawn raids — personal data". Free text: the number and the topic
     # live in the benchmark question set, so nothing here can derive it.
     title: str | None = Field(default=None, max_length=300)
+    # What differs in THIS version, e.g. "Round 3 — citation and coverage
+    # fixes". Free text, and not inferred from the tags.
+    change_note: str | None = Field(default=None, max_length=500)
     # Named groupings, e.g. ["round-3"]: a batch is born tagged.
     tags: list[str] = Field(default_factory=list, max_length=20)
     mode: str = Field(default="full", pattern="^(full|retrieval|synthesis)$")
@@ -66,6 +69,7 @@ class QueryRunOut(OwnedOut):
     question: str
     reference: str | None = None
     title: str | None = None
+    change_note: str | None = None
     tags: list[str] = []
     mode: str = "full"
     effort: str = "medium"
@@ -100,6 +104,7 @@ async def create_query_run(
         question=payload.question,
         reference=(payload.reference or None),
         title=((payload.title or "").strip()[:300] or None),
+        change_note=((payload.change_note or "").strip()[:500] or None),
         tags=[t.strip()[:100] for t in payload.tags if t.strip()],
         mode=payload.mode,
         effort=payload.effort,
@@ -328,11 +333,13 @@ def _actions_from_messages(messages: list[dict]) -> list[AgentAction]:
 
 class QueryRunMetaIn(BaseModel):
     """Editable identity/grouping of an existing run. A field omitted is
-    left alone; an explicit null clears the reference or the title; tags
+    left alone; an explicit null clears the reference, title or change
+    note; tags
     REPLACE the run's tags wholesale (read-modify-write is the client's
     loop)."""
     reference: str | None = Field(default=None, max_length=200)
     title: str | None = Field(default=None, max_length=300)
+    change_note: str | None = Field(default=None, max_length=500)
     tags: list[str] | None = Field(default=None, max_length=20)
 
 
@@ -360,6 +367,8 @@ async def update_query_run_meta(
         run.reference = (fields["reference"] or "").strip()[:200] or None
     if "title" in fields:
         run.title = (fields["title"] or "").strip()[:300] or None
+    if "change_note" in fields:
+        run.change_note = (fields["change_note"] or "").strip()[:500] or None
     if fields.get("tags") is not None:
         run.tags = [t.strip()[:100] for t in fields["tags"] if t.strip()][:20]
     await session.commit()

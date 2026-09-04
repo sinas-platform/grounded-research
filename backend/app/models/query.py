@@ -79,6 +79,11 @@ class QueryRun(Base, TimestampMixin, OwnedMixin):
     # number and the topic live in the benchmark question set and nowhere in
     # this system, so deriving either would invent it.
     title: Mapped[str | None] = mapped_column(String(300))
+    # What is different about THIS version of the question: "Round 3 —
+    # citation and coverage fixes". `title` is the same on every rerun; this
+    # is not. Not derived from tags: "round-3" says which batch a run is in,
+    # not what was done to it.
+    change_note: Mapped[str | None] = mapped_column(String(500))
     # Named groupings ("round-3"): a batch is born tagged and stays queryable.
     tags: Mapped[list] = mapped_column(
         ARRAY(String(100)), nullable=False, default=list, server_default="{}"

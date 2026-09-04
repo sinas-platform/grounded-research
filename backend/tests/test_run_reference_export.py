@@ -148,3 +148,75 @@ def test_title_is_bounded_like_the_column():
         model(title="x" * 300, **kw)
         with pytest.raises(ValidationError):
             model(title="x" * 301, **kw)
+
+
+# -- the change note -----------------------------------------------------------
+#
+# `title` names the question and is identical on every rerun. `change_note`
+# says what differs in THIS version, which is what a reviewer opening version
+# three needs and what the review platform shows per version. Added with its
+# API in the same change, unlike `title`, which reached the export before it
+# could be set by anything but a direct database write.
+
+
+def test_a_run_can_be_born_with_a_change_note():
+    from app.api.v1.query_runs import QueryRunIn
+
+    p = QueryRunIn(question="a question long enough",
+                   change_note="Round 3 — citation and coverage fixes")
+    assert p.change_note == "Round 3 — citation and coverage fixes"
+
+
+def test_a_change_note_can_be_stamped_after_the_fact():
+    from app.api.v1.query_runs import QueryRunMetaIn
+
+    fields = QueryRunMetaIn(
+        change_note="Round 3 — citation and coverage fixes"
+    ).model_dump(exclude_unset=True)
+    assert fields == {"change_note": "Round 3 — citation and coverage fixes"}
+
+
+def test_an_omitted_change_note_is_left_alone_and_a_null_clears_it():
+    from app.api.v1.query_runs import QueryRunMetaIn
+
+    assert "change_note" not in QueryRunMetaIn(
+        title="x").model_dump(exclude_unset=True)
+    assert QueryRunMetaIn(change_note=None).model_dump(
+        exclude_unset=True) == {"change_note": None}
+
+
+def test_the_change_note_is_readable_and_assigned():
+    src = api_source()
+    assert 'if "change_note" in fields:' in src
+    assert 'change_note=((payload.change_note or "").strip()[:500] or None),' in src
+
+    from app.api.v1.query_runs import QueryRunOut
+
+    assert "change_note" in QueryRunOut.model_fields
+
+
+def test_the_change_note_is_bounded_like_its_column():
+    """varchar(500), wider than title because this is a sentence, not a name."""
+    import pytest
+    from app.api.v1.query_runs import QueryRunIn, QueryRunMetaIn
+    from pydantic import ValidationError
+
+    for model, kw in ((QueryRunIn, {"question": "a question long enough"}),
+                      (QueryRunMetaIn, {})):
+        model(change_note="x" * 500, **kw)
+        with pytest.raises(ValidationError):
+            model(change_note="x" * 501, **kw)
+
+
+def test_the_export_carries_both_names_separately():
+    """They answer different questions and neither substitutes for the other:
+    the title is the same on every rerun, the note is what this one changed."""
+    import pathlib
+
+    from app.services import run_export
+
+    src = pathlib.Path(run_export.__file__).read_text(encoding="utf-8")
+    assert '"title": run.title,' in src
+    assert '"change_note": run.change_note,' in src
+    # Documented in the contract block, which consumers anchor to.
+    assert "/change_note" in src

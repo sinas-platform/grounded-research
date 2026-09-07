@@ -2616,11 +2616,22 @@ async def _gate_answer(
     publishable = (
         bool(data.get("publishable")) and not uncovered and not blocking
     )
-    # Which of the two held it, decided here because here is where both are
-    # known. The caller would have to infer it from `missing`'s wording, and a
-    # partial labelled `coverage` for a run whose every part was covered is the
-    # mislabelling `consistency` was split out to stop.
-    cause = "coverage" if uncovered else ("accounting" if blocking else "")
+    # Which of the three held it, decided here because here is where all three
+    # are known. The caller would have to infer it from `missing`'s wording, and
+    # a partial labelled `coverage` for a run whose every part was covered is
+    # the mislabelling `consistency` was split out to stop.
+    #
+    # `holistic` is the judge rejecting the answer as a whole: it said
+    # publishable false while marking every part covered and naming no unmet
+    # source, so there is no part to point at. Falling through to `coverage`
+    # there would report a coverage failure for a run with no uncovered part,
+    # which is the same defect one case further along.
+    cause = (
+        "coverage" if uncovered
+        else "accounting" if blocking
+        else "holistic" if not bool(data.get("publishable"))
+        else ""
+    )
     # Coverage gaps first: they are what blocks publication, and the reviser
     # is given passages for a bounded number of points.
     return (publishable, missing, issues + correctness, correctness,
@@ -2760,6 +2771,12 @@ async def _pre_publish_sweep(
         if ok and not correctness:
             await _tele(run_id, "validate", final_sweep_published_after_drop=True)
             return True
+        if sweep_cause == "holistic":
+            raise PartialOutcome(
+                "holistic",
+                "after removing claims the final review could not support, the "
+                "review rejected the answer as a whole without naming a part it "
+                "fails to address" + (f" — {missing}" if missing else ""))
         if sweep_cause == "accounting":
             raise PartialOutcome(
                 "accounting",
@@ -3730,6 +3747,12 @@ async def _stage_validate_publish(
                                 "accounting",
                                 "the answer does not account for every source this "
                                 "review named as bearing on the question — " + missing)
+                        if gate_cause == "holistic":
+                            raise PartialOutcome(
+                                "holistic",
+                                "the review rejected the answer as a whole without "
+                                "naming a part it fails to address"
+                                + (f" — {missing}" if missing else ""))
                         raise PartialOutcome(
                             "coverage",
                             f"the validated claims no longer answer the question — {missing}")
@@ -3847,6 +3870,12 @@ async def _stage_validate_publish(
                 "accounting",
                 "validation exhausted with a source this review named as bearing "
                 "on the question neither cited nor waived — " + missing)
+        if not ok and gate_cause == "holistic":
+            raise PartialOutcome(
+                "holistic",
+                "validation exhausted and the review still rejected the answer as "
+                "a whole without naming a part it fails to address"
+                + (f" — {missing}" if missing else ""))
         raise PartialOutcome(
             "coverage",
             ("validation exhausted and the surviving claims do not answer the "

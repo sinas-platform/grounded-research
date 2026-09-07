@@ -166,6 +166,29 @@ async def test_the_cause_names_which_of_the_two_held_it(gate_env, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_holistic_rejection_gets_its_own_cause(gate_env):
+    """The judge can say publishable false while marking every part covered and
+    naming no unmet source. There is no part to point at, so falling through to
+    `coverage` would report a coverage failure for a run with no uncovered
+    part."""
+    ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": False,
+                    "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}]}))
+    assert ok is False
+    assert cause == "holistic"
+
+
+@pytest.mark.asyncio
+async def test_coverage_still_outranks_a_holistic_rejection(gate_env):
+    """An uncovered part is the more specific finding: name that."""
+    _ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": False,
+                    "parts": [{"n": 1, "covered": True},
+                              {"n": 2, "covered": False, "gap": "nothing addresses it"}]}))
+    assert cause == "coverage"
+
+
+@pytest.mark.asyncio
 async def test_an_uncovered_part_is_still_called_coverage(gate_env, monkeypatch):
     """And it outranks the debt when both are present: a part nothing answers
     is the more fundamental gap, and the reviser is fed for it first."""

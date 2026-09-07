@@ -29,9 +29,12 @@ def test_guidance_is_used_when_description_is_absent():
     assert _prop(prop(guidance="EU courts T-XXX/YY."))["description"] == "EU courts T-XXX/YY."
 
 
-def test_description_still_wins_when_both_are_present():
-    got = _prop(prop(description="the real one", guidance="the fallback"))
-    assert got["description"] == "the real one"
+def test_guidance_wins_when_both_are_present():
+    """`guidance` is the extraction-specific instruction; `description` is the
+    generic one. Nothing here has a description, so getting this backwards
+    would have been latent rather than live, and missed later."""
+    got = _prop(prop(description="the generic one", guidance="the extraction one"))
+    assert got["description"] == "the extraction one"
 
 
 def test_neither_leaves_it_empty():
@@ -79,3 +82,15 @@ def test_a_many_property_is_told_it_may_return_several():
 def test_a_one_property_is_not():
     line = io._prompt_property_lines([_prop(prop(cardinality="one"))])
     assert "cardinality" not in line
+
+
+def test_the_bulk_pipeline_builds_its_properties_the_same_way():
+    """Bulk ingestion is the path most documents arrive by. It used to build its
+    own property dict without guidance or cardinality, so a prompt fix landing
+    only in the one-shot never reached them."""
+    import inspect
+    from app import bulk_pipeline
+
+    src = inspect.getsource(bulk_pipeline.stage_extract)
+    assert "_prop_for_prompt(p) for p in rows" in src
+    assert '"description": p.description' not in src

@@ -92,8 +92,11 @@ _SILENT_PROPS: set = set()
 def _prop_for_prompt(p) -> dict:
     """What the extractor is told about one property.
 
-    `guidance` is the field the schema author fills; `description` is what the
-    prompt interpolated, and it is null on every property in this deployment.
+    `guidance` is the field the schema author fills and it wins: it is the
+    extraction-specific instruction, where `description` is the generic one. The
+    prompt interpolated `description`, which is null on every property in this
+    deployment, so nothing was sent. That makes the precedence bug latent rather
+    than live here, which is exactly how it would be missed later.
     So the instructions were written, stored, and never sent — the extractor
     saw `- "case_number":  (schema: ...)` and had to guess. Entity types have
     always read `guidance or description`; properties simply never did.
@@ -102,7 +105,7 @@ def _prop_for_prompt(p) -> dict:
     it may return more than one, and the JSON schema it did send says
     `"type": "string"`, so the model returned one.
     """
-    text = (p.description or p.guidance or "").strip()
+    text = (p.guidance or p.description or "").strip()
     if not text and p.id not in _SILENT_PROPS:
         # Once per property per process, not once per document. A property with
         # no instruction is indistinguishable from one whose instruction was

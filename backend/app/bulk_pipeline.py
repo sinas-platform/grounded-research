@@ -305,9 +305,11 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 select(DocumentClassProperty).where(
                     DocumentClassProperty.document_class_id == cid,
                     DocumentClassProperty.manual.is_(False)))).scalars().all()
-            props_by_class[cid] = [
-                {"name": p.name, "description": p.description,
-                 "schema": p.schema, "id": p.id} for p in rows]
+            # Same shape the one-shot sends, from the same helper: this is the
+            # path bulk ingestion takes, so a prompt fix that lands only in
+            # `ingestion_oneshot` never reaches the documents that arrive in
+            # bulk, which is most of them.
+            props_by_class[cid] = [one._prop_for_prompt(p) for p in rows]
         for wi, (did, fn, content) in enumerate(work):
             rule = one.classify_by_rules(fn)
             hint = rule

@@ -1931,14 +1931,86 @@ def _coverage_summary(parts: list[dict]) -> dict:
     }
 
 
+def _closing_record(data: dict, claim_seqs: set, parts: list[dict]) -> dict:
+    """Where the answer's concluding claim is, recorded and blocking nothing.
+
+    Carolina's finding on Q34 was that an answer ends off-topic with no
+    conclusion. Read across eleven runs carrying gate telemetry, two end on a
+    claim that answers the question, two arguably do, and seven end on a case
+    note or a procedural aside. So the shape is real and common.
+
+    It cannot be derived from `covered_by`. Measured on those eleven, the union
+    of every part's `covered_by` names 11 of 11, 13 of 14, 14 of 14 claims —
+    nearly all of them, trailing case notes included, because a note about
+    Deutsche Bahn genuinely does bear on a part about judicial review.
+    Membership says a claim relates to the question; it says nothing about
+    which claim discharges it. Hence a separate reading.
+
+    `no_conclusion` already exists in the verdict and already blocks, through
+    `correctness`. Two things are wrong with relying on it alone. It is a
+    boolean, so "no conclusion anywhere" and "the conclusion is claim 9 of 14"
+    are the same answer, and those want different remedies: the first is a
+    missing claim, the second is an ordering defect that a rewrite would be the
+    wrong instrument for. And it records nothing when false, so a run cannot be
+    asked whether the gate considered the question at all. It has fired in 35
+    runs from before gate-cycle telemetry existed and in none of the 39 since,
+    while at least three of the eleven read by hand end with no conclusion
+    anywhere — 6d7b9989 among them, whose two sibling runs on the same question
+    both close with "The Commission may therefore lawfully take a forensic
+    copy" and which simply has no such claim.
+
+    So both are recorded: the gate's own boolean, and the sequence it puts the
+    conclusion at. Where they disagree is the measurement worth having.
+
+    `single_part` rides along because it decides whether any of the coverage
+    machinery meant anything on this run. A question that decomposes to one
+    part cannot fail coverage — `parts: 1, covered: 1` is the whole check, and
+    every `only_*` counter is computed over covered parts, so all of them are
+    inert. Four of 34 runs decompose that way, Q17 reproducibly across three
+    references. On those runs this record is the only whole-answer signal
+    there is, which is the argument for keeping it.
+
+    Blocks nothing, like `_audit_coverage` before it: recorded so the next
+    batch can say how often each shape happens, and the decision comes after.
+
+    Pure.
+    """
+    last = max(claim_seqs) if claim_seqs else None
+    raw = data.get("concludes_at")
+    at = None
+    if not isinstance(raw, bool) and raw is not None:
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            n = None
+        # A sequence naming no claim in the answer is not a location. The gate
+        # can return one: `covered_by_missing` exists because it does.
+        if n is not None and n.is_integer() and int(n) in claim_seqs:
+            at = int(n)
+    return {
+        "last": last,
+        "concludes_at": at,
+        # The three findings this has to keep apart. `ends_on_it` true is an
+        # answer that closes; false with a sequence is a conclusion buried at
+        # that sequence; null is no conclusion anywhere.
+        "ends_on_it": (at is not None and at == last),
+        "shape": ("closes" if at is not None and at == last
+                  else "buried" if at is not None
+                  else "absent"),
+        # The gate's own boolean, beside the position it gave. Disagreement
+        # between the two is the thing to count.
+        "gate_said_none": bool(data.get("no_conclusion")),
+        "single_part": len(parts) == 1,
+    }
+
+
 async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
     unaccounted: list[str] | None = None,
     fed: list[dict] | None = None,
     system_waived: list[str] | None = None,
-
-
+    closing: dict | None = None,
     coverage: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
@@ -2004,6 +2076,10 @@ async def _record_gate_cycle(
         # flat would put a last-write count next to a per-cycle history and
         # invite reading one as the other.
         "coverage": coverage or {},
+        # Beside the coverage summary for the same reason it is: both are
+        # answer-scoped readings of this cycle, and a flat key would be a
+        # last-write sitting next to a history.
+        "closing": closing or {},
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
@@ -2345,6 +2421,7 @@ async def _gate_answer(
 'stages are NOT in tension; when in doubt, null. Or null.>",'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
+        ' "concludes_at": <the sequence number of the claim that draws that overall conclusion, or null if no claim does. A claim that states the answer to the question, not one that reports what a single case held.>,'
         ' "unused_sources": ["<filename>: <the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>", ...]}',
     )
     # Only the parse is guarded. A wide try around the whole body turns a
@@ -2578,7 +2655,8 @@ async def _gate_answer(
                 "covered_by_unsupported": x.get("covered_by_unsupported") or [],
                 "covered_by_unresponsive": x.get("covered_by_unresponsive") or []}
                for x in parts],
-        coverage=_coverage_summary(parts))
+        coverage=_coverage_summary(parts),
+        closing=_closing_record(data, claim_seqs, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

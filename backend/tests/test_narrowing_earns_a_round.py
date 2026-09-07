@@ -192,9 +192,28 @@ def test_a_claim_that_failed_a_span_does_not_count_as_narrowing():
     assert not _still_narrowing([{14}, {14}], [{14}, {14}])
 
 
-def test_failing_in_either_round_is_enough_to_exclude_it():
+def test_failing_in_the_earlier_round_excludes_it():
+    """Pending in the earlier round means it was re-judged for free."""
     assert not _still_narrowing([{14}, {14}], [{14}, set()])
-    assert not _still_narrowing([{14}, {14}], [set(), {14}])
+
+
+def test_failing_only_in_the_later_round_does_not_exclude_it():
+    """Clean in the earlier round, so it held no pending row and came back
+    only because its evidence was re-bound. The later failure is what the
+    rewrite produced, not evidence the claim was riding along untouched.
+
+    Q46, run `804a684d`: seq 12 marked overreaching in round 3 with the
+    round's `failed` at zero, rewritten from an assertion of inspection
+    authority into a statement of what bounds the overlap, marked again in
+    round 4, deleted when the budget ran out."""
+    assert _still_narrowing([{12}, {12}], [set(), {12}])
+
+
+def test_it_cannot_buy_rounds_indefinitely():
+    """Qualifying needs a clean earlier round, so a claim that failed in the
+    round it just bought is excluded at the very next decision."""
+    assert _still_narrowing([{12}, {12}], [set(), {12}])
+    assert not _still_narrowing([{12}, {12}, {12}], [set(), {12}, {12}])
 
 
 def test_another_claim_failing_does_not_exclude_a_clean_one():

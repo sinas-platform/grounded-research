@@ -3414,9 +3414,28 @@ def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
     verdict comes back with it. Repetition there proves nothing, and counting
     it would buy rounds for a claim nobody is working on.
 
-    So a sequence that failed a span in either of the two rounds is excluded.
-    What survives is a claim that was clean on the evidence, was re-judged
-    anyway, and can only have been re-judged because it was rebuilt.
+    That is a fact about the EARLIER round, and only the earlier one. A claim
+    clean in the earlier round held no pending row, so it came back solely
+    because its evidence was re-bound, and it was rewritten. If the rewrite
+    then bound a span that failed, that failure is the product of the work,
+    not evidence the claim was riding along untouched. Excluding it reads a
+    new defect as proof no revision happened, which inverts the signal.
+
+    So the exclusion is `failed[-2]` alone: a sequence that failed a span in
+    the earlier of the two rounds. What survives is a claim that was clean on
+    the evidence, was re-judged anyway, and can only have been re-judged
+    because it was rebuilt.
+
+    Q46, run `804a684d`, is the case. Seq 12 was marked overreaching in round
+    3 with the round's `failed` at zero, was rewritten from an assertion of
+    inspection authority into a statement of what bounds the overlap, was
+    marked again in round 4, and was deleted when the budget ran out. Under
+    `failed[-1] | failed[-2]` it does not qualify, because the rewrite's own
+    span failed.
+
+    A claim cannot ride this indefinitely: qualifying requires being clean in
+    the earlier round, so one that keeps failing is excluded at the very next
+    decision, and HARD_VALIDATE_ROUNDS still binds.
 
     What this still cannot say is how much better the claim got: the coverage
     verdict is `full` or `partial` with no degree, so "partial again" reads the
@@ -3427,7 +3446,7 @@ def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
     """
     if len(overreach) < 2 or len(failed) < 2:
         return False
-    return bool((overreach[-1] & overreach[-2]) - (failed[-1] | failed[-2]))
+    return bool((overreach[-1] & overreach[-2]) - failed[-2])
 
 
 async def _stage_validate_publish(
@@ -3498,6 +3517,13 @@ async def _stage_validate_publish(
             # be asked which claim was objected to and on what ground.
             "overreaching_claims": _overreach_detail(
                 verdict.get("overreaching") or []),
+            # The sequences behind the `failed` count above. Without them the
+            # exclusion this criterion turns on cannot be checked after the
+            # fact: establishing that Q46 seq 12 was the round-4 failure meant
+            # matching the rounds-exhausted removal record against the claim
+            # text, which is an inference, where `failed` at zero in round 3 is
+            # a measurement. Sorted so the key is stable to compare across runs.
+            "failed_claims": sorted(_failed_seqs(verdict)),
         }})
         # A claim whose every span passes can still assert more than those
         # spans establish — "the whole period" on passages about a second

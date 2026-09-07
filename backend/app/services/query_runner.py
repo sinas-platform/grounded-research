@@ -3377,10 +3377,15 @@ def _overreach_seqs(verdict: dict) -> set[int]:
     return out
 
 
-def _failed_seqs(verdict: dict) -> set[int]:
-    """The claim numbers with a span that failed validation this round. Pure."""
+def _seqs_of(entries) -> set[int]:
+    """The claim numbers named by a list of verdict entries. Pure.
+
+    Same digit test the overreach reader applies, and for the same reason:
+    int() reads 9.5 as claim 9 and True as claim 1, and a sequence that is not
+    a whole number names no claim.
+    """
     out: set[int] = set()
-    for f in (verdict.get("failed") or []):
+    for f in (entries or []):
         if not isinstance(f, dict):
             continue
         raw = f.get("claim_sequence")
@@ -3395,7 +3400,32 @@ def _failed_seqs(verdict: dict) -> set[int]:
     return out
 
 
-def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
+def _failed_seqs(verdict: dict) -> set[int]:
+    """The claim numbers with a span that failed validation this round. Pure."""
+    return _seqs_of(verdict.get("failed"))
+
+
+def _errored_seqs(verdict: dict) -> set[int]:
+    """The claim numbers whose span could not be judged this round. Pure.
+
+    An errored row is never marked validated, so it stays pending exactly as a
+    failing one does. Errors carried no sequence until this was needed, so a
+    verdict from before then names none and this is empty rather than wrong.
+    """
+    return _seqs_of(verdict.get("errors"))
+
+
+def _pending_seqs(verdict: dict) -> set[int]:
+    """The claim numbers holding a row that will still be pending next round.
+
+    Failed and errored together, because the criterion below cares about one
+    property they share: the row is not validated, so the claim is re-judged
+    next round whether or not anybody touched it.
+    """
+    return _failed_seqs(verdict) | _errored_seqs(verdict)
+
+
+def _still_narrowing(overreach: list[set[int]], pending: list[set[int]]) -> bool:
     """Whether a claim was re-marked overreaching *because it was rewritten*.
 
     Repetition alone does not prove a rewrite, and the difference is the whole
@@ -3414,6 +3444,12 @@ def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
     verdict comes back with it. Repetition there proves nothing, and counting
     it would buy rounds for a claim nobody is working on.
 
+    A span the judge could not read at all does the same thing. An errored row
+    is never marked validated, so it is pending on exactly the same terms, and
+    the claim comes back for free. It reaches here through `_pending_seqs`,
+    which is failed and errored together, because what matters is the property
+    the two share rather than which of them happened.
+
     That is a fact about the EARLIER round, and only the earlier one. A claim
     clean in the earlier round held no pending row, so it came back solely
     because its evidence was re-bound, and it was rewritten. If the rewrite
@@ -3421,8 +3457,8 @@ def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
     not evidence the claim was riding along untouched. Excluding it reads a
     new defect as proof no revision happened, which inverts the signal.
 
-    So the exclusion is `failed[-2]` alone: a sequence that failed a span in
-    the earlier of the two rounds. What survives is a claim that was clean on
+    So the exclusion is `pending[-2]` alone: a sequence holding an unvalidated
+    row in the earlier of the two rounds. What survives is a claim that was clean on
     the evidence, was re-judged anyway, and can only have been re-judged
     because it was rebuilt.
 
@@ -3444,9 +3480,9 @@ def _still_narrowing(overreach: list[set[int]], failed: list[set[int]]) -> bool:
 
     Pure.
     """
-    if len(overreach) < 2 or len(failed) < 2:
+    if len(overreach) < 2 or len(pending) < 2:
         return False
-    return bool((overreach[-1] & overreach[-2]) - failed[-2])
+    return bool((overreach[-1] & overreach[-2]) - pending[-2])
 
 
 async def _stage_validate_publish(
@@ -3471,10 +3507,11 @@ async def _stage_validate_publish(
     # `round_N` by prefix; folding overreach into it would change what every
     # stored run means after the fact.
     overreach_history: list[set[int]] = []
-    # Which claims failed a span, per round. A claim with a failing row is
-    # re-judged every round whether or not anybody touched it, so its coverage
-    # verdict repeating says nothing about revision.
-    failed_seq_history: list[set[int]] = []
+    # Which claims hold an unvalidated row, per round: failed spans and spans
+    # the judge could not read. Either way the row stays pending, so the claim
+    # is re-judged every round whether or not anybody touched it, and its
+    # coverage verdict repeating says nothing about revision.
+    pending_seq_history: list[set[int]] = []
     round_no = 0
     while True:
         round_no += 1
@@ -3492,7 +3529,7 @@ async def _stage_validate_publish(
             # than folded into it: a claim marked overreaching twice running is
             # a claim the reviser is rewriting, and the failed-row count cannot
             # see that because a coverage verdict never fails a row.
-            narrowing = _still_narrowing(overreach_history, failed_seq_history)
+            narrowing = _still_narrowing(overreach_history, pending_seq_history)
             if round_no > HARD_VALIDATE_ROUNDS or not (converging or narrowing):
                 break
             extended_because = "converging" if converging else "narrowing"
@@ -3502,7 +3539,7 @@ async def _stage_validate_publish(
                                               pending_only=True, run_id=run_id)
         failed_history.append(len(verdict["failed"]))
         overreach_history.append(_overreach_seqs(verdict))
-        failed_seq_history.append(_failed_seqs(verdict))
+        pending_seq_history.append(_pending_seqs(verdict))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
@@ -3524,6 +3561,10 @@ async def _stage_validate_publish(
             # text, which is an inference, where `failed` at zero in round 3 is
             # a measurement. Sorted so the key is stable to compare across runs.
             "failed_claims": sorted(_failed_seqs(verdict)),
+            # Beside them because they mean the same thing to the criterion:
+            # an unjudged row is as pending as a failed one, and the exclusion
+            # is only checkable after the fact if both are recorded.
+            "errored_claims": sorted(_errored_seqs(verdict)),
         }})
         # A claim whose every span passes can still assert more than those
         # spans establish — "the whole period" on passages about a second

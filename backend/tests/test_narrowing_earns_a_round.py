@@ -40,8 +40,10 @@ import inspect
 import pathlib
 
 from app.services.query_runner import (
+    _errored_seqs,
     _failed_seqs,
     _overreach_seqs,
+    _pending_seqs,
     _still_narrowing,
 )
 
@@ -222,6 +224,43 @@ def test_another_claim_failing_does_not_exclude_a_clean_one():
     assert _still_narrowing([{9, 14}, {9, 14}], [{9}, {9}])
 
 
+def test_a_claim_whose_span_errored_is_excluded_like_a_failing_one():
+    """An errored row is never marked validated, so it stays pending and the
+    claim is re-judged next round for free. Same free repeat, same exclusion.
+
+    Greptile raised this on the PR: without it a malformed span verdict leaves
+    the sequence out of the history and the free re-judge reads as a rewrite."""
+    assert not _still_narrowing([{14}, {14}], [{14}, set()])
+
+
+def test_pending_is_failed_and_errored_together():
+    assert _pending_seqs({"failed": [{"claim_sequence": 3}],
+                          "errors": [{"claim_sequence": 9}]}) == {3, 9}
+    assert _pending_seqs({"errors": [{"claim_sequence": 9}]}) == {9}
+    assert _pending_seqs({"failed": [{"claim_sequence": 3}]}) == {3}
+
+
+def test_an_error_without_a_sequence_names_no_claim():
+    """A verdict stored before errors carried a sequence, and a malformed one
+    whose evidence id did not resolve. Empty rather than wrong."""
+    assert _errored_seqs({"errors": [{"error": "no extracted content"}]}) == set()
+    assert _errored_seqs({}) == set()
+
+
+def test_errored_sequences_are_read_the_same_way_as_the_others():
+    assert _errored_seqs({"errors": [{"claim_sequence": "7"}]}) == {7}
+    assert _errored_seqs({"errors": [{"claim_sequence": 7.5}]}) == set()
+    assert _errored_seqs({"errors": [{"claim_sequence": True}]}) == set()
+    assert _errored_seqs({"errors": ["junk"]}) == set()
+
+
+def test_the_round_records_both_kinds(monkeypatch):
+    """The exclusion is only checkable after the fact if both are stored."""
+    s = src()
+    assert '"failed_claims": sorted(_failed_seqs(verdict)),' in s
+    assert '"errored_claims": sorted(_errored_seqs(verdict)),' in s
+
+
 def test_the_motivating_case_no_longer_qualifies():
     """Q53 claim 14 was marked in rounds 3 and 4 and then dropped by the
     rounds-exhausted path, which selects claims with an unvalidated row — so it
@@ -250,7 +289,7 @@ def test_the_two_histories_stay_in_step():
     i = s.index('failed_history.append(len(verdict["failed"]))')
     window = s[i:i + 260]
     assert "overreach_history.append(_overreach_seqs(verdict))" in window
-    assert "failed_seq_history.append(_failed_seqs(verdict))" in window
+    assert "pending_seq_history.append(_pending_seqs(verdict))" in window
 
 
 def test_a_short_history_is_not_narrowing():

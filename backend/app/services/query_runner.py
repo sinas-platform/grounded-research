@@ -24,18 +24,26 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from sqlalchemy import func, select
 
-from app.services import claim_naming, obligations
 from app.auth import CallerIdentity
 from app.config import get_settings
 from app.db import AsyncSessionLocal
-from app.models import AnswerClaim, ClaimEvidence, Document, DocumentClass, DocumentVersion, Result, ResultDocument
+from app.models import (
+    AnswerClaim,
+    ClaimEvidence,
+    Document,
+    DocumentClass,
+    DocumentVersion,
+    Result,
+    ResultDocument,
+)
 from app.models.query import QueryRun
+from app.services import claim_naming, obligations
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -135,7 +143,7 @@ def _domain_article() -> str:
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _iso() -> str:
@@ -2750,6 +2758,141 @@ async def _compact_claim_sequences(session, answer_id: uuid.UUID) -> None:
             c.sequence = i
 
 
+# An identifier is a token carrying a digit and joined by a separator:
+# T-135/09, C-606/18, 41(1), 1/2003, C/1072/19, M.11936. The pattern is
+# structural, not legal — it knows nothing about courts or articles, and the
+# same shape picks up a Spanish CNMC case number and an EU merger number that
+# a pattern written for EU court references would miss. Measured over 44
+# published runs it recognises 31 distinct tokens, 30 of them real citations
+# and one COVID-19.
+_IDENTIFIER = re.compile(r"\b(?=[^\s]*\d)[A-Za-z0-9]+(?:[-/.]\w+|\(\w+\))+")
+# A filename is a citation, and citations are counted separately and exactly.
+_FILE_SUFFIX = re.compile(r"\.[a-z]{2,4}$")
+
+
+def _identifiers(text: str) -> set[str]:
+    """Identifier-shaped tokens in a claim. Pure.
+
+    Two exclusions, both to stop this counting something the other check
+    already counts exactly, or something that is not an identifier at all:
+    a filename belongs to the citation check, and a token of digits and dots
+    alone is a decimal or a line range.
+    """
+    return {
+        t for t in _IDENTIFIER.findall(text or "")
+        if not _FILE_SUFFIX.search(t) and not re.fullmatch(r"[\d.\-]+", t)
+    }
+
+
+def _deleted_claims(validate: dict) -> list[dict]:
+    """Every claim a run deleted, gathered from the shapes that record one.
+
+    Four keys hold deletions and two pairs of them overlap: the sweep writes
+    its claims to both `final_sweep_dropped_detail` and a numbered `removed_N`,
+    and the rounds-exhausted path writes both a flat `dropped_detail` and a
+    numbered one. Deduplicated on the sequence and the opening of the text,
+    which is what distinguishes two deletions of different claims.
+
+    Reads the flat legacy keys as well as the numbered ones, so a run recorded
+    before the numbering existed is still readable here — those records carry
+    no citations, so only the mention check can say anything about them.
+
+    Pure: telemetry in, records out.
+    """
+    seen: set[tuple] = set()
+    out: list[dict] = []
+    for key in sorted(validate):
+        v = validate[key]
+        # Each shape names its own list. Read by a fallback chain instead and
+        # `revision_N` hands back its `claims` count, which is an integer.
+        if key in ("dropped_detail", "final_sweep_dropped_detail"):
+            entries = v
+        elif re.fullmatch(r"revision_\d+", key) and isinstance(v, dict):
+            entries = v.get("dropped_detail")
+        elif re.fullmatch(r"removed_\d+", key) and isinstance(v, dict):
+            entries = v.get("claims")
+        else:
+            continue
+        if not isinstance(entries, list):
+            continue
+        for e in entries:
+            if not isinstance(e, dict) or not e.get("claim"):
+                continue
+            # Everything the record holds, because a sequence is reused as
+            # claims are added and dropped and the text alone does not identify
+            # a claim: `_removal_record` stores 400 characters, and 23 of the
+            # 70 stored records are at that cap. Two long claims differing only
+            # past it would read as one record written twice, and the second
+            # one's citations would reach neither check. The citations are the
+            # field these checks consume, so they belong in the identity.
+            fp = (e.get("sequence"), str(e["claim"]),
+                  tuple(sorted(str(c) for c in (e.get("cites") or []))))
+            if fp in seen:
+                continue
+            seen.add(fp)
+            out.append(e)
+    return out
+
+
+def _seqs(entries: list[dict]) -> list[int]:
+    out = []
+    for e in entries:
+        try:
+            out.append(int(e.get("sequence")))
+        except (TypeError, ValueError):
+            continue
+    return sorted(set(out))
+
+
+def _last_citation_losses(deleted: list[dict], live: set[str]) -> list[dict]:
+    """Documents the answer cited before a deletion and does not cite now.
+
+    NOT a coverage check. It does not know whether the point the deleted claim
+    made survives somewhere else, and it is not evidence that anything is
+    missing. It says one thing exactly: a document that was carrying a citation
+    in this answer is no longer carrying one.
+
+    That is worth its own record because nothing else in the pipeline would
+    ever mention it. An answer that quietly stops citing a publisher's own
+    material still reads as a good answer.
+
+    Pure.
+    """
+    by: dict[str, list[dict]] = {}
+    for e in deleted:
+        for d in (e.get("cites") or []):
+            if d and d not in live:
+                by.setdefault(str(d), []).append(e)
+    return [{"document": d, "sequences": _seqs(v)} for d, v in sorted(by.items())]
+
+
+def _last_mention_losses(deleted: list[dict], live: set[str]) -> list[dict]:
+    """Identifiers a deleted claim named that no surviving claim names.
+
+    The companion to the citation check and the same kind of statement: the
+    answer stopped naming T-135/09, not the answer no longer covers T-135/09.
+    The two do not coincide. A deletion can take the last citation of a
+    document while the identifier survives in a claim citing something else,
+    and it can take the last mention of a case while the document it cited
+    stays cited by a different claim.
+
+    Neither check sees the case that prompted both. Q41 deleted a claim
+    recording that inspectors imaged employees' drives and indexed them
+    overnight, on the reasoning that a later judgment superseded it. Both the
+    document and the case number survive elsewhere in that answer; what left
+    was a fact inside a document still cited, and no set difference over
+    citations or identifiers can see that.
+
+    Pure.
+    """
+    by: dict[str, list[dict]] = {}
+    for e in deleted:
+        for t in _identifiers(str(e.get("claim") or "")):
+            if t not in live:
+                by.setdefault(t, []).append(e)
+    return [{"identifier": t, "sequences": _seqs(v)} for t, v in sorted(by.items())]
+
+
 async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) -> None:
     from app.models import Answer
 
@@ -2759,7 +2902,32 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
         row.published_at = _now()
         await _compact_claim_sequences(session, answer_id)
         await session.commit()
-    await _tele(run_id, "validate", published=_iso(), **tele)
+        # Read after the commit, and only here. "Last" is a claim about the
+        # finished answer: during revision a document can lose its last
+        # citation and get another one two cycles later, so the same
+        # comparison made at deletion time reports losses that did not happen
+        # and misses ones that had not happened yet.
+        live = (await session.execute(
+            select(AnswerClaim.claim_text, Document.filename)
+            .outerjoin(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
+            .outerjoin(Document, Document.id == ClaimEvidence.document_id)
+            .where(AnswerClaim.answer_id == answer_id)
+        )).all()
+        run = await session.get(QueryRun, run_id)
+        validate = ((run.telemetry if run is not None else None)
+                    or {}).get("validate") or {}
+    deleted = _deleted_claims(validate)
+    live_docs = {fn for _, fn in live if fn}
+    live_ids: set[str] = set()
+    for text, _ in live:
+        live_ids |= _identifiers(text or "")
+    # Written on every publish, empty lists included. An empty list says the
+    # comparison ran and found nothing; a missing key says the run predates
+    # the comparison. Those are different facts and a reader needs both.
+    await _tele(run_id, "validate", published=_iso(),
+                lost_last_citation=_last_citation_losses(deleted, live_docs),
+                lost_last_mention=_last_mention_losses(deleted, live_ids),
+                **tele)
 
 
 def _spans_of(obj: dict) -> list[dict]:
@@ -2799,6 +2967,7 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
     if not isinstance(data, dict):
         return None
 
+    drop_reasons: dict[int, str] = {}
     revise = []
     for c in (data.get("revise") or []):
         if not isinstance(c, dict):
@@ -2828,8 +2997,39 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             add.append({"text": text, "type": "abstention", "evidence": [],
                         "rationale": str(c.get("rationale") or "").strip()})
 
-    drop = [int(x) for x in (data.get("drop") or [])
-            if str(x).lstrip("-").isdigit()]
+    # A drop costs a reason, like every other disposition. Revising needs text
+    # and spans, adding needs those plus a type, keeping needs a rationale, and
+    # waiving needs twenty characters of one. Dropping was a bare integer, and
+    # it is the disposition that removed two claims from Q41 — a reasonable
+    # time limit under Article 41(1), and the legality of copying a medium in
+    # its entirety — with nothing recorded about why, and nothing surviving
+    # that covers either.
+    #
+    # A drop without a reason is not applied, which is what this file already
+    # does to a waive whose rationale is too short: a disposition that does not
+    # meet its contract does not take effect. The refused sequences are
+    # returned so the caller can record them, because the interesting failure
+    # is the reviser declining to explain rather than the claim surviving one
+    # more cycle.
+    drop, drop_unexplained = [], []
+    for x in (data.get("drop") or []):
+        if isinstance(x, dict):
+            # The same digit test revise and keep apply to a sequence, for the
+            # same reason and with more at stake: int() reads 9.5 as claim 9
+            # and True as claim 1, and what comes out of here gets deleted.
+            # A sequence that is not written as a whole number names no claim.
+            if not str(x.get("seq", "")).lstrip("-").isdigit():
+                continue
+            seq = int(x["seq"])
+            why = str(x.get("rationale") or "").strip()
+            (drop if len(why) >= 20 else drop_unexplained).append(seq)
+            if len(why) >= 20:
+                drop_reasons[seq] = why[:400]
+        elif str(x).lstrip("-").isdigit():
+            # The old bare-integer shape. Read as a drop the reviser declined
+            # to explain rather than rejected outright, so the refusal is
+            # visible in the telemetry instead of looking like a parse failure.
+            drop_unexplained.append(int(x))
 
     # Keeping a claim the gate objected to is an answer, not a non-answer.
     # When the gate names a stronger source, the draft's citation is often
@@ -2851,9 +3051,10 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
                 and len(str(w.get("rationale") or "").strip()) >= 20:
             waives.append({"doc": str(w["doc"]).strip(),
                            "rationale": str(w["rationale"]).strip()})
-    if not (revise or add or drop or keep or waives):
+    if not (revise or add or drop or keep or waives or drop_unexplained):
         return None
     return {"revise": revise, "add": add, "drop": drop, "keep": keep,
+            "drop_reasons": drop_reasons, "drop_unexplained": drop_unexplained,
             "waive": waives}
 
 
@@ -3178,6 +3379,9 @@ async def _revise_answer(
         "Change ONLY what the feedback identifies. Leave every other claim "
         "alone — do not restate it, do not rephrase it, do not return it. "
         "A claim you do not mention is kept exactly as it is.\n\n"
+        "Dropping a claim costs a reason, like every other change: say what "
+        "the claim asserted and why no passage available can carry it. A drop "
+        "with no reason is not applied and the claim stays.\n\n"
         "For each claim you do change: narrow it if it asserts more than its "
         "passages establish, rewrite it if it contradicts another claim, and "
         "drop it if no passage can carry it. Add a claim only where the answer "
@@ -3215,7 +3419,8 @@ async def _revise_answer(
         + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
         '"rationale": "<why this claim rests on this source>", '
         '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
-        '"drop": [<seq>], '
+        '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
+        'and why no passage available can carry it>"}], '
         '"keep": [{"seq": <int>, "rationale": "<why the current citation '
         'stands despite the feedback>"}], '
         '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
@@ -3248,13 +3453,22 @@ async def _revise_answer(
         # Counts are all zero because nothing was applied. `kept_with_reason`
         # is not recorded here even when the patch carried keeps: the early
         # return above means they were not written either.
+        #
+        # Refused drops are the exception, and they have to be. A reply whose
+        # only content is drops with no reason lands here rather than below,
+        # because nothing was applied — and that reply is the whole point of
+        # asking for a reason. If it went unrecorded, the case where the
+        # reviser will remove a claim but not say why would be the one case
+        # invisible in the telemetry.
         cycle = await _next_cycle_key(run_id, "validate", "revision")
         await _tele(run_id, "validate", revision_yielded_no_change=True, **{
             cycle: {
                 "claims": len(by_claim), "revised": 0, "added": 0,
                 "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
                 "add_dropped_at_cap": 0, "untouched": len(by_claim),
-                "feedback_items": len(feedback), "yielded_no_change": True}})
+                "feedback_items": len(feedback), "yielded_no_change": True,
+                "dropped_unexplained": (patch or {}).get("drop_unexplained")
+                or []}})
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}
@@ -3270,6 +3484,12 @@ async def _revise_answer(
         dropped_here = await _removal_record(
             session, [c.id for c in (by_seq.get(s) for s in patch["drop"])
                       if c is not None])
+        # The reviser's own words for why, beside what the claim said and
+        # cited. `_removal_record` reads the database and cannot know them.
+        for entry in dropped_here:
+            why = (patch.get("drop_reasons") or {}).get(entry["sequence"])
+            if why:
+                entry["why"] = [why]
         for seq in patch["drop"]:
             claim = by_seq.get(seq)
             if claim is None:
@@ -3348,6 +3568,11 @@ async def _revise_answer(
             "abstentions": sum(1 for a in admitted
                                if a.get("type") == "abstention"),
             "dropped": len(patch["drop"]), "dropped_detail": dropped_here,
+            # Claims the reviser asked to drop and declined to explain. They
+            # were not removed. If this is where the drops go, the requirement
+            # is suppressing the disposition rather than documenting it, and
+            # that is the thing to know first.
+            "dropped_unexplained": patch.get("drop_unexplained") or [],
             "added": len(admitted),
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,

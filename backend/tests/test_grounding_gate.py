@@ -15,7 +15,6 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-
 from app.services.grounding_gate import (
     STATUS_ACTIVE,
     STATUS_REJECTED,
@@ -275,10 +274,25 @@ def test_only_patch_operations_survive_parsing():
         '{"revise": [{"seq": 4, "text": "Regulation (EU) 2018/1725, not the '
         'GDPR, governs the Commission\'s processing of personal data during '
         'an inspection.", "evidence": [{"filename": "32018R1725.md", '
-        '"line_from": 40, "line_to": 52}]}], "drop": [9], "add": []}'
+        '"line_from": 40, "line_to": 52}]}], '
+        '"drop": [{"seq": 9, "rationale": "no passage available carries the '
+        'assertion about sealing obligations"}], "add": []}'
     )
     patch = _parse_patch(good)
     assert patch and len(patch["revise"]) == 1 and patch["drop"] == [9]
+    assert patch["drop_reasons"][9].startswith("no passage available")
+
+    # A drop costs a reason now, like every other disposition. The bare integer
+    # was the old shape; it is read as a drop the reviser declined to explain,
+    # recorded and not applied, so the refusal is visible rather than looking
+    # like a parse failure.
+    bare = _parse_patch('{"revise": [], "add": [], "drop": [9]}')
+    assert bare["drop"] == [] and bare["drop_unexplained"] == [9]
+
+    # Too short counts as no reason, on the same twenty-character floor a
+    # waive already has to clear.
+    thin = _parse_patch('{"drop": [{"seq": 9, "rationale": "no"}]}')
+    assert thin["drop"] == [] and thin["drop_unexplained"] == [9]
 
     for not_a_claim in [
         "I need to see the evidence/spans you're referring to in order to rewrite.",
@@ -303,6 +317,7 @@ def test_revision_only_touches_the_claims_the_patch_names():
     patch names what to revise, drop and add; everything else keeps its row,
     its spans and its verdicts, because it is never rebuilt."""
     import inspect
+
     from app.services import query_runner as qr
 
     src = inspect.getsource(qr._revise_answer)
@@ -321,6 +336,7 @@ def test_abstention_is_offered_only_on_the_final_gate_cycle():
     """The flag exists inside the reviser; it has to be PASSED, or abstention
     can never fire. It shipped once without a caller supplying it."""
     import inspect
+
     from app.services import query_runner as qr
 
     src = inspect.getsource(qr._stage_validate_publish)
@@ -342,6 +358,7 @@ def test_drafting_input_carries_no_interpretation():
     no passage behind it: true, and uncheckable.
     """
     import inspect
+
     from app.services import query_runner as qr
 
     src = inspect.getsource(qr._draft_from_extracts)
@@ -357,8 +374,8 @@ def test_drafting_input_carries_no_interpretation():
 
     # the chat drafting loop, which sent the manifest to the drafter, is gone
     assert not hasattr(qr, "_dead_chat_diagnosis") or "synthesis-agent" not in synth
-    from app.config import Settings
     import pytest as _pytest
+    from app.config import Settings
     with _pytest.raises(Exception):
         Settings(SGR_DRAFT_MODE="chat")
 

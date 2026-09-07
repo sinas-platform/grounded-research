@@ -68,6 +68,60 @@ def wrap_property_value(value):
     return {"_": value}
 
 
+def _prompt_property_lines(properties: list[dict]) -> str:
+    """One line per property, as the extractor sees it.
+
+    Cardinality is stated only when it is `many`: saying "cardinality: one" on
+    every scalar would add a line's worth of tokens per property to every chunk
+    prompt to restate the default. What matters is telling a `many` property
+    that it may return several, which nothing did.
+    """
+    return "\n".join(
+        f'- "{p["name"]}": {p.get("description") or ""} '
+        f'(schema: {json.dumps(p["schema"])}'
+        + (", cardinality: many — return every value that applies, as a "
+           "JSON array" if p.get("cardinality") == "many" else "")
+        + ")"
+        for p in properties
+    )
+
+
+_SILENT_PROPS: set = set()
+
+
+def _prop_for_prompt(p) -> dict:
+    """What the extractor is told about one property.
+
+    `guidance` is the field the schema author fills; `description` is what the
+    prompt interpolated, and it is null on every property in this deployment.
+    So the instructions were written, stored, and never sent — the extractor
+    saw `- "case_number":  (schema: ...)` and had to guess. Entity types have
+    always read `guidance or description`; properties simply never did.
+
+    `cardinality` goes with it. A property declared `many` never told the model
+    it may return more than one, and the JSON schema it did send says
+    `"type": "string"`, so the model returned one.
+    """
+    text = (p.description or p.guidance or "").strip()
+    if not text and p.id not in _SILENT_PROPS:
+        # Once per property per process, not once per document. A property with
+        # no instruction is indistinguishable from one whose instruction was
+        # dropped, which is how this went unnoticed: the extractor is asked for
+        # a value and told nothing about what the field means.
+        _SILENT_PROPS.add(p.id)
+        logging.getLogger(__name__).warning(
+            "property %r has neither description nor guidance — the extractor "
+            "is given only its name and JSON schema", p.name,
+        )
+    return {
+        "name": p.name,
+        "description": text,
+        "schema": p.schema,
+        "cardinality": p.cardinality,
+        "id": p.id,
+    }
+
+
 def classify_by_rules(filename: str) -> tuple[str, float, str] | None:
     for pattern, cls, conf, reason in CLASS_RULES:
         if re.search(pattern, filename):
@@ -278,10 +332,7 @@ def _front_matter_prompt(
     )
     prop_block = ""
     if properties:
-        plines = "\n".join(
-            f'- "{p["name"]}": {p.get("description") or ""} (schema: {json.dumps(p["schema"])})'
-            for p in properties
-        )
+        plines = _prompt_property_lines(properties)
         prop_block = (
             "\nPROPERTIES to extract for this class (null when the document "
             f"does not state a value):\n{plines}\n"
@@ -451,10 +502,7 @@ async def oneshot_ingest_document(
                 )
             )
         ).scalars().all()
-        class_props = [
-            {"name": p.name, "description": p.description, "schema": p.schema, "id": p.id}
-            for p in rows
-        ]
+        class_props = [_prop_for_prompt(p) for p in rows]
 
     hint = None
     if doc.document_class_id is not None:
@@ -509,10 +557,7 @@ async def oneshot_ingest_document(
                     )
                 )
             ).scalars().all()
-            class_props = [
-                {"name": p.name, "description": p.description, "schema": p.schema, "id": p.id}
-                for p in rows
-            ]
+            class_props = [_prop_for_prompt(p) for p in rows]
             if class_props:
                 prop_prompt = _front_matter_prompt(
                     filename=doc.filename or "",

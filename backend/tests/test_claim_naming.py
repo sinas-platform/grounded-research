@@ -605,6 +605,18 @@ def test_every_loader_selects_what_the_assembler_unpacks():
     assert selected(str(cn._LOAD)) == wanted + 1, "_LOAD"
     assert selected(str(cn._LOAD_IDENTIFIED)) == wanted, "_LOAD_IDENTIFIED"
 
+    # And the caller that reshapes rows before handing them over. Counting the
+    # loaders alone leaves this step uncovered, and it is where the same bug
+    # was made a second time: `_assemble` was widened for the name, `_LOAD`
+    # was given the column, and `findings_for` still built the old tuple.
+    built = re.search(r"_assemble\(\s*\[\((.+?)\) for r in rows\]",
+                      inspect.getsource(cn.findings_for), re.S)
+    if built:
+        assert len([x for x in built.group(1).split(",") if x.strip()]) == wanted, (
+            "findings_for builds a tuple of a different width than _assemble "
+            "unpacks"
+        )
+
 
 def test_a_crashed_check_says_so_where_its_findings_go():
     """An empty list is what a clean answer returns. A check that fell over

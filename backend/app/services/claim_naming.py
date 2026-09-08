@@ -602,9 +602,9 @@ async def findings_for(answer_id: uuid.UUID) -> list[Finding]:
     for row in rows:
         cues.update(c.lower() for c in (row[4] or []) if c)
     claims, sources = _assemble(
-        [(r[0], r[1], r[2], r[3], r[5], r[6]) for r in rows]
+        [(r[0], r[1], r[2], r[3], r[5], r[6], r[7]) for r in rows]
     )
-    return review(claims, sources, frozenset(cues))
+    return review(claims, sources, frozenset(cues), await common_names())
 
 
 async def mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:

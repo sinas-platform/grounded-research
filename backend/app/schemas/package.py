@@ -12,6 +12,7 @@ resolves names to ids in dependency order.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -48,10 +49,36 @@ class PackageDocumentClassEntry(_Strict):
     # both switches the check on for the class; declaring neither leaves it
     # off, which is the default.
     identifier_property: str | None = None
+    # The shape of that identifier, as a regular expression whose CAPTURE
+    # GROUPS are the comparison key. SGR cannot know what a case number, a
+    # merger reference or an invoice number looks like without naming a
+    # deployment, so the shape is declared here beside the cues. Capture the
+    # parts that identify and leave out the parts that decorate: two values
+    # differing only by what is not captured compare equal, which is how a
+    # deployment says a procedural suffix does not change identity without
+    # SGR knowing what a suffix is.
+    identifier_pattern: str | None = None
     attribution_cues: list[str] = Field(default_factory=list)
     properties: list[PackagePropertyEntry] = Field(default_factory=list)
     # entity types attached to this document class, by entity-type name
     entity_types: list[str] = Field(default_factory=list)
+
+    @field_validator("identifier_pattern")
+    @classmethod
+    def _pattern_compiles(cls, v: str | None) -> str | None:
+        """Refused at import rather than at the first answer that uses it.
+
+        A pattern that does not compile would otherwise raise inside a check
+        that is deliberately best-effort, where it would be swallowed and the
+        class would look like one that had opted out.
+        """
+        if v is None:
+            return v
+        try:
+            re.compile(v)
+        except re.error as exc:
+            raise ValueError(f"identifier_pattern is not a regex: {exc}") from exc
+        return v
 
     @field_validator("slug")
     @classmethod

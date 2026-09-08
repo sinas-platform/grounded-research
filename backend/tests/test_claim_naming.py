@@ -14,18 +14,25 @@ from app.services.claim_naming import (
     Source,
     attributes,
     carries_identifier,
-    case_identity,
-    cases_named,
     identifier_core,
+    identifier_key,
+    identifiers_named,
     message,
     mismatch_message,
     mismatches,
     review,
 )
 
+# The shape a deployment declares. The module knows nothing about it: these
+# tests supply one the way a package would, and any other scheme with capture
+# groups would exercise the same code. Written to capture the parts that
+# identify and to leave out a trailing suffix, so two values differing only by
+# that suffix compare equal without the module knowing what a suffix is.
+SHAPE = r"\b([A-Z])\s?[-\u2010-\u2015\u2212]\s?0*(\d{1,4})/(\d{2})\b"
+
 CUES = frozenset({"held", "found", "ruled"})
-SRC = Source(key="doc-1", identifiers=("X-111/22",), label="a.md")
-OTHER = Source(key="doc-2", identifiers=("Y-333/44",), label="b.md")
+SRC = Source(key="doc-1", identifiers=("X-111/22",), label="a.md", pattern=SHAPE)
+OTHER = Source(key="doc-2", identifiers=("Y-333/44",), label="b.md", pattern=SHAPE)
 
 
 def _review(claims, sources, cues=CUES):
@@ -218,7 +225,7 @@ def test_repeated_evidence_from_one_document_is_not_a_chain():
 
 def test_a_source_with_no_identifier_is_not_checked():
     """Nothing can be demanded of a source that has no identifier to give."""
-    bare = Source(key="doc-3", identifiers=(), label="c.md")
+    bare = Source(key="doc-3", identifiers=(), label="c.md", pattern=SHAPE)
     assert _review([(1, "The body held that it applies")], {1: [bare]}) == []
 
 
@@ -266,81 +273,119 @@ def test_identity_drops_a_procedural_suffix():
     """`C-606/18` and `C-606/18 P` are written for the same case. Dropping the
     suffix can only make two things compare equal, which is the safe
     direction: it costs a finding, never invents one."""
-    assert case_identity("C-606/18 P") == "C-606/18"
-    assert case_identity("C-606/18") == "C-606/18"
-    assert case_identity("C-65/18 P(R)") == "C-65/18"
-    assert case_identity("T-1097/23 R-RENV") == "T-1097/23"
+    base = identifier_key("C-606/18", SHAPE)
+    assert identifier_key("C-606/18 P", SHAPE) == base
+    assert identifier_key("C-65/18 P(R)", SHAPE) == identifier_key("C-65/18", SHAPE)
+    assert identifier_key("T-1097/23 R-RENV", SHAPE) == identifier_key("T-1097/23", SHAPE)
 
 
-def test_identity_normalises_leading_zeros():
-    """A number derived from a CELEX name is written without them and the same
-    case stored by hand is written with them."""
-    assert case_identity("C-010/18") == case_identity("C-10/18 P")
+def test_leading_zeros_are_the_shape_s_business_not_the_module_s():
+    """One deployment writes a padded number and another does not. SHAPE says
+    the padding does not distinguish, by consuming it outside the group, and
+    the module never learns that zeros are padding."""
+    assert identifier_key("C-010/18", SHAPE) == identifier_key("C-10/18 P", SHAPE)
+    unpadded = r"\b([A-Z])-(\d{1,4})/(\d{2})\b"
+    assert identifier_key("C-010/18", unpadded) != identifier_key("C-10/18", unpadded)
 
 
-def test_identity_keeps_the_court_letter():
+def test_identity_keeps_the_scheme_letter():
     """T-449/14 and C-449/14 are different cases before different courts."""
-    assert case_identity("T-449/14") != case_identity("C-449/14")
+    assert identifier_key("T-449/14", SHAPE) != identifier_key("C-449/14", SHAPE)
 
 
 def test_identity_of_an_identifier_that_names_no_case_is_none():
     """Merger and national references are identifiers, but not of the shape
     this check can read, so it declines to read them."""
-    assert case_identity("COMP/M.1234") is None
-    assert case_identity("11-D-17") is None
-    assert case_identity("509 U.S. 209") is None
+    assert identifier_key("COMP/M.1234", SHAPE) is None
+    assert identifier_key("11-D-17", SHAPE) is None
+    assert identifier_key("509 U.S. 209", SHAPE) is None
 
 
-# ── cases_named: the cases a claim writes ────────────────────────────────────
+# ── identifiers_named: what a claim writes, read with the declared shape ─────
 
 
-def test_a_case_in_parentheses_is_found():
-    assert cases_named("Nexans v Commission (C-606/18 P), paragraph 87") == {
-        "C-606/18"
-    }
+def test_an_identifier_in_parentheses_is_found():
+    got = identifiers_named("Nexans v Commission (C-606/18 P), paragraph 87", SHAPE)
+    assert set(got.values()) == {"C-606/18"}
 
 
-def test_the_case_prefixed_form_is_found():
-    assert cases_named("The General Court, in Case T-249/17, reasoned") == {
-        "T-249/17"
-    }
+def test_the_prefixed_form_is_found():
+    got = identifiers_named("The General Court, in Case T-249/17, reasoned", SHAPE)
+    assert set(got.values()) == {"T-249/17"}
 
 
-def test_several_cases_are_all_found():
-    named = cases_named(
-        "in Joined Cases T-125/03 and T-253/03, appealed in Case C-550/07 P"
-    )
-    assert named == {"T-125/03", "T-253/03", "C-550/07"}
+def test_several_are_all_found():
+    got = identifiers_named("T-125/03 and T-253/03 were heard together", SHAPE)
+    assert set(got.values()) == {"T-125/03", "T-253/03"}
 
 
-def test_a_case_spaced_around_its_hyphen_is_found():
-    """Judgment text as published writes `Case C \u2011 541/23 P`, with a
-    non-breaking hyphen and a space on either side. A claim quoting a passage
-    carries that spelling in, and reading it as naming no case at all would
-    send the claim to the mismatch check against whichever case it mentions
-    next."""
-    assert cases_named("Case C \u2011 541/23 P Polwax v Commission") == {
-        "C-541/23"
-    }
-    assert cases_named("in Case C - 606/18 P") == {"C-606/18"}
+def test_one_spaced_around_its_hyphen_is_found():
+    """Judgment text as published writes the separator with spaces, and a
+    claim quoting a passage carries that spelling in."""
+    got = identifiers_named("in Case C \u2011 541/23 P the Court", SHAPE)
+    assert len(got) == 1
 
 
-def test_prose_naming_no_case_yields_nothing():
-    assert cases_named("An Advocate General's Opinion states the principle") == set()
+def test_prose_naming_none_yields_nothing():
+    assert identifiers_named("The Court held that the seal was broken.", SHAPE) == {}
 
 
-def test_a_paragraph_or_article_number_is_not_a_case():
-    """Bare numbers are everywhere in legal prose; only the court-and-year
-    shape counts."""
-    assert cases_named("paragraph 87 of Article 20(4) of Regulation 1/2003") == set()
+def test_a_paragraph_or_article_number_is_not_an_identifier():
+    """The shape requires a letter, a number and a year. `Article 20(4)` and
+    `paragraph 87` hold no year and are not identifiers under it."""
+    assert identifiers_named("Article 20(4), paragraph 87, Regulation 1/2003", SHAPE) == {}
 
 
-# ── mismatches: naming one authority while resting on another ────────────────
+# ── identifier_key: what makes two spellings the same identifier ─────────────
 
-NEXANS = Source(key="d-606", identifiers=("C-606/18 P",), label="62018CJ0606.md")
-PRYSMIAN = Source(key="d-601", identifiers=("C-601/18 P",), label="62018CJ0601.md")
-CASINO_GC = Source(key="d-249", identifiers=("T-249/17",), label="62017TJ0249.md")
-CASINO_CJ = Source(key="d-690", identifiers=("C-690/20 P",), label="62020CJ0690.md")
+
+def test_a_value_that_does_not_match_the_shape_has_no_key():
+    assert identifier_key("inspections-eu-law-2nd.md", SHAPE) is None
+    assert identifier_key("COMP/M.11936", SHAPE) is None
+
+
+def test_the_key_is_anchored_so_a_value_must_be_an_identifier():
+    """A value merely containing something shaped like one is not one. Being
+    strict can only shrink the set a claim is judged against, which loses a
+    finding rather than inventing one."""
+    assert identifier_key("see T-249/17", SHAPE) is None
+
+
+def test_what_the_shape_does_not_capture_does_not_distinguish():
+    """The contract. SHAPE captures letter, number and year and stops, so a
+    trailing suffix is not part of identity, and this module never learns what
+    the suffix means."""
+    assert identifier_key("C-606/18 P", SHAPE) == identifier_key("C-606/18", SHAPE)
+    assert identifier_key("C-606/18 P-DEP", SHAPE) == identifier_key("C-606/18", SHAPE)
+
+
+def test_what_the_shape_does_capture_does_distinguish():
+    """The other half of the same contract: the scheme letter is captured, so
+    two schemes are two identifiers."""
+    assert identifier_key("T-449/14", SHAPE) != identifier_key("C-449/14", SHAPE)
+
+
+def test_a_claim_and_a_stored_value_meet_on_the_same_key():
+    named = identifiers_named("as C-606/18 P held", SHAPE)
+    assert set(named) == {identifier_key("C-606/18", SHAPE)}
+
+
+def test_a_pattern_that_captures_nothing_keys_on_the_whole_match():
+    """A deployment may declare a shape with no groups. Then the match itself
+    is the identity, which is the only reading available."""
+    whole = r"INV-\d{4}"
+    assert identifier_key("INV-1234", whole) == identifier_key("INV-1234", whole)
+    assert identifier_key("INV-1234", whole) != identifier_key("INV-5678", whole)
+
+
+NEXANS = Source(key="d-606", identifiers=("C-606/18 P",),
+                label="62018CJ0606.md", pattern=SHAPE)
+PRYSMIAN = Source(key="d-601", identifiers=("C-601/18 P",),
+                  label="62018CJ0601.md", pattern=SHAPE)
+CASINO_GC = Source(key="d-249", identifiers=("T-249/17",),
+                   label="62017TJ0249.md", pattern=SHAPE)
+CASINO_CJ = Source(key="d-690", identifiers=("C-690/20 P",),
+                   label="62020CJ0690.md", pattern=SHAPE)
 
 
 def _mismatches(claims, sources):
@@ -356,8 +401,10 @@ def test_a_claim_naming_only_a_case_it_does_not_cite_is_reported():
              "the Commission can legitimately consider it justified.")],
         {7: [PRYSMIAN]},
     )
+    # `cited` shows what the source calls itself, not the key it reduced to:
+    # a reader is told the identifier, not the comparison.
     assert [(m.seq, m.named, m.cited) for m in found] == [
-        (7, ("C-606/18",), ("C-601/18",))
+        (7, ("C-606/18",), ("C-601/18 P",))
     ]
 
 
@@ -407,6 +454,7 @@ def test_joined_cases_stored_on_one_document_need_only_one_named():
         key="d-538",
         identifiers=("C-538/18 P", "C-539/18 P"),
         label="62018CJ0538.md",
+        pattern=SHAPE,
     )
     found = _mismatches(
         [(1, "The Court dismissed the appeal in Case C-538/18 P")], {1: [ceske]}
@@ -426,14 +474,14 @@ def test_the_rule_is_per_claim_not_per_source():
 
 
 def test_a_source_with_no_identifier_is_out_of_scope():
-    bare = Source(key="d-0", identifiers=(), label="chapter.md")
+    bare = Source(key="d-0", identifiers=(), label="chapter.md", pattern=SHAPE)
     assert _mismatches([(1, "as held in Case C-606/18 P")], {1: [bare]}) == []
 
 
 def test_a_source_whose_identifier_names_no_case_is_out_of_scope():
     """A book chapter or a merger reference cannot be compared against a case
     number, and a claim citing one may name any case it likes."""
-    merger = Source(key="d-m", identifiers=("COMP/M.1234",), label="m.md")
+    merger = Source(key="d-m", identifiers=("COMP/M.1234",), label="m.md", pattern=SHAPE)
     assert _mismatches([(1, "as held in Case C-606/18 P")], {1: [merger]}) == []
 
 

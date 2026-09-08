@@ -78,11 +78,18 @@ MAX_FINDINGS = 5
 
 @dataclass(frozen=True)
 class Source:
-    """A document a claim cites, and what identifies it."""
+    """A document a claim cites, and what identifies it.
+
+    `pattern` is the identifier shape its class declares, or None where the
+    class declares none. It rides on the source rather than on the answer
+    because one claim can cite documents of different classes, and each is
+    read with its own class's shape.
+    """
 
     key: str
     identifiers: tuple[str, ...]
     label: str
+    pattern: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,48 +168,65 @@ def carries_identifier(text: str, identifiers: tuple[str, ...]) -> bool:
     return False
 
 
-# A case number before the Union courts: a court letter, a number and a year.
-# This is the one identifier shape in the corpus that can be read out of prose
-# without guessing. Merger references (COMP/M.1234), national decision numbers
-# (11-D-17) and US citations are identifiers too, and a claim naming one of
-# those is simply out of this check's reach rather than clean. Hyphen variants
-# are accepted because copied judgment text carries several of them, and so is
-# a space on either side of the hyphen: judgment text as published writes
-# `Case C \u2011 541/23 P`, and a claim quoting a passage carries that spelling
-# in. Read strictly, such a claim names no case at all, and would then be
-# compared against whichever case it mentions next.
-_CASE = re.compile(
-    r"\b([CTF])\s?[-\u2010-\u2015\u2212]\s?(\d{1,4})/(\d{2,4})\b"
-)
+# The shape of an identifier is deployment knowledge, not platform knowledge.
+# A court case number, a merger reference, an invoice number and a bug id are
+# all identifiers, and nothing here can be written to know any of them without
+# naming a deployment in a repo that must not name one. So the shape arrives
+# from configuration, as `attribution_cues` already does: a class declares
+# `identifier_pattern` beside `identifier_property`, and a class that declares
+# none is not judged by this check.
+#
+# The pattern's CAPTURE GROUPS are the comparison key. That is the whole
+# contract, and it is what lets a deployment say which differences matter
+# without SGR knowing why: capture the parts that identify, leave out the
+# parts that decorate. A deployment whose identifiers carry a procedural
+# suffix that does not change identity simply does not capture it, and two
+# values differing only by that suffix then compare equal here without this
+# module knowing what a suffix is.
+_PATTERNS: dict[str, re.Pattern[str]] = {}
 
 
-def _case(letter: str, number: str, year: str) -> str:
-    """One case written one way, whatever style it arrived in."""
-    return f"{letter.upper()}-{int(number)}/{year[-2:]}"
+def _compiled(pattern: str) -> re.Pattern[str]:
+    """The class's pattern, compiled once. Raises on a pattern that will not
+    compile, which the package schema refuses at import so it cannot arrive
+    here from a validated package."""
+    got = _PATTERNS.get(pattern)
+    if got is None:
+        got = _PATTERNS[pattern] = re.compile(pattern)
+    return got
 
 
-def cases_named(text: str) -> set[str]:
-    """The cases a claim writes, whether or not they are the ones it cites."""
-    return {_case(*m.groups()) for m in _CASE.finditer(text)}
+def _key(match: re.Match[str]) -> str:
+    """The comparison key of one match: its capture groups, or the whole match
+    when the pattern captures nothing.
 
-
-def case_identity(value: str) -> str | None:
-    """The case a stored identifier names, or None if it does not name one.
-
-    Anchored at the start, so a value has to BE a case number rather than
-    merely contain something shaped like one. Being strict here can only
-    shrink the set of cases a claim is judged against, which loses a finding
-    rather than inventing one.
-
-    The procedural suffix is dropped: `C-606/18` and `C-606/18 P` are written
-    for the same case, and a claim that omits it has still named its source.
-    That too can only make two things compare equal, which is the safe
-    direction. The court letter is kept, because T-449/14 and C-449/14 are
-    different cases before different courts, and `identifier_core` above
-    discards exactly that distinction.
+    Case-folded and stripped, because those are differences of typing rather
+    than of identity in every scheme. Nothing else is normalised: a deployment
+    that wants two spellings to compare equal writes a pattern that captures
+    them the same way, which keeps the judgement where the knowledge is.
     """
-    m = _CASE.match(value.strip())
-    return _case(*m.groups()) if m else None
+    groups = [g for g in match.groups() if g is not None] or [match.group(0)]
+    return "\u0000".join(g.strip().upper() for g in groups)
+
+
+def identifiers_named(text: str, pattern: str) -> dict[str, str]:
+    """The identifiers a claim writes, as key -> the text that wrote it.
+
+    The text is kept for the message: a reader is told what the claim says,
+    not the key it reduced to.
+    """
+    return {_key(m): m.group(0) for m in _compiled(pattern).finditer(text)}
+
+
+def identifier_key(value: str, pattern: str) -> str | None:
+    """The key of a stored identifier, or None if it does not match the shape.
+
+    Anchored, so a value has to BE an identifier rather than merely contain
+    something shaped like one. Being strict here can only shrink the set a
+    claim is judged against, which loses a finding rather than inventing one.
+    """
+    m = _compiled(pattern).match(value.strip())
+    return _key(m) if m else None
 
 
 def attributes(text: str, cues: frozenset[str]) -> bool:
@@ -279,23 +303,35 @@ def mismatches(
     """
     found: list[Mismatch] = []
     for claim in sorted(claims, key=lambda c: c.seq):
-        named = cases_named(claim.text)
+        here = sources.get(claim.seq, ())
+        # One claim can cite two classes with different shapes, so the prose is
+        # read once per distinct shape and the results unioned.
+        shapes = {s.pattern for s in here if s.pattern}
+        if not shapes:
+            continue
+        named: dict[str, str] = {}
+        for shape in shapes:
+            named.update(identifiers_named(claim.text, shape))
         if not named:
             continue
-        cited: dict[str, str] = {}
-        for source in sources.get(claim.seq, ()):
+        # key -> (what the source calls it, which document), so the message
+        # can show a reader the identifier rather than the key it reduced to.
+        cited: dict[str, tuple[str, str]] = {}
+        for source in here:
+            if not source.pattern:
+                continue
             for identifier in source.identifiers:
-                identity = case_identity(identifier)
-                if identity:
-                    cited.setdefault(identity, source.label)
-        if not cited or named & set(cited):
+                key = identifier_key(identifier, source.pattern)
+                if key:
+                    cited.setdefault(key, (identifier, source.label))
+        if not cited or set(named) & set(cited):
             continue
         found.append(
             Mismatch(
                 seq=claim.seq,
-                named=tuple(sorted(named)),
-                cited=tuple(sorted(cited)),
-                labels=tuple(dict.fromkeys(cited.values())),
+                named=tuple(sorted(named.values())),
+                cited=tuple(sorted(v[0] for v in cited.values())),
+                labels=tuple(dict.fromkeys(v[1] for v in cited.values())),
             )
         )
     return found
@@ -374,7 +410,7 @@ _LOAD = sa.text(
 _LOAD_IDENTIFIED = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
-           pv.value->>'_' as identifier
+           pv.value->>'_' as identifier, dc.identifier_pattern
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -385,12 +421,14 @@ _LOAD_IDENTIFIED = sa.text(
         on pv.document_id = d.id and pv.property_id = p.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
+       and dc.identifier_pattern is not null
     """
 )
 
 
 def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
-    """Rows of (sequence, claim text, document id, filename, identifier) as
+    """Rows of (sequence, claim text, document id, filename, identifier,
+    identifier pattern) as
     the claims of an answer and the sources each one cites.
 
     One row per claim, document and identifier, so a claim citing two passages
@@ -398,10 +436,12 @@ def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     """
     claims: dict[int, Claim] = {}
     labels: dict[str, str] = {}
+    shapes: dict[str, str | None] = {}
     identifiers: dict[tuple[int, str], list[str]] = {}
-    for sequence, text, doc_id, filename, identifier in rows:
+    for sequence, text, doc_id, filename, identifier, pattern in rows:
         claims[sequence] = Claim(sequence, text or "")
         labels[doc_id] = filename
+        shapes[doc_id] = pattern
         if identifier:
             identifiers.setdefault((sequence, doc_id), []).extend(
                 _identifier_values(identifier)
@@ -409,7 +449,8 @@ def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     sources: dict[int, list[Source]] = {}
     for (sequence, doc_id), values in identifiers.items():
         sources.setdefault(sequence, []).append(
-            Source(doc_id, tuple(dict.fromkeys(values)), labels[doc_id])
+            Source(doc_id, tuple(dict.fromkeys(values)), labels[doc_id],
+                   shapes.get(doc_id))
         )
     return list(claims.values()), sources
 

@@ -785,3 +785,30 @@ def test_the_name_property_is_held_to_the_same_rule():
 
 def test_declaring_neither_is_still_how_a_class_opts_out():
     assert _entry().identifier_property is None
+
+
+def test_an_identifier_property_without_a_pattern_is_still_refused():
+    """A different rule from the one above, and nothing pinned it.
+
+    Declaring `identifier_property` and no `identifier_pattern` leaves the
+    correspondence check unable to run, and a check that cannot run returns no
+    findings, which is byte-identical to a clean answer. The class refuses that
+    combination at import. That refusal is the reason the deployment's own
+    config had to change, so it is worth a test of its own.
+    """
+    import pytest as _p
+
+    with _p.raises(Exception) as err:
+        _entry(identifier_property="case_number")
+    assert "identifier_pattern" in str(err.value)
+
+
+def test_a_pattern_that_does_not_compile_is_still_refused():
+    """The third rule on this class, also unpinned until now. A pattern that
+    does not compile would fail at the first claim rather than at import."""
+    import pytest as _p
+
+    with _p.raises(Exception) as err:
+        _entry(identifier_property="case_number",
+               identifier_pattern="([unclosed")
+    assert "not a regex" in str(err.value)

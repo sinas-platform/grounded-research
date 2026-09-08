@@ -70,22 +70,22 @@ async def test_the_tail_is_dropped_and_counted(manifest_rows):
 
 
 @pytest.mark.asyncio
-async def test_a_head_document_too_large_to_fit_is_dropped_not_overflowed(manifest_rows):
-    """The head is no longer truncated, so a single description CAN exceed the
-    cap where it never could before. It is dropped and counted like any other
-    document that does not fit, rather than carrying the manifest over.
+async def test_one_document_cannot_blow_the_cap_today(manifest_rows):
+    """`_manifest_line` truncates the summary before the cap ever sees it, so
+    no single document is large enough to matter. The bound is now the head
+    band's budget rather than a flat 200, and it is still far below the cap.
 
-    Not reachable on this corpus: the longest summary in it is 1,525
-    characters and the head holds ten. The guarantee is now empirical rather
-    than structural, which is the cost of showing the head whole and is worth
-    stating where someone will read it.
-    """
+    This is why the head is bounded at all. Showing it literally uncapped
+    would let one pathological summary spend the whole budget and drop the
+    working set behind it; 4,000 is above every summary in the corpus (longest
+    1,525) so nothing real is cut, and this stays true."""
     r = rows(3)
-    r[0]["summary"] = "x" * (MANIFEST_CHAR_CAP + 10)
+    r[1]["summary"] = "x" * (MANIFEST_CHAR_CAP + 10)
     manifest_rows["rows"] = r
     text, cap = await qr._doc_manifest("p")
-    assert cap["chars"] <= MANIFEST_CHAR_CAP
-    assert cap["dropped"] >= 1
+    assert cap["dropped"] == 0 and cap["shown"] == 3
+    assert "- doc001.md" in text
+    assert "x" * (qr.HEAD_SUMMARY_CHARS + 1) not in text
 
 
 @pytest.mark.asyncio
@@ -148,28 +148,14 @@ async def test_the_cap_is_a_parameter(manifest_rows):
 # ── the budget is spent where the planner reads ──────────────────────────────
 
 
-def test_the_head_is_shown_whole():
-    """The ten the planner builds from are not truncated at all. Every summary
-    in the corpus exceeds the old cap, median length 973, and the opening is
-    court, date and parties, so a cut head is a head without the law in it."""
-    row = rows(1, summary_chars=2000)[0]
-    assert row["summary"] in qr._manifest_line(row, None)
-
-
-def test_the_tail_is_still_bounded():
-    row = rows(1, summary_chars=2000)[0]
-    line = qr._manifest_line(row, qr.TAIL_SUMMARY_CHARS)
-    assert "s" * (qr.TAIL_SUMMARY_CHARS + 1) not in line
-
-
 def test_the_head_keeps_more_of_its_summary_than_the_tail():
     """Measured over 3,854 citations in published answers: 56% name a document
     in the top ten, 72% in the top twenty, and the median citation is rank 9.
     A flat 200 characters each spends the same on rank 3 and rank 97."""
-    row = rows(1, summary_chars=2000)[0]
+    row = rows(1, summary_chars=qr.HEAD_SUMMARY_CHARS + 500)[0]
     head = qr._manifest_line(row, qr.HEAD_SUMMARY_CHARS)
     tail = qr._manifest_line(row, qr.TAIL_SUMMARY_CHARS)
-    assert len(head) - len(tail) == 2000 - qr.TAIL_SUMMARY_CHARS
+    assert len(head) - len(tail) == qr.HEAD_SUMMARY_CHARS - qr.TAIL_SUMMARY_CHARS
 
 
 @pytest.mark.asyncio
@@ -182,15 +168,16 @@ async def test_the_budget_drops_after_the_head(manifest_rows):
 
 
 @pytest.mark.asyncio
-async def test_a_hundred_documents_cost_less_than_the_flat_budget(manifest_rows):
-    """Every summary in the corpus exceeds the old flat cap: 27,029 of 27,029,
-    median length 973. So the flat budget was always fully spent."""
+async def test_a_hundred_real_documents_still_fit(manifest_rows):
+    """The banded budget is no longer cheaper than the old flat one, and is
+    not meant to be: the head is shown whole, which costs more per document
+    than 200 characters did. What has to hold is that a full working set of
+    corpus-sized summaries still fits under the cap with nothing dropped.
+
+    973 is the corpus median summary length, over 30,791 documents."""
     manifest_rows["rows"] = rows(100, summary_chars=973)
     _, rec = await qr._doc_manifest("p")
-    banded = (qr.HEAD_DOCUMENTS * 973
-              + (100 - qr.HEAD_DOCUMENTS) * qr.TAIL_SUMMARY_CHARS)
-    assert banded < 100 * 973
-    assert rec["shown"] == 100
+    assert rec["shown"] == 100 and rec["dropped"] == 0
 
 
 # ── the table of contents carries titles, not punctuation ────────────────────
@@ -232,14 +219,20 @@ def test_a_compact_toc_carries_more_title_in_the_same_space():
     assert digest.count("Chapter") > raw.count("Chapter")
 
 
-def test_the_reason_and_properties_columns_are_bounded():
-    """Two thirds of the list is not summary. Measured over 39 full-size
-    result sets, the summaries come to 20,000 characters and the properties to
-    20,152, with the retrieval reason at 12,000 behind them — so no
-    combination of head and tail sizes fits the list under the cap on its own."""
+def test_the_tail_is_still_bounded():
+    row = rows(1, summary_chars=2000)[0]
+    line = qr._manifest_line(row, qr.TAIL_SUMMARY_CHARS)
+    assert "s" * (qr.TAIL_SUMMARY_CHARS + 1) not in line
+
+
+def test_the_reason_and_property_columns_are_bounded():
+    """Two thirds of the list is not summary. On the result set decomposed, the
+    summaries come to 20,000 characters and the properties to 20,152, with the
+    retrieval reason behind them, so no combination of head and tail sizes fits
+    the list under the cap on its own. These two bounds are what does it."""
     r = rows(1)[0]
     r["properties"] = "p" * 900
     r["reason"] = "r" * 900
     line = qr._manifest_line(r, qr.TAIL_SUMMARY_CHARS)
-    assert "p" * (qr.PROPERTIES_CHARS + 1) not in line
+    assert "p" * (qr.PROPERTY_CHARS + 1) not in line
     assert "r" * (qr.REASON_CHARS + 1) not in line

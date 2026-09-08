@@ -602,21 +602,24 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
 # — 13% of citations come from below rank 40 — but not at a flat price per
 # document, which spends the same on rank 3 as on rank 97.
 HEAD_DOCUMENTS = 10
-# None means the whole description. The ten highest-ranked documents are the
-# ones the planner builds from, and truncating them is what put the law in the
-# part it never read: every summary in the corpus exceeds 200 characters,
-# median length 973, and the opening is court, date and parties.
-HEAD_SUMMARY_CHARS: int | None = None
+# The ten highest-ranked documents are the ones the planner builds from, and
+# truncating them is what put the law in the part it never read: every summary
+# in the corpus exceeds 200 characters, median length 973, and the opening is
+# court, date and parties. 4,000 is above every summary there is, longest
+# 1,525, so nothing real is cut. It is a bound rather than no bound so that one
+# pathological summary cannot spend the whole budget and drop the working set
+# behind it.
+HEAD_SUMMARY_CHARS = 4000
 TAIL_SUMMARY_CHARS = 100
 
 # The other two columns of every line, and together they cost as much as the
-# summaries. Measured over 39 full-size result sets: the summaries come to
-# 20,000 characters and the properties to 20,152, with the retrieval reason at
-# 12,000 behind them. Tuning the head and the tail alone cannot fit the list
-# under the cap — no combination of them does — because two thirds of it is
-# not summary.
+# summaries. Measured over all 377 stored result sets that hold a full working
+# set: the properties come to 20,152 characters on the set decomposed, as much
+# as all 100 summaries together, with the retrieval reason behind them. Tuning
+# the head and the tail alone cannot fit the list under the cap, because two
+# thirds of it is not summary.
 REASON_CHARS = 60
-PROPERTIES_CHARS = 120
+PROPERTY_CHARS = 120
 
 # A table of contents, rendered as line ranges and titles rather than as the
 # repr of its JSON. Half of what the old rendering carried was keys, quotes and
@@ -624,12 +627,12 @@ PROPERTIES_CHARS = 120
 TOC_CHARS = 300
 
 
-def _manifest_line(r: dict, summary_chars: int | None = HEAD_SUMMARY_CHARS) -> str:
-    """One document as the planner sees it. `summary_chars` None shows it whole."""
-    summary = r["summary"] if summary_chars is None else r["summary"][:summary_chars]
+def _manifest_line(r: dict, summary_chars: int = HEAD_SUMMARY_CHARS) -> str:
+    """One document as the planner sees it, bounded by its band's budget."""
+    summary = r["summary"][:summary_chars]
     return (f"- {r['filename']} | {r['class'] or '-'} | "
             f"{r['annotations'] or '-'} | "
-            f"{str(r.get('properties') or '-')[:PROPERTIES_CHARS]} | "
+            f"{str(r.get('properties') or '-')[:PROPERTY_CHARS]} | "
             f"{r['reason'][:REASON_CHARS]} | {summary}")
 
 

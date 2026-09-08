@@ -607,7 +607,16 @@ HEAD_DOCUMENTS = 10
 # part it never read: every summary in the corpus exceeds 200 characters,
 # median length 973, and the opening is court, date and parties.
 HEAD_SUMMARY_CHARS: int | None = None
-TAIL_SUMMARY_CHARS = 200
+TAIL_SUMMARY_CHARS = 100
+
+# The other two columns of every line, and together they cost as much as the
+# summaries. Measured over 39 full-size result sets: the summaries come to
+# 20,000 characters and the properties to 20,152, with the retrieval reason at
+# 12,000 behind them. Tuning the head and the tail alone cannot fit the list
+# under the cap — no combination of them does — because two thirds of it is
+# not summary.
+REASON_CHARS = 60
+PROPERTIES_CHARS = 120
 
 # A table of contents, rendered as line ranges and titles rather than as the
 # repr of its JSON. Half of what the old rendering carried was keys, quotes and
@@ -619,8 +628,9 @@ def _manifest_line(r: dict, summary_chars: int | None = HEAD_SUMMARY_CHARS) -> s
     """One document as the planner sees it. `summary_chars` None shows it whole."""
     summary = r["summary"] if summary_chars is None else r["summary"][:summary_chars]
     return (f"- {r['filename']} | {r['class'] or '-'} | "
-            f"{r['annotations'] or '-'} | {r.get('properties') or '-'} | "
-            f"{r['reason'][:120]} | {summary}")
+            f"{r['annotations'] or '-'} | "
+            f"{str(r.get('properties') or '-')[:PROPERTIES_CHARS]} | "
+            f"{r['reason'][:REASON_CHARS]} | {summary}")
 
 
 def _toc_digest(toc, cap: int = TOC_CHARS) -> str:

@@ -230,3 +230,16 @@ def test_a_compact_toc_carries_more_title_in_the_same_space():
     raw = str({"entries": entries})[:qr.TOC_CHARS]
     digest = qr._toc_digest({"entries": entries}, cap=qr.TOC_CHARS)
     assert digest.count("Chapter") > raw.count("Chapter")
+
+
+def test_the_reason_and_properties_columns_are_bounded():
+    """Two thirds of the list is not summary. Measured over 39 full-size
+    result sets, the summaries come to 20,000 characters and the properties to
+    20,152, with the retrieval reason at 12,000 behind them — so no
+    combination of head and tail sizes fits the list under the cap on its own."""
+    r = rows(1)[0]
+    r["properties"] = "p" * 900
+    r["reason"] = "r" * 900
+    line = qr._manifest_line(r, qr.TAIL_SUMMARY_CHARS)
+    assert "p" * (qr.PROPERTIES_CHARS + 1) not in line
+    assert "r" * (qr.REASON_CHARS + 1) not in line

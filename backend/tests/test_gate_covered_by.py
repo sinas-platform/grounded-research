@@ -198,7 +198,10 @@ def test_the_audit_reaches_the_telemetry():
     for k in ("covered_by", "covered_by_missing", "covered_by_unsupported",
               "covered_by_unresponsive"):
         assert f'"{k}": x.get("{k}")' in s, k
-    assert "coverage=_coverage_summary(parts))" in s
+    # Not the closing bracket: it was only ever incidental, and pinning it
+    # made the test fail when a later keyword argument was added after this
+    # one. What matters is that the computed summary is what gets passed.
+    assert "coverage=_coverage_summary(parts)" in s
     assert "gate_coverage=coverage)" in s
 
 

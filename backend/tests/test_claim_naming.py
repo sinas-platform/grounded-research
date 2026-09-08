@@ -10,11 +10,16 @@ Run from the backend directory: `python -m pytest tests/test_claim_naming.py`
 from app.services.claim_naming import (
     Claim,
     Finding,
+    Mismatch,
     Source,
     attributes,
     carries_identifier,
+    case_identity,
+    cases_named,
     identifier_core,
     message,
+    mismatch_message,
+    mismatches,
     review,
 )
 
@@ -228,3 +233,209 @@ def test_chain_message_lists_the_claims_and_points_at_the_first():
     text = message(Finding("unanchored_chain", SRC, (2, 5, 9)))
     assert "2, 5, 9" in text
     assert "claim 2" in text
+
+
+# ── case_identity: a stored identifier reduced to the case it names ──────────
+
+
+def test_identity_drops_a_procedural_suffix():
+    """`C-606/18` and `C-606/18 P` are written for the same case. Dropping the
+    suffix can only make two things compare equal, which is the safe
+    direction: it costs a finding, never invents one."""
+    assert case_identity("C-606/18 P") == "C-606/18"
+    assert case_identity("C-606/18") == "C-606/18"
+    assert case_identity("C-65/18 P(R)") == "C-65/18"
+    assert case_identity("T-1097/23 R-RENV") == "T-1097/23"
+
+
+def test_identity_normalises_leading_zeros():
+    """A number derived from a CELEX name is written without them and the same
+    case stored by hand is written with them."""
+    assert case_identity("C-010/18") == case_identity("C-10/18 P")
+
+
+def test_identity_keeps_the_court_letter():
+    """T-449/14 and C-449/14 are different cases before different courts."""
+    assert case_identity("T-449/14") != case_identity("C-449/14")
+
+
+def test_identity_of_an_identifier_that_names_no_case_is_none():
+    """Merger and national references are identifiers, but not of the shape
+    this check can read, so it declines to read them."""
+    assert case_identity("COMP/M.1234") is None
+    assert case_identity("11-D-17") is None
+    assert case_identity("509 U.S. 209") is None
+
+
+# ── cases_named: the cases a claim writes ────────────────────────────────────
+
+
+def test_a_case_in_parentheses_is_found():
+    assert cases_named("Nexans v Commission (C-606/18 P), paragraph 87") == {
+        "C-606/18"
+    }
+
+
+def test_the_case_prefixed_form_is_found():
+    assert cases_named("The General Court, in Case T-249/17, reasoned") == {
+        "T-249/17"
+    }
+
+
+def test_several_cases_are_all_found():
+    named = cases_named(
+        "in Joined Cases T-125/03 and T-253/03, appealed in Case C-550/07 P"
+    )
+    assert named == {"T-125/03", "T-253/03", "C-550/07"}
+
+
+def test_a_case_spaced_around_its_hyphen_is_found():
+    """Judgment text as published writes `Case C \u2011 541/23 P`, with a
+    non-breaking hyphen and a space on either side. A claim quoting a passage
+    carries that spelling in, and reading it as naming no case at all would
+    send the claim to the mismatch check against whichever case it mentions
+    next."""
+    assert cases_named("Case C \u2011 541/23 P Polwax v Commission") == {
+        "C-541/23"
+    }
+    assert cases_named("in Case C - 606/18 P") == {"C-606/18"}
+
+
+def test_prose_naming_no_case_yields_nothing():
+    assert cases_named("An Advocate General's Opinion states the principle") == set()
+
+
+def test_a_paragraph_or_article_number_is_not_a_case():
+    """Bare numbers are everywhere in legal prose; only the court-and-year
+    shape counts."""
+    assert cases_named("paragraph 87 of Article 20(4) of Regulation 1/2003") == set()
+
+
+# ── mismatches: naming one authority while resting on another ────────────────
+
+NEXANS = Source(key="d-606", identifiers=("C-606/18 P",), label="62018CJ0606.md")
+PRYSMIAN = Source(key="d-601", identifiers=("C-601/18 P",), label="62018CJ0601.md")
+CASINO_GC = Source(key="d-249", identifiers=("T-249/17",), label="62017TJ0249.md")
+CASINO_CJ = Source(key="d-690", identifiers=("C-690/20 P",), label="62020CJ0690.md")
+
+
+def _mismatches(claims, sources):
+    return mismatches([Claim(s, t) for s, t in claims], sources)
+
+
+def test_a_claim_naming_only_a_case_it_does_not_cite_is_reported():
+    """The defect this exists for: the reader is sent to one judgment and the
+    evidence is another."""
+    found = _mismatches(
+        [(7, "Continuing the examination is permissible, per paragraph 87 of "
+             "Nexans France and Nexans v Commission (C-606/18 P), only where "
+             "the Commission can legitimately consider it justified.")],
+        {7: [PRYSMIAN]},
+    )
+    assert [(m.seq, m.named, m.cited) for m in found] == [
+        (7, ("C-606/18",), ("C-601/18",))
+    ]
+
+
+def test_no_cue_word_is_needed():
+    """A written case number is itself the attribution. The cue vocabulary
+    governs the naming check and has no say here, which is what lets this
+    reach a claim that attributes with `per paragraph 87 of`."""
+    found = _mismatches([(1, "per paragraph 87 of (C-606/18 P)")], {1: [PRYSMIAN]})
+    assert len(found) == 1
+
+
+def test_a_claim_that_names_the_case_it_cites_is_clean():
+    found = _mismatches(
+        [(1, "In Case T-249/17 the General Court annulled the decision")],
+        {1: [CASINO_GC]},
+    )
+    assert found == []
+
+
+def test_naming_a_second_case_beside_the_cited_one_is_clean():
+    """Ordinary legal writing: an appeal relation, a case the cited judgment
+    itself cites, a case being distinguished. The reader has the thread."""
+    found = _mismatches(
+        [(1, "On appeal in Casino v Commission (C-690/20 P), the Court of "
+             "Justice set aside the judgment in Case T-249/17.")],
+        {1: [CASINO_CJ]},
+    )
+    assert found == []
+
+
+def test_a_claim_naming_no_case_is_not_reported():
+    """Silence is the naming check's business, not this one's."""
+    found = _mismatches(
+        [(1, "An Advocate General's Opinion states the principle")],
+        {1: [PRYSMIAN]},
+    )
+    assert found == []
+
+
+def test_a_suffix_difference_is_not_a_mismatch():
+    found = _mismatches([(1, "In Case C-601/18 the Court held")], {1: [PRYSMIAN]})
+    assert found == []
+
+
+def test_joined_cases_stored_on_one_document_need_only_one_named():
+    ceske = Source(
+        key="d-538",
+        identifiers=("C-538/18 P", "C-539/18 P"),
+        label="62018CJ0538.md",
+    )
+    found = _mismatches(
+        [(1, "The Court dismissed the appeal in Case C-538/18 P")], {1: [ceske]}
+    )
+    assert found == []
+
+
+def test_the_rule_is_per_claim_not_per_source():
+    """A claim resting on a judgment and its appeal names one of them. Judged
+    per source the unnamed one would fire, and that is ordinary writing."""
+    found = _mismatches(
+        [(1, "On appeal in Casino v Commission (C-690/20 P) the Court set "
+             "aside the General Court's judgment")],
+        {1: [CASINO_CJ, CASINO_GC]},
+    )
+    assert found == []
+
+
+def test_a_source_with_no_identifier_is_out_of_scope():
+    bare = Source(key="d-0", identifiers=(), label="chapter.md")
+    assert _mismatches([(1, "as held in Case C-606/18 P")], {1: [bare]}) == []
+
+
+def test_a_source_whose_identifier_names_no_case_is_out_of_scope():
+    """A book chapter or a merger reference cannot be compared against a case
+    number, and a claim citing one may name any case it likes."""
+    merger = Source(key="d-m", identifiers=("COMP/M.1234",), label="m.md")
+    assert _mismatches([(1, "as held in Case C-606/18 P")], {1: [merger]}) == []
+
+
+def test_a_claim_citing_nothing_has_no_case_to_be_judged_against():
+    assert _mismatches([(1, "as held in Case C-606/18 P")], {}) == []
+
+
+def test_each_offending_claim_is_reported_once():
+    found = _mismatches(
+        [(1, "per (C-606/18 P)"), (2, "and per (C-606/18 P) again")],
+        {1: [PRYSMIAN], 2: [PRYSMIAN]},
+    )
+    assert [m.seq for m in found] == [1, 2]
+
+
+# ── the mismatch message ─────────────────────────────────────────────────────
+
+
+def test_mismatch_message_names_both_the_written_case_and_the_cited_one():
+    """A reviser told only that a claim is wrong cannot tell which half to
+    change, so both halves are given and both repairs are offered."""
+    text = mismatch_message(
+        Mismatch(seq=7, named=("C-606/18",), cited=("C-601/18",),
+                 labels=("62018CJ0601.md",))
+    )
+    assert "C-606/18" in text
+    assert "C-601/18" in text
+    assert "62018CJ0601.md" in text
+    assert "7" in text

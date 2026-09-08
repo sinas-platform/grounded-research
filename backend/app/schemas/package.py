@@ -112,6 +112,31 @@ class PackageDocumentClassEntry(_Strict):
             )
         return self
 
+    @model_validator(mode="after")
+    def _points_at_a_declared_property(self):
+        """A class may only name a property it declares.
+
+        The import reconciles a class's properties delete-then-add, so this
+        list is the whole set and a name absent from it points at nothing.
+        Every reader scopes a property to the document's own class, so a class
+        in that state has the pointer and no row, and the checks that read it
+        return nothing, which is byte-identical to a class that opted out.
+
+        Not hypothetical. The Advocate General Opinion class shipped declaring
+        `identifier_property: case_number` with no properties at all, and 293
+        documents were invisible to the naming checks for a week with nothing
+        reporting it. The state is free to refuse here and cannot be seen
+        later.
+        """
+        declared = {p.name for p in self.properties}
+        for field in ("identifier_property", "name_property"):
+            named = getattr(self, field)
+            if named and named not in declared:
+                raise ValueError(
+                    f"{field} is {named!r}, which this class does not declare"
+                )
+        return self
+
     @field_validator("slug")
     @classmethod
     def _slug_format(cls, v: str | None) -> str | None:

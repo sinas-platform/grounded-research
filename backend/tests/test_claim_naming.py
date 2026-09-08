@@ -603,6 +603,16 @@ def test_every_loader_selects_what_the_assembler_unpacks():
     assert selected(str(cn._LOAD)) == wanted + 1, "_LOAD"
     assert selected(str(cn._LOAD_IDENTIFIED)) == wanted, "_LOAD_IDENTIFIED"
 
+    # And the reshaping step between them, which is where the bug actually
+    # landed both times: the loaders and the assembler each agreed with
+    # themselves while the tuple built in between was a column short. Counted
+    # in every place a row is reshaped, not only the first.
+    for fn in (cn.findings_for, cn.reach_for):
+        for expr in re.findall(r"\[\((r\[\d+\](?:,\s*r\[\d+\])*),?\)\s*for r in rows\]",
+                               inspect.getsource(fn)):
+            built = len(re.findall(r"r\[\d+\]", expr))
+            assert built == wanted, f"{fn.__name__} builds {built}, unpack takes {wanted}"
+
 
 def test_a_crashed_check_says_so_where_its_findings_go():
     """An empty list is what a clean answer returns. A check that fell over
@@ -735,3 +745,43 @@ def test_reach_is_a_plain_dict_for_the_record():
     from app.services.claim_naming import Reach
 
     assert Reach(9, 4, 1).as_dict() == {"eligible": 9, "judged": 4, "flagged": 1}
+
+
+# ── a class must declare the properties it points at ─────────────────────────
+
+
+def _entry(**kw):
+    from app.schemas.package import PackageDocumentClassEntry
+
+    base = {"name": "Court Decision", "properties": [{"name": "case_number"}]}
+    return PackageDocumentClassEntry(**{**base, **kw})
+
+
+def test_a_class_may_point_at_a_property_it_declares():
+    e = _entry(identifier_property="case_number", identifier_pattern=r"(\d+)")
+    assert e.identifier_property == "case_number"
+
+
+def test_a_class_may_not_point_at_a_property_it_does_not_declare():
+    """The Advocate General Opinion incident: the class declared
+    identifier_property and no properties at all, the naming check's join
+    matched nothing, and 293 documents were invisible to it with no error and
+    no warning."""
+    import pytest as _p
+
+    with _p.raises(Exception) as err:
+        _entry(properties=[], identifier_property="case_number",
+               identifier_pattern=r"(\d+)")
+    assert "does not declare" in str(err.value)
+
+
+def test_the_name_property_is_held_to_the_same_rule():
+    import pytest as _p
+
+    with _p.raises(Exception) as err:
+        _entry(name_property="title")
+    assert "does not declare" in str(err.value)
+
+
+def test_declaring_neither_is_still_how_a_class_opts_out():
+    assert _entry().identifier_property is None

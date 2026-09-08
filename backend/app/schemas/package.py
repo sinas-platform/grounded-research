@@ -91,6 +91,31 @@ class PackageDocumentClassEntry(_Strict):
         return v
 
     @model_validator(mode="after")
+    def _points_at_a_declared_property(self):
+        """A property named by this class must be one this class declares.
+
+        Nothing checked this, and the cost is on record. The Advocate General
+        Opinion class declared `identifier_property: case_number` and defined
+        no properties at all, so the naming check's join matched nothing and
+        293 documents were invisible to it. There was no error and no warning:
+        a class pointing at a property it does not define looks, from every
+        check downstream, exactly like a class that opted out.
+
+        Safe to validate here because the importer reconciles a class's
+        properties by replacing the set rather than merging into it, so the
+        entry carries the whole list and a name absent from it is absent after
+        the import too.
+        """
+        declared = {p.name for p in self.properties}
+        for field in ("identifier_property", "name_property"):
+            named = getattr(self, field)
+            if named and named not in declared:
+                raise ValueError(
+                    f"{field} is {named!r}, which this class does not declare"
+                )
+        return self
+
+    @model_validator(mode="after")
     def _shape_declared_with_property(self):
         """A class that opts into the correspondence check must say what its
         identifiers look like.

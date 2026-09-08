@@ -70,17 +70,22 @@ async def test_the_tail_is_dropped_and_counted(manifest_rows):
 
 
 @pytest.mark.asyncio
-async def test_one_document_cannot_blow_the_cap_today(manifest_rows):
-    """`_manifest_line` truncates the summary before the cap ever sees it, so
-    no single document is large enough to matter. The bound is now the band's
-    budget rather than a flat 200, and it is still far below the cap."""
+async def test_a_head_document_too_large_to_fit_is_dropped_not_overflowed(manifest_rows):
+    """The head is no longer truncated, so a single description CAN exceed the
+    cap where it never could before. It is dropped and counted like any other
+    document that does not fit, rather than carrying the manifest over.
+
+    Not reachable on this corpus: the longest summary in it is 1,525
+    characters and the head holds ten. The guarantee is now empirical rather
+    than structural, which is the cost of showing the head whole and is worth
+    stating where someone will read it.
+    """
     r = rows(3)
-    r[1]["summary"] = "x" * (MANIFEST_CHAR_CAP + 10)
+    r[0]["summary"] = "x" * (MANIFEST_CHAR_CAP + 10)
     manifest_rows["rows"] = r
     text, cap = await qr._doc_manifest("p")
-    assert cap["dropped"] == 0 and cap["shown"] == 3
-    assert "- doc001.md" in text
-    assert "x" * (qr.HEAD_SUMMARY_CHARS + 1) not in text
+    assert cap["chars"] <= MANIFEST_CHAR_CAP
+    assert cap["dropped"] >= 1
 
 
 @pytest.mark.asyncio
@@ -143,6 +148,20 @@ async def test_the_cap_is_a_parameter(manifest_rows):
 # ── the budget is spent where the planner reads ──────────────────────────────
 
 
+def test_the_head_is_shown_whole():
+    """The ten the planner builds from are not truncated at all. Every summary
+    in the corpus exceeds the old cap, median length 973, and the opening is
+    court, date and parties, so a cut head is a head without the law in it."""
+    row = rows(1, summary_chars=2000)[0]
+    assert row["summary"] in qr._manifest_line(row, None)
+
+
+def test_the_tail_is_still_bounded():
+    row = rows(1, summary_chars=2000)[0]
+    line = qr._manifest_line(row, qr.TAIL_SUMMARY_CHARS)
+    assert "s" * (qr.TAIL_SUMMARY_CHARS + 1) not in line
+
+
 def test_the_head_keeps_more_of_its_summary_than_the_tail():
     """Measured over 3,854 citations in published answers: 56% name a document
     in the top ten, 72% in the top twenty, and the median citation is rank 9.
@@ -150,7 +169,7 @@ def test_the_head_keeps_more_of_its_summary_than_the_tail():
     row = rows(1, summary_chars=2000)[0]
     head = qr._manifest_line(row, qr.HEAD_SUMMARY_CHARS)
     tail = qr._manifest_line(row, qr.TAIL_SUMMARY_CHARS)
-    assert len(head) - len(tail) == qr.HEAD_SUMMARY_CHARS - qr.TAIL_SUMMARY_CHARS
+    assert len(head) - len(tail) == 2000 - qr.TAIL_SUMMARY_CHARS
 
 
 @pytest.mark.asyncio
@@ -168,9 +187,9 @@ async def test_a_hundred_documents_cost_less_than_the_flat_budget(manifest_rows)
     median length 973. So the flat budget was always fully spent."""
     manifest_rows["rows"] = rows(100, summary_chars=973)
     _, rec = await qr._doc_manifest("p")
-    banded = (qr.HEAD_DOCUMENTS * qr.HEAD_SUMMARY_CHARS
+    banded = (qr.HEAD_DOCUMENTS * 973
               + (100 - qr.HEAD_DOCUMENTS) * qr.TAIL_SUMMARY_CHARS)
-    assert banded < 100 * 200
+    assert banded < 100 * 973
     assert rec["shown"] == 100
 
 

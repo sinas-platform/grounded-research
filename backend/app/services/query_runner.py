@@ -601,9 +601,13 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
 # and the median citation is rank 9. The list is still worth carrying to the end
 # — 13% of citations come from below rank 40 — but not at a flat price per
 # document, which spends the same on rank 3 as on rank 97.
-HEAD_DOCUMENTS = 20
-HEAD_SUMMARY_CHARS = 500
-TAIL_SUMMARY_CHARS = 100
+HEAD_DOCUMENTS = 10
+# None means the whole description. The ten highest-ranked documents are the
+# ones the planner builds from, and truncating them is what put the law in the
+# part it never read: every summary in the corpus exceeds 200 characters,
+# median length 973, and the opening is court, date and parties.
+HEAD_SUMMARY_CHARS: int | None = None
+TAIL_SUMMARY_CHARS = 200
 
 # A table of contents, rendered as line ranges and titles rather than as the
 # repr of its JSON. Half of what the old rendering carried was keys, quotes and
@@ -611,10 +615,12 @@ TAIL_SUMMARY_CHARS = 100
 TOC_CHARS = 300
 
 
-def _manifest_line(r: dict, summary_chars: int = HEAD_SUMMARY_CHARS) -> str:
+def _manifest_line(r: dict, summary_chars: int | None = HEAD_SUMMARY_CHARS) -> str:
+    """One document as the planner sees it. `summary_chars` None shows it whole."""
+    summary = r["summary"] if summary_chars is None else r["summary"][:summary_chars]
     return (f"- {r['filename']} | {r['class'] or '-'} | "
             f"{r['annotations'] or '-'} | {r.get('properties') or '-'} | "
-            f"{r['reason'][:120]} | {r['summary'][:summary_chars]}")
+            f"{r['reason'][:120]} | {summary}")
 
 
 def _toc_digest(toc, cap: int = TOC_CHARS) -> str:

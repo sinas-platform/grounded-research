@@ -623,3 +623,63 @@ def test_a_crashed_check_says_so_where_its_findings_go():
         cn.findings_for, cn.mismatches_for = real_f, real_m
     assert notes and "not a finding of none" in notes[0]
     assert found == [] and failed and "not a finding of none" in failed
+
+
+# ── a source named in prose has been named ───────────────────────────────────
+
+
+def test_the_distinguishing_words_are_measured_not_listed():
+    """Across the names one answer cites, the words that appear in most of them
+    distinguish nothing. Nothing here is a stopword list: in a corpus of
+    invoices the common word would be `invoice` and this would say so."""
+    from app.services.claim_naming import distinctive_words
+
+    names = [
+        "T-141/08 E.ON Energie v Commission",
+        "C-89/11 P E.ON Energie v Commission",
+        "Judgment of the Court, Nexans France v Commission",
+        "Judgment of the Court, Prysmian v Commission",
+        "Judgment of the Court, Orange v Commission",
+    ]
+    d = distinctive_words(names)
+    assert "commission" not in d and "judgment" not in d and "court" not in d
+    assert {"nexans", "prysmian", "orange"} <= d
+
+
+def test_a_claim_writing_a_party_name_has_named_the_source():
+    from app.services.claim_naming import carries_name, distinctive_words
+
+    names = ["Nexans France v Commission", "Prysmian v Commission",
+             "Orange v Commission", "Casino v Commission"]
+    d = distinctive_words(names)
+    assert carries_name("In Nexans France the Court held", names[0], d)
+    assert not carries_name("The Commission held", names[0], d)
+
+
+def test_a_claim_writing_only_the_common_part_has_not():
+    """The largest group of wrong findings the naive version produces: every
+    name here contains Commission, so writing it names nothing."""
+    from app.services.claim_naming import carries_name, distinctive_words
+
+    names = ["Nexans v Commission", "Prysmian v Commission", "Orange v Commission"]
+    d = distinctive_words(names)
+    assert not carries_name("the Commission decided", names[0], d)
+
+
+def test_a_document_with_no_name_is_judged_on_its_identifier_alone():
+    from app.services.claim_naming import carries_name
+
+    assert carries_name("anything at all", "", {"anything"}) is False
+
+
+def test_naming_in_prose_clears_a_finding_that_the_identifier_alone_would_raise():
+    """The behaviour change, end to end: same claim, same source, and the only
+    difference is that the class declares where the name lives."""
+    src_named = Source(key="d-1", identifiers=("X-999/99",), label="a.md",
+                       pattern=SHAPE, name="Ferriere Nord v Commission")
+    src_bare = Source(key="d-1", identifiers=("X-999/99",), label="a.md",
+                      pattern=SHAPE, name="")
+    claim = [Claim(1, "In Ferriere Nord the Court held that the seal was broken")]
+    cues = frozenset({"held"})
+    assert review(claim, {1: [src_bare]}, cues), "no name: reported as unnamed"
+    assert review(claim, {1: [src_named]}, cues) == [], "named in prose: clean"

@@ -64,6 +64,10 @@ class PackageDocumentClassEntry(_Strict):
     # deployment says a procedural suffix does not change identity without
     # SGR knowing what a suffix is.
     identifier_pattern: str | None = None
+    # The property holding the document's name, for claims that name a source
+    # in prose rather than by its identifier. Optional and separate: a class
+    # may be identified by number and never named in words, or the reverse.
+    name_property: str | None = None
     attribution_cues: list[str] = Field(default_factory=list)
     properties: list[PackagePropertyEntry] = Field(default_factory=list)
     # entity types attached to this document class, by entity-type name

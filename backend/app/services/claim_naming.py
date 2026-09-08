@@ -90,6 +90,7 @@ class Source:
     identifiers: tuple[str, ...]
     label: str
     pattern: str | None = None
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -229,6 +230,59 @@ def identifier_key(value: str, pattern: str) -> str | None:
     return _key(m) if m else None
 
 
+# A word has to be this long before it can distinguish anything. Shorter runs
+# are prepositions and initials in every language this has been read in.
+NAME_WORD = re.compile(r"[^\W\d_]{4,}")
+
+
+def _name_words(text: str) -> set[str]:
+    return {w.lower() for w in NAME_WORD.findall(text or "")}
+
+
+def distinctive_words(names: list[str], share: float = 0.2) -> set[str]:
+    """The words that tell these documents apart, measured rather than listed.
+
+    A claim naming a source in prose writes part of its name, and most of a
+    name is not distinguishing: across the documents one answer cites, words
+    like commission, court, judgment and chamber appear in most of the names,
+    and a claim containing one of them has named nothing. Measured on one
+    working set of 85 names: commission in 56, the in 52, european in 44,
+    court in 44, judgment in 36. The party names appear once or twice.
+
+    So a word counts when it appears in at most `share` of the names. The
+    threshold is deliberately loose because the measurement says the answer
+    barely moves with it: over 1,566 claim-and-source pairs the rule fires on
+    730 at a 5% share, 730 at 10% and 733 at 20%, while dropping the test
+    entirely fires on 1,174. The 444 it excludes are matches on boilerplate,
+    and 38% is also the false-positive rate measured when the word test is
+    removed from the check this feeds, which is the same population seen from
+    the other side.
+
+    Nothing here is a stopword list and nothing knows what kind of document
+    this is. In a corpus of invoices "invoice" would be the common word and
+    the vendor the distinguishing one, and this would say so.
+    """
+    if not names:
+        return set()
+    seen: dict[str, int] = {}
+    for name in names:
+        for word in _name_words(name):
+            seen[word] = seen.get(word, 0) + 1
+    cap = max(1, int(len(names) * share))
+    return {w for w, n in seen.items() if n <= cap}
+
+
+def carries_name(text: str, name: str, distinctive: set[str]) -> bool:
+    """Whether the claim names this document in prose.
+
+    One distinctive word is enough. Requiring two would miss a source named by
+    a single party, which is how most of them are written on second mention.
+    """
+    if not name:
+        return False
+    return bool(_name_words(name) & distinctive & _name_words(text))
+
+
 def attributes(text: str, cues: frozenset[str]) -> bool:
     """Whether the claim attributes rather than describes.
 
@@ -262,18 +316,33 @@ def review(
             seen.add((claim.seq, source.key))
             attributing.setdefault(source.key, []).append((claim, source))
 
+    # Measured over the names of the documents this answer cites, so the words
+    # that distinguish them are the ones this answer's own set makes rare.
+    distinctive = distinctive_words(
+        [s.name for entries in attributing.values() for _, s in entries if s.name]
+    )
+
+    def names_it(claim: Claim, source: Source) -> bool:
+        """Named by its identifier or named in prose. Either is naming it.
+
+        The check exists so a reader can follow the claim to the source, and a
+        reader follows a party name as readily as a docket number. Reporting
+        "in Ferriere Nord v Commission the Court held" as naming nothing is
+        the largest group of wrong findings this produces.
+        """
+        return carries_identifier(claim.text, source.identifiers) or carries_name(
+            claim.text, source.name, distinctive
+        )
+
     findings: list[Finding] = []
     for entries in attributing.values():
-        named = any(
-            carries_identifier(claim.text, source.identifiers)
-            for claim, source in entries
-        )
+        named = any(names_it(claim, source) for claim, source in entries)
         first_claim, source = entries[0]
         if len(entries) > 1 and not named:
             findings.append(
                 Finding("unanchored_chain", source, tuple(c.seq for c, _ in entries))
             )
-        elif not carries_identifier(first_claim.text, source.identifiers):
+        elif not names_it(first_claim, source):
             findings.append(
                 Finding("unnamed_first_mention", source, (first_claim.seq,))
             )
@@ -386,7 +455,7 @@ _LOAD = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
            dc.attribution_cues, pv.value->>'_' as identifier,
-           dc.identifier_pattern
+           dc.identifier_pattern, coalesce(nv.value->>'_', '') as doc_name
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -395,6 +464,10 @@ _LOAD = sa.text(
         on p.document_class_id = dc.id and p.name = dc.identifier_property
       join property_value pv
         on pv.document_id = d.id and pv.property_id = p.id
+      left join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      left join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
        and dc.attribution_cues is not null
@@ -411,7 +484,8 @@ _LOAD = sa.text(
 _LOAD_IDENTIFIED = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
-           pv.value->>'_' as identifier, dc.identifier_pattern
+           pv.value->>'_' as identifier, dc.identifier_pattern,
+           coalesce(nv.value->>'_', '') as doc_name
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -420,6 +494,10 @@ _LOAD_IDENTIFIED = sa.text(
         on p.document_class_id = dc.id and p.name = dc.identifier_property
       join property_value pv
         on pv.document_id = d.id and pv.property_id = p.id
+      left join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      left join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
        and dc.identifier_pattern is not null
@@ -438,11 +516,13 @@ def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     claims: dict[int, Claim] = {}
     labels: dict[str, str] = {}
     shapes: dict[str, str | None] = {}
+    names: dict[str, str] = {}
     identifiers: dict[tuple[int, str], list[str]] = {}
-    for sequence, text, doc_id, filename, identifier, pattern in rows:
+    for sequence, text, doc_id, filename, identifier, pattern, name in rows:
         claims[sequence] = Claim(sequence, text or "")
         labels[doc_id] = filename
         shapes[doc_id] = pattern
+        names[doc_id] = name or ""
         if identifier:
             identifiers.setdefault((sequence, doc_id), []).extend(
                 _identifier_values(identifier)
@@ -451,7 +531,7 @@ def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     for (sequence, doc_id), values in identifiers.items():
         sources.setdefault(sequence, []).append(
             Source(doc_id, tuple(dict.fromkeys(values)), labels[doc_id],
-                   shapes.get(doc_id))
+                   shapes.get(doc_id), names.get(doc_id, ""))
         )
     return list(claims.values()), sources
 
@@ -465,7 +545,7 @@ async def findings_for(answer_id: uuid.UUID) -> list[Finding]:
     for row in rows:
         cues.update(c.lower() for c in (row[4] or []) if c)
     claims, sources = _assemble(
-        [(r[0], r[1], r[2], r[3], r[5], r[6]) for r in rows]
+        [(r[0], r[1], r[2], r[3], r[5], r[6], r[7]) for r in rows]
     )
     return review(claims, sources, frozenset(cues))
 

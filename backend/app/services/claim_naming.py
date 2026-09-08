@@ -309,32 +309,18 @@ def carries_name(text: str, name: str, distinctive: set[str]) -> bool:
     return bool(_name_words(name) & distinctive & _name_words(text))
 
 
-def attributes(text: str, cues: frozenset[str]) -> bool:
-    """Whether the claim attributes rather than describes.
-
-    A cue matches as a whole word, so a cue that is a common substring does not
-    fire on every claim that happens to contain it.
-    """
-    if not cues:
-        return False
-    words = set(re.findall(r"[^\W\d_]+", text.lower()))
-    return bool(words & cues)
-
-
 def review(
     claims: list[Claim],
     sources: dict[int, list[Source]],
-    cues: frozenset[str],
 ) -> list[Finding]:
     """Findings for one answer. Pure: no I/O, no ordering assumptions beyond
     claim sequence, which is what "first mention" is defined against."""
-    return review_with_reach(claims, sources, cues)[0]
+    return review_with_reach(claims, sources)[0]
 
 
 def review_with_reach(
     claims: list[Claim],
     sources: dict[int, list[Source]],
-    cues: frozenset[str],
 ) -> tuple[list[Finding], Reach]:
     """`review`, and how far it got.
 
@@ -345,14 +331,13 @@ def review_with_reach(
     seen: set[tuple[int, str]] = set()
     eligible: set[tuple[int, str]] = set()
     for claim in sorted(claims, key=lambda c: c.seq):
-        # Counted before the word test, because the gap between this and
-        # `seen` IS the word test's reach, and that gap is the thing nobody
-        # could see.
+        # Kept after the word test was removed, so the record still reports
+        # what was in scope. With no word test left to narrow it, `eligible`
+        # and `judged` are now equal by construction, and that equality is
+        # itself the reading: nothing is being skipped before the check.
         for source in sources.get(claim.seq, ()):
             if source.identifiers:
                 eligible.add((claim.seq, source.key))
-        if not attributes(claim.text, cues):
-            continue
         for source in sources.get(claim.seq, ()):
             # One claim can hold several pieces of evidence from the same
             # document. That is one claim relying on one source, not a chain of
@@ -516,7 +501,7 @@ def message(finding: Finding) -> str:
 _LOAD = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
-           dc.attribution_cues, pv.value->>'_' as identifier,
+           pv.value->>'_' as identifier,
            dc.identifier_pattern, coalesce(nv.value->>'_', '') as doc_name
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
@@ -532,7 +517,6 @@ _LOAD = sa.text(
         on nv.document_id = d.id and nv.property_id = np.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
-       and dc.attribution_cues is not null
     """
 )
 
@@ -603,13 +587,11 @@ async def findings_for(answer_id: uuid.UUID) -> list[Finding]:
     no document class opts in, which is the default."""
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(_LOAD, {"answer_id": answer_id})).all()
-    cues: set[str] = set()
-    for row in rows:
-        cues.update(c.lower() for c in (row[4] or []) if c)
-    claims, sources = _assemble(
-        [(r[0], r[1], r[2], r[3], r[5], r[6], r[7]) for r in rows]
-    )
-    return review(claims, sources, frozenset(cues))
+    # Straight through, with no index list. `_LOAD` now selects exactly what
+    # `_assemble` unpacks, which is what `mismatches_for` has always done and
+    # why it never acquired the tuple-width bug this line carried twice.
+    claims, sources = _assemble(rows)
+    return review(claims, sources)
 
 
 async def mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:
@@ -728,13 +710,8 @@ async def reach_for(answer_id: uuid.UUID) -> dict[str, dict[str, int]]:
     try:
         async with AsyncSessionLocal() as session:
             rows = (await session.execute(_LOAD, {"answer_id": answer_id})).all()
-        cues = {c.lower() for r in rows for c in (r[4] or []) if c}
-        claims, sources = _assemble(
-            [(r[0], r[1], r[2], r[3], r[5], r[6], r[7]) for r in rows]
-        )
-        out["naming"] = review_with_reach(
-            claims, sources, frozenset(cues)
-        )[1].as_dict()
+        claims, sources = _assemble(rows)
+        out["naming"] = review_with_reach(claims, sources)[1].as_dict()
     except Exception:
         log.exception("naming reach failed for answer %s", answer_id)
     try:

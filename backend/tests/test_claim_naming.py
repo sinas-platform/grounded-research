@@ -12,7 +12,6 @@ from app.services.claim_naming import (
     Finding,
     Mismatch,
     Source,
-    attributes,
     carries_identifier,
     identifier_core,
     identifier_key,
@@ -30,13 +29,12 @@ from app.services.claim_naming import (
 # that suffix compare equal without the module knowing what a suffix is.
 SHAPE = r"\b([A-Z])\s?[-\u2010-\u2015\u2212]\s?0*(\d{1,4})/(\d{2})\b"
 
-CUES = frozenset({"held", "found", "ruled"})
 SRC = Source(key="doc-1", identifiers=("X-111/22",), label="a.md", pattern=SHAPE)
 OTHER = Source(key="doc-2", identifiers=("Y-333/44",), label="b.md", pattern=SHAPE)
 
 
-def _review(claims, sources, cues=CUES):
-    return review([Claim(s, t) for s, t in claims], sources, cues)
+def _review(claims, sources):
+    return review([Claim(s, t) for s, t in claims], sources)
 
 
 # ── identifier_core ──────────────────────────────────────────────────────────
@@ -106,24 +104,19 @@ def test_any_of_several_identifiers_counts():
     assert carries_identifier("under 333/44", ("X-111/22", "Y-333/44"))
 
 
-# ── attributes ───────────────────────────────────────────────────────────────
+# ── every cited source is attributed ────────────────────────────────────────
 
 
-def test_cue_makes_a_claim_attributing():
-    assert attributes("the body held that it applies", CUES)
+def test_a_claim_citing_an_identified_source_is_judged():
+    """There is no verb test. A claim citing a document that carries an
+    identifier is relying on it, and the reader is owed which one."""
+    found = _review([(1, "The market is national in scope")], {1: [SRC]})
+    assert [f.kind for f in found] == ["unnamed_first_mention"]
 
 
-def test_claim_without_a_cue_is_not_attributing():
-    assert not attributes("the market is national in scope", CUES)
-
-
-def test_cue_matches_whole_words_only():
-    """A cue that is a substring of another word must not fire."""
-    assert not attributes("the withheld document", frozenset({"held"}))
-
-
-def test_no_cues_configured_means_nothing_attributes():
-    assert not attributes("the body held that it applies", frozenset())
+def test_a_claim_citing_nothing_identified_is_still_ignored():
+    bare = Source(key="doc-3", identifiers=(), label="c.md")
+    assert _review([(1, "The market is national in scope")], {1: [bare]}) == []
 
 
 # ── review: the first-mention rule ───────────────────────────────────────────
@@ -160,14 +153,25 @@ def test_naming_it_only_later_still_fails_the_first_mention():
     assert found[0].seq == 1
 
 
-def test_non_attributing_claims_do_not_start_the_count():
-    """A claim that merely describes its source is not a first mention."""
+def test_a_describing_claim_now_starts_the_count():
+    """It did not, while a verb list decided which claims were attributing.
+
+    This is the cost of dropping that list, recorded rather than hidden: a
+    claim that describes its source is a first mention like any other, and a
+    chain begins at the first claim citing the document instead of the first
+    one that used a listed verb.
+
+    The list could not be made right. It was English over a corpus a third of
+    which is French, so `la Cour a jugé que` was never a first mention at all,
+    and widening it in English would only have made the English half less
+    wrong."""
     found = _review(
         [(1, "The market is national in scope"),
          (2, "The body held that it applies")],
         {1: [SRC], 2: [SRC]},
     )
-    assert [f.seq for f in found] == [2]
+    assert [f.kind for f in found] == ["unanchored_chain"]
+    assert found[0].seqs == (1, 2)
 
 
 # ── review: the chain ────────────────────────────────────────────────────────
@@ -600,7 +604,10 @@ def test_every_loader_selects_what_the_assembler_unpacks():
 
     # _LOAD carries one extra column, the cues, which findings_for reads
     # directly rather than passing on.
-    assert selected(str(cn._LOAD)) == wanted + 1, "_LOAD"
+    # Both loaders now select exactly what the assembler unpacks: the cues
+    # column went with the verb test, and with it the index list in
+    # findings_for that carried this bug twice.
+    assert selected(str(cn._LOAD)) == wanted, "_LOAD"
     assert selected(str(cn._LOAD_IDENTIFIED)) == wanted, "_LOAD_IDENTIFIED"
 
     # And the reshaping step between them, which is where the bug actually
@@ -690,9 +697,8 @@ def test_naming_in_prose_clears_a_finding_that_the_identifier_alone_would_raise(
     src_bare = Source(key="d-1", identifiers=("X-999/99",), label="a.md",
                       pattern=SHAPE, name="")
     claim = [Claim(1, "In Ferriere Nord the Court held that the seal was broken")]
-    cues = frozenset({"held"})
-    assert review(claim, {1: [src_bare]}, cues), "no name: reported as unnamed"
-    assert review(claim, {1: [src_named]}, cues) == [], "named in prose: clean"
+    assert review(claim, {1: [src_bare]}), "no name: reported as unnamed"
+    assert review(claim, {1: [src_named]}) == [], "named in prose: clean"
 
 
 # ── how far each check got ───────────────────────────────────────────────────
@@ -700,32 +706,43 @@ def test_naming_in_prose_clears_a_finding_that_the_identifier_alone_would_raise(
 
 def test_reach_separates_not_looking_from_finding_nothing():
     """The three numbers exist because an empty finding list has three causes
-    and they need telling apart."""
+    and they need telling apart.
+
+    Written when a word test stood between eligible and judged, so the two
+    differed. The word test is gone and they no longer can, which is what the
+    assertion below now says. Eligible is still worth recording: it is what the
+    loader reached, and a drop in it still means the check is looking at less
+    than it should.
+    """
     from app.services.claim_naming import review_with_reach
 
     src = Source(key="d-1", identifiers=("X-111/22",), label="a.md",
                  pattern=SHAPE, name="")
     claims = [Claim(1, "The Court held X-111/22 was decided"),
               Claim(2, "This sentence attributes nothing at all")]
-    _, reach = review_with_reach(claims, {1: [src], 2: [src]},
-                                 frozenset({"held"}))
-    # both claims cite a source with an identifier, so both were eligible;
-    # only the attributing one was judged
-    assert reach.eligible == 2 and reach.judged == 1
+    _, reach = review_with_reach(claims, {1: [src], 2: [src]})
+    # Both cite a source carrying an identifier, so both are eligible, and with
+    # no word test to skip the second one, both are judged.
+    assert reach.eligible == 2 and reach.judged == 2
 
 
-def test_reach_shows_a_word_list_that_reaches_almost_nothing():
-    """The failure nothing caught for months: the check runs, judges honestly,
-    and is eligible for far more than it sees."""
+def test_a_claim_the_word_list_would_have_skipped_is_now_judged():
+    """The failure this counter was built to expose, now closed.
+
+    Ten claims saying "observed", none containing a listed cue. Under the word
+    list all ten were eligible and none was judged, and nothing said so. With
+    the list gone all ten are judged, and the first is flagged because it does
+    not name the case it cites.
+    """
     from app.services.claim_naming import review_with_reach
 
     src = Source(key="d-1", identifiers=("X-111/22",), label="a.md",
                  pattern=SHAPE, name="")
     claims = [Claim(i, "The Court observed that something happened")
               for i in range(1, 11)]
-    _, reach = review_with_reach(claims, {i: [src] for i in range(1, 11)},
-                                 frozenset({"held"}))
-    assert reach.eligible == 10 and reach.judged == 0 and reach.flagged == 0
+    _, reach = review_with_reach(claims, {i: [src] for i in range(1, 11)})
+    assert reach.eligible == 10 and reach.judged == 10
+    assert reach.flagged == 1, "one unnamed first mention, then the chain"
 
 
 def test_correspondence_reach_counts_what_it_could_compare():

@@ -111,6 +111,32 @@ class Finding:
 
 
 @dataclass(frozen=True)
+class Reach:
+    """How far a check got on one answer: what it could have judged, what it
+    did judge, and what it flagged.
+
+    Recorded because a check that stops working returns an empty list, and an
+    empty list is what a clean answer returns. Three numbers separate the three
+    ways that happens. `judged` falling to zero is a check that broke or was
+    switched off. `judged` far below `eligible` is a check that is running and
+    looking at almost nothing, which is what the attribution word list did for
+    months without anyone noticing. `flagged` over `judged` is the only one of
+    the three that says anything about the answers.
+
+    It detects MOVEMENT, not correctness. A check judging 200 and flagging 3
+    every run looks identical whether those 3 are the right 3 or not.
+    """
+
+    eligible: int
+    judged: int
+    flagged: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {"eligible": self.eligible, "judged": self.judged,
+                "flagged": self.flagged}
+
+
+@dataclass(frozen=True)
 class Mismatch:
     """A claim that names one case and rests on another."""
 
@@ -302,9 +328,29 @@ def review(
 ) -> list[Finding]:
     """Findings for one answer. Pure: no I/O, no ordering assumptions beyond
     claim sequence, which is what "first mention" is defined against."""
+    return review_with_reach(claims, sources, cues)[0]
+
+
+def review_with_reach(
+    claims: list[Claim],
+    sources: dict[int, list[Source]],
+    cues: frozenset[str],
+) -> tuple[list[Finding], Reach]:
+    """`review`, and how far it got.
+
+    Split so `review` keeps the shape its callers and tests already use, and
+    nothing has to be counted twice to know what it looked at.
+    """
     attributing: dict[str, list[tuple[Claim, Source]]] = {}
     seen: set[tuple[int, str]] = set()
+    eligible: set[tuple[int, str]] = set()
     for claim in sorted(claims, key=lambda c: c.seq):
+        # Counted before the word test, because the gap between this and
+        # `seen` IS the word test's reach, and that gap is the thing nobody
+        # could see.
+        for source in sources.get(claim.seq, ()):
+            if source.identifiers:
+                eligible.add((claim.seq, source.key))
         if not attributes(claim.text, cues):
             continue
         for source in sources.get(claim.seq, ()):
@@ -348,7 +394,7 @@ def review(
             )
     # Chains first: they are the worse defect, and the cap below is a real cut.
     findings.sort(key=lambda f: (f.kind != "unanchored_chain", f.seq))
-    return findings
+    return findings, Reach(len(eligible), len(seen), len(findings))
 
 
 def mismatches(
@@ -370,7 +416,16 @@ def mismatches(
     has nothing to be compared against, and a book chapter or a merger
     reference may discuss whatever cases it likes.
     """
+    return mismatches_with_reach(claims, sources)[0]
+
+
+def mismatches_with_reach(
+    claims: list[Claim],
+    sources: dict[int, list[Source]],
+) -> tuple[list[Mismatch], Reach]:
+    """`mismatches`, and how far it got. Pure."""
     found: list[Mismatch] = []
+    eligible = judged = 0
     for claim in sorted(claims, key=lambda c: c.seq):
         here = sources.get(claim.seq, ())
         # One claim can cite two classes with different shapes, so the prose is
@@ -378,6 +433,8 @@ def mismatches(
         shapes = {s.pattern for s in here if s.pattern}
         if not shapes:
             continue
+        # It could have judged this claim: something it cites declares a shape.
+        eligible += 1
         named: dict[str, str] = {}
         for shape in shapes:
             named.update(identifiers_named(claim.text, shape))
@@ -393,7 +450,12 @@ def mismatches(
                 key = identifier_key(identifier, source.pattern)
                 if key:
                     cited.setdefault(key, (identifier, source.label))
-        if not cited or set(named) & set(cited):
+        if not cited:
+            continue
+        # It did judge it: the claim writes an identifier and something it
+        # cites carries one, so the two can be compared.
+        judged += 1
+        if set(named) & set(cited):
             continue
         found.append(
             Mismatch(
@@ -403,7 +465,7 @@ def mismatches(
                 labels=tuple(dict.fromkeys(v[1] for v in cited.values())),
             )
         )
-    return found
+    return found, Reach(eligible, judged, len(found))
 
 
 def mismatch_message(mismatch: Mismatch) -> str:
@@ -653,6 +715,38 @@ async def unshaped_message() -> str | None:
         "not what an identifier looks like, so no claim of these classes was "
         "examined. This is not a finding of none."
     )
+
+
+async def reach_for(answer_id: uuid.UUID) -> dict[str, dict[str, int]]:
+    """How far each check got on this answer, for the run record.
+
+    Best-effort per check: a check that cannot be measured contributes
+    nothing rather than failing the pair, because this is bookkeeping and the
+    checks it measures are themselves quality notes.
+    """
+    out: dict[str, dict[str, int]] = {}
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(_LOAD, {"answer_id": answer_id})).all()
+        cues = {c.lower() for r in rows for c in (r[4] or []) if c}
+        claims, sources = _assemble(
+            [(r[0], r[1], r[2], r[3], r[5], r[6], r[7]) for r in rows]
+        )
+        out["naming"] = review_with_reach(
+            claims, sources, frozenset(cues)
+        )[1].as_dict()
+    except Exception:
+        log.exception("naming reach failed for answer %s", answer_id)
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(_LOAD_IDENTIFIED, {"answer_id": answer_id})
+            ).all()
+        claims, sources = _assemble(rows)
+        out["correspondence"] = mismatches_with_reach(claims, sources)[1].as_dict()
+    except Exception:
+        log.exception("correspondence reach failed for answer %s", answer_id)
+    return out
 
 
 async def safe_mismatches_for(

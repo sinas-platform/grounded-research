@@ -1941,6 +1941,7 @@ async def _record_gate_cycle(
 
     coverage: dict | None = None,
     naming_mismatches: list[dict] | None = None,
+    checks: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -2007,6 +2008,10 @@ async def _record_gate_cycle(
         # false-positive rate. Nothing can answer that unless each cycle's
         # findings are counted where they can be read back per run.
         "naming_mismatches": naming_mismatches or [],
+        # eligible / judged / flagged per check. Movement, not correctness:
+        # a check judging 200 and flagging 3 every run reads the same whether
+        # those 3 are the right 3 or not.
+        "checks": checks or {},
         # Beside the parts it summarises, not only as a flat key. The parts in
         # this dict already carry the per-part audit, so leaving the summary
         # flat would put a last-write count next to a per-cycle history and
@@ -2583,6 +2588,10 @@ async def _gate_answer(
     # is what a clean answer yields too, so the silence rides `issues` rather
     # than a telemetry key nobody reads unless already suspicious.
     unshaped = await claim_naming.unshaped_message()
+    # How far each check got, beside what it found. Recorded every run so a
+    # batch can be compared with the one before it and a check that stopped
+    # reaching anything is visible without anyone deciding to look.
+    reach = await claim_naming.reach_for(answer_id)
     mismatch_notes = [
         claim_naming.mismatch_message(m)
         for m in mismatched[:claim_naming.MAX_FINDINGS]
@@ -2604,7 +2613,8 @@ async def _gate_answer(
         naming_mismatches=[
             {"claim": m.seq, "names": list(m.named), "cites": list(m.cited)}
             for m in mismatched
-        ])
+        ],
+        checks=reach)
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

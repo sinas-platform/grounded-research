@@ -683,3 +683,55 @@ def test_naming_in_prose_clears_a_finding_that_the_identifier_alone_would_raise(
     cues = frozenset({"held"})
     assert review(claim, {1: [src_bare]}, cues), "no name: reported as unnamed"
     assert review(claim, {1: [src_named]}, cues) == [], "named in prose: clean"
+
+
+# ── how far each check got ───────────────────────────────────────────────────
+
+
+def test_reach_separates_not_looking_from_finding_nothing():
+    """The three numbers exist because an empty finding list has three causes
+    and they need telling apart."""
+    from app.services.claim_naming import review_with_reach
+
+    src = Source(key="d-1", identifiers=("X-111/22",), label="a.md",
+                 pattern=SHAPE, name="")
+    claims = [Claim(1, "The Court held X-111/22 was decided"),
+              Claim(2, "This sentence attributes nothing at all")]
+    _, reach = review_with_reach(claims, {1: [src], 2: [src]},
+                                 frozenset({"held"}))
+    # both claims cite a source with an identifier, so both were eligible;
+    # only the attributing one was judged
+    assert reach.eligible == 2 and reach.judged == 1
+
+
+def test_reach_shows_a_word_list_that_reaches_almost_nothing():
+    """The failure nothing caught for months: the check runs, judges honestly,
+    and is eligible for far more than it sees."""
+    from app.services.claim_naming import review_with_reach
+
+    src = Source(key="d-1", identifiers=("X-111/22",), label="a.md",
+                 pattern=SHAPE, name="")
+    claims = [Claim(i, "The Court observed that something happened")
+              for i in range(1, 11)]
+    _, reach = review_with_reach(claims, {i: [src] for i in range(1, 11)},
+                                 frozenset({"held"}))
+    assert reach.eligible == 10 and reach.judged == 0 and reach.flagged == 0
+
+
+def test_correspondence_reach_counts_what_it_could_compare():
+    from app.services.claim_naming import mismatches_with_reach
+
+    src = Source(key="d-1", identifiers=("C-601/18 P",), label="a.md",
+                 pattern=SHAPE, name="")
+    claims = [Claim(1, "In Case C-606/18 the Court held"),
+              Claim(2, "A sentence naming no identifier at all")]
+    found, reach = mismatches_with_reach(claims, {1: [src], 2: [src]})
+    assert reach.eligible == 2, "both cite a source declaring a shape"
+    assert reach.judged == 1, "only one writes an identifier to compare"
+    assert reach.flagged == len(found) == 1
+
+
+def test_reach_is_a_plain_dict_for_the_record():
+    from app.services.claim_naming import Reach
+
+    assert Reach(9, 4, 1).as_dict() == {"eligible": 9, "judged": 4, "flagged": 1}

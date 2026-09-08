@@ -511,3 +511,51 @@ def test_mismatch_message_names_both_the_written_case_and_the_cited_one():
     assert "C-601/18" in text
     assert "62018CJ0601.md" in text
     assert "7" in text
+
+
+# ── a check that cannot run says so where its findings go ────────────────────
+
+
+def test_the_unshaped_message_names_the_classes_and_refuses_to_read_as_none():
+    """The line has to be unmistakable to someone who was not looking for it:
+    it names the classes, says no claim of them was examined, and says in
+    words that this is not a finding of none."""
+    import asyncio
+
+    from app.services import claim_naming as cn
+
+    async def two(): return ["Court Decision", "Regulatory Decision"]
+    real, cn.unshaped_classes = cn.unshaped_classes, two
+    try:
+        msg = asyncio.run(cn.unshaped_message())
+    finally:
+        cn.unshaped_classes = real
+    assert "Court Decision" in msg and "Regulatory Decision" in msg
+    assert "not a finding of none" in msg
+
+
+def test_no_message_when_every_opted_in_class_can_be_read():
+    import asyncio
+
+    from app.services import claim_naming as cn
+
+    async def none(): return []
+    real, cn.unshaped_classes = cn.unshaped_classes, none
+    try:
+        assert asyncio.run(cn.unshaped_message()) is None
+    finally:
+        cn.unshaped_classes = real
+
+
+def test_a_failure_to_check_is_silent_rather_than_fatal():
+    """This is a quality note. It must not be the thing that fails a run."""
+    import asyncio
+
+    from app.services import claim_naming as cn
+
+    async def boom(): raise RuntimeError("no database")
+    real, cn.unshaped_classes = cn.unshaped_classes, boom
+    try:
+        assert asyncio.run(cn.unshaped_message()) is None
+    finally:
+        cn.unshaped_classes = real

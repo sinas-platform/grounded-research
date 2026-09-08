@@ -2578,6 +2578,11 @@ async def _gate_answer(
     # disagree, and a telemetry key that disagrees with the feedback it
     # describes is worse than no key.
     mismatched = await claim_naming.safe_mismatches_for(answer_id)
+    # A check that cannot run says so where its findings go. An opted-in class
+    # with no declared identifier shape yields no mismatches, and no mismatches
+    # is what a clean answer yields too, so the silence rides `issues` rather
+    # than a telemetry key nobody reads unless already suspicious.
+    unshaped = await claim_naming.unshaped_message()
     mismatch_notes = [
         claim_naming.mismatch_message(m)
         for m in mismatched[:claim_naming.MAX_FINDINGS]
@@ -2615,6 +2620,8 @@ async def _gate_answer(
     # to `correctness` once a sweep has measured the rate is a change to this
     # line alone.
     issues += mismatch_notes
+    if unshaped:
+        issues.append(unshaped)
     issues += await claim_naming.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
     missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")

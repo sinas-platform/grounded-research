@@ -15,7 +15,13 @@ from __future__ import annotations
 import re
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.schemas.config import SLUG_RE
 
@@ -79,6 +85,28 @@ class PackageDocumentClassEntry(_Strict):
         except re.error as exc:
             raise ValueError(f"identifier_pattern is not a regex: {exc}") from exc
         return v
+
+    @model_validator(mode="after")
+    def _shape_declared_with_property(self):
+        """A class that opts into the correspondence check must say what its
+        identifiers look like.
+
+        Declaring `identifier_property` and no `identifier_pattern` leaves the
+        check unable to run, and a check that cannot run returns no findings,
+        which is byte-identical to a clean answer. Refusing it here removes the
+        steady state of that failure; the deploy window between a migration and
+        a re-import is covered by the gate announcing it in `issues`.
+
+        Not defaulted, deliberately. A default would mean guessing an
+        identifier's shape, which is the deployment knowledge this field exists
+        to keep out of the platform.
+        """
+        if self.identifier_property and not self.identifier_pattern:
+            raise ValueError(
+                "identifier_property is declared without identifier_pattern, "
+                "so the correspondence check cannot run for this class"
+            )
+        return self
 
     @field_validator("slug")
     @classmethod

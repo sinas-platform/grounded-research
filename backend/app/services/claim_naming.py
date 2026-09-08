@@ -504,6 +504,64 @@ async def issues_for(answer_id: uuid.UUID) -> list[str]:
     return [message(f) for f in found[:MAX_FINDINGS]]
 
 
+_UNSHAPED = sa.text(
+    """
+    select name from document_class
+     where identifier_property is not null
+       and identifier_pattern is null
+     order by name
+    """
+)
+
+
+async def unshaped_classes() -> list[str]:
+    """Classes that opt into the correspondence check and cannot be checked.
+
+    A class declaring `identifier_property` and no `identifier_pattern` has
+    said which property identifies its documents and not what an identifier
+    looks like, so the check has nothing to read prose with and returns
+    nothing for it.
+
+    This exists because returning nothing is what a clean answer also looks
+    like. The same shape has cost us four times: a class pointing at a
+    property it did not define, a word list excluding half the pairs it could
+    reach, a size limit cutting a ranked list with no marker, and this one in
+    the window between a migration and a re-import. Every one is a
+    precondition failing, the check returning empty, and empty being
+    indistinguishable from a pass.
+
+    So the rule this encodes is narrow: A CHECK THAT CANNOT RUN MUST SAY SO IN
+    THE SAME CHANNEL THAT CARRIES ITS FINDINGS. A telemetry key is a sibling
+    channel, read only by someone who already suspects. The caller puts this
+    into `issues`, which the gate record, the reviser's feedback and the run
+    export all already carry.
+
+    The package refuses this combination at import, so in steady state the
+    list is empty. It is not empty between a migration adding the column and
+    the re-import that fills it, which is exactly when nobody is looking.
+    """
+    async with AsyncSessionLocal() as session:
+        return [r[0] for r in (await session.execute(_UNSHAPED)).all()]
+
+
+async def unshaped_message() -> str | None:
+    """One line for `issues`, or None when every opted-in class can be read."""
+    try:
+        names = await unshaped_classes()
+    except Exception:
+        log.warning("unshaped-class check failed", exc_info=True)
+        return None
+    if not names:
+        return None
+    return (
+        "The check that a claim names the source it cites did not run for "
+        + ", ".join(names)
+        + ": the class declares which property identifies its documents but "
+        "not what an identifier looks like, so no claim of these classes was "
+        "examined. This is not a finding of none."
+    )
+
+
 async def safe_mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:
     """Every mismatch in this answer, and never an exception.
 

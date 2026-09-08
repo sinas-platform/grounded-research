@@ -250,6 +250,13 @@ async def _load_shared(session):
     gazetteer = await _load_gazetteer(session)
     classes = [(c.id, c.name, c.description or "") for c in
                (await session.execute(select(DocumentClass))).scalars()]
+    # Keyed beside the properties rather than added to the `classes` tuple:
+    # four call sites unpack that tuple, and widening one several readers
+    # unpack is how the naming check was silently killed twice this week.
+    guidance_by_class = {
+        c.id: c.summarization_guidance
+        for c in (await session.execute(select(DocumentClass))).scalars()
+    }
     entity_types = [
         {"id": t.id, "name": t.name,
          "guidance": (t.guidance or t.description or "").strip(),
@@ -324,7 +331,8 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 classes=[(n, d) for _, n, d in classes],
                 entity_types=entity_types,
                 known_entities=[c for c, _ in known.values()],
-                class_hint=hint, properties=class_props))
+                class_hint=hint, properties=class_props,
+                summary_guidance=guidance_by_class.get(cid) if rule else None))
     r1 = await client.run_round("extract-front", agent, front_prompts)
 
     # round 1.5: props follow-up prompts. Docs WITHOUT a filename-rule hint
@@ -357,7 +365,8 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 entity_types=entity_types,
                 known_entities=[c for c, _ in known.values()],
                 class_hint=(cls_name, 1.0, "already classified"),
-                properties=cprops))
+                properties=cprops,
+                summary_guidance=guidance_by_class.get(cid)))
             props_owners.append(fn)
     r15 = (await client.run_round("extract-props", agent, props_prompts)
            if props_prompts else [])

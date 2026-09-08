@@ -301,6 +301,25 @@ def _presence_filter(name: str, content_lower: str) -> bool:
     return _locate(name, content_lower) is not None
 
 
+def _should_write_summary(
+    *, existing: str | None, incoming: str | None, resummarise: bool
+) -> bool:
+    """Whether this run may write the document's summary.
+
+    An existing summary is kept by default: re-running ingestion must not
+    silently rewrite a description someone may have read or corrected.
+
+    That guard also sealed them. A description written under the wrong
+    instructions — and every description in a deployment was, while the class
+    instructions were never sent — could not be corrected by any route,
+    because the only writer refused to touch a document that already had one.
+    So the caller may say so explicitly, and only explicitly.
+    """
+    if not (incoming or "").strip():
+        return False
+    return resummarise or not (existing or "").strip()
+
+
 def _front_matter_prompt(
     *,
     filename: str,
@@ -310,6 +329,7 @@ def _front_matter_prompt(
     known_entities: list[str],
     class_hint: tuple[str, float, str] | None,
     properties: list[dict] | None,
+    summary_guidance: str | None = None,
 ) -> str:
     # A class declared by the source or already assigned is FIXED: no
     # pick-one list, no classification ask — the call spends its attention
@@ -333,6 +353,18 @@ def _front_matter_prompt(
         if class_hint and not fixed_class
         else ""
     )
+    # What a good summary of THIS class looks like is deployment knowledge, so
+    # the class says it and the platform only passes it on. Nothing read the
+    # column before: every instruction a deployment wrote was stored, exported
+    # and never sent, which is the same defect as the property guidance one
+    # commit earlier and looks identical from outside — a field that imports,
+    # validates and exports while nothing consumes it.
+    summary_block = ""
+    if (summary_guidance or "").strip():
+        summary_block = (
+            "\nSUMMARY (follow this class's instructions exactly):\n"
+            f"{summary_guidance.strip()}\n"
+        )
     prop_block = ""
     if properties:
         plines = _prompt_property_lines(properties)
@@ -349,12 +381,12 @@ ENTITY TYPES (follow each type's guidance exactly):
 
 Entities already recorded for this document (do NOT repeat them):
 {known}
-{prop_block}
+{summary_block}{prop_block}
 Reply JSON schema:
 {{
   "document_class": "<class name>",
   "class_confidence": <0..1>,
-  "summary": "<8-12 sentence factual summary: parties, authority, dates, outcome, legal basis>",
+  "summary": "<8-12 sentence factual summary of the document>",
   "properties": {{"<property name>": <value per its schema> , ...}},
   "entities": [{{"name": "<canonical name>", "type": "<entity type>", "confidence": <0..1>}}, ...]
 }}
@@ -410,6 +442,7 @@ async def oneshot_ingest_document(
     classes: list[tuple[uuid.UUID, str, str]],
     entity_types: list[dict],
     write: bool = True,
+    resummarise: bool = False,
 ) -> dict[str, Any]:
     """Run the one-shot path for a single document. Returns a report dict."""
     doc = await session.get(Document, document_id)
@@ -507,6 +540,20 @@ async def oneshot_ingest_document(
         ).scalars().all()
         class_props = [_prop_for_prompt(p) for p in rows]
 
+    # Read here rather than carried in `classes`: that tuple is unpacked at
+    # four call sites, and widening a tuple several readers unpack is how the
+    # naming check was silently killed twice this week. One small read costs
+    # less than the drift.
+    summary_guidance = None
+    if known_class_id:
+        summary_guidance = (
+            await session.execute(
+                select(DocumentClass.summarization_guidance).where(
+                    DocumentClass.id == known_class_id
+                )
+            )
+        ).scalar_one_or_none()
+
     hint = None
     if doc.document_class_id is not None:
         # class already fixed (source-declared, rule-written or previously
@@ -519,6 +566,7 @@ async def oneshot_ingest_document(
     elif rule and not rule_written:
         hint = rule
     prompt = _front_matter_prompt(
+        summary_guidance=summary_guidance,
         filename=doc.filename or "",
         content=content,
         classes=[(n, d) for _, n, d in classes],
@@ -562,7 +610,15 @@ async def oneshot_ingest_document(
             ).scalars().all()
             class_props = [_prop_for_prompt(p) for p in rows]
             if class_props:
+                summary_guidance = (
+                    await session.execute(
+                        select(DocumentClass.summarization_guidance).where(
+                            DocumentClass.id == cls_id
+                        )
+                    )
+                ).scalar_one_or_none()
                 prop_prompt = _front_matter_prompt(
+                    summary_guidance=summary_guidance,
                     filename=doc.filename or "",
                     content=content,
                     classes=[(n, d) for _, n, d in classes],
@@ -581,7 +637,10 @@ async def oneshot_ingest_document(
                 data["properties"] = data2.get("properties") or {}
 
     # summary
-    if data.get("summary") and write and not (doc.summary or "").strip():
+    if write and _should_write_summary(
+        existing=doc.summary, incoming=data.get("summary"),
+        resummarise=resummarise,
+    ):
         doc.summary = str(data["summary"])[:8000]
 
     # table of contents: deterministic parse of the stored markdown —
@@ -740,7 +799,7 @@ async def oneshot_ingest_document(
 
 async def oneshot_ingest(
     document_ids: list[uuid.UUID], *, write: bool = True, concurrency: int = 4,
-    sinas: Any | None = None,
+    sinas: Any | None = None, resummarise: bool = False,
 ) -> list[dict[str, Any]]:
     """Drive the one-shot path over many documents. `sinas` accepts any
     object with the client's async invoke(agent, message) shape — the
@@ -789,6 +848,7 @@ async def oneshot_ingest(
                         classes=classes,
                         entity_types=entity_types,
                         write=write,
+                        resummarise=resummarise,
                     )
                 except Exception as exc:  # per-doc isolation
                     r = {"document": str(doc_id), "error": str(exc)[:300]}

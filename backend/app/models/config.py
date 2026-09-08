@@ -32,6 +32,9 @@ class DocumentClass(Base, TimestampMixin):
     # declaring neither is not checked.
     identifier_property: Mapped[str | None] = mapped_column(String(200))
     identifier_pattern: Mapped[str | None] = mapped_column(String(500))
+    # name_property names the property carrying a document's human name,
+    # which a claim may write instead of the identifier.
+    name_property: Mapped[str | None] = mapped_column(String(200))
     attribution_cues: Mapped[list[str] | None] = mapped_column(JSONB)
 
     properties: Mapped[list["DocumentClassProperty"]] = relationship(

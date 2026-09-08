@@ -9,6 +9,8 @@ Run from the backend directory: `python -m pytest tests/test_claim_naming.py`
 
 from app.services.claim_naming import (
     Claim,
+    distinguishing,
+    names_in_prose,
     Finding,
     Mismatch,
     Source,
@@ -623,3 +625,89 @@ def test_a_crashed_check_says_so_where_its_findings_go():
         cn.findings_for, cn.mismatches_for = real_f, real_m
     assert notes and "not a finding of none" in notes[0]
     assert found == [] and failed and "not a finding of none" in failed
+# ── naming a source in prose ─────────────────────────────────────────────────
+
+COMMON = frozenset({"Commission", "Court", "Judgment", "European"})
+
+
+def _named(name, key="d-1", ident=("X-111/22",)):
+    return Source(key=key, identifiers=ident, label=f"{key}.md", name=name)
+
+
+def test_a_distinctive_word_of_the_name_is_distinguishing():
+    assert distinguishing("Judgment: Hungryhouse v Commission", COMMON) == {
+        "Hungryhouse"
+    }
+
+
+def test_a_word_the_corpus_uses_everywhere_distinguishes_nothing():
+    """`Commission` names three thousand documents. A claim writing it has
+    told the reader nothing about which one."""
+    assert distinguishing("Commission v Court", COMMON) == set()
+
+
+def test_a_lowercase_word_is_not_a_name():
+    """Party names are proper nouns. Requiring the capital keeps ordinary
+    vocabulary out without needing to know what the vocabulary is."""
+    assert distinguishing("the inspection of premises", COMMON) == set()
+
+
+def test_a_short_word_is_not_a_name():
+    assert distinguishing("SA NV Ltd", COMMON) == set()
+
+
+def test_a_claim_writing_a_distinctive_word_names_its_source():
+    src = _named("Just Eat v Hungryhouse")
+    assert names_in_prose("In Just Eat/Hungryhouse the authority found", src, (), COMMON)
+
+
+def test_a_claim_writing_nothing_of_the_name_does_not():
+    src = _named("Just Eat v Hungryhouse")
+    assert not names_in_prose("The authority found a separate market", src, (), COMMON)
+
+
+def test_a_word_shared_with_another_cited_source_does_not_distinguish():
+    """Two Nexans judgments in one answer: writing `Nexans` does not say
+    which, so it cannot count as naming either."""
+    mine = _named("Nexans France v Commission", key="d-1")
+    other = _named("Nexans France v Commission", key="d-2")
+    assert not names_in_prose("as held in Nexans France", mine, (other,), COMMON)
+
+
+def test_a_word_the_other_source_does_not_share_still_distinguishes():
+    mine = _named("Prysmian v Commission", key="d-1")
+    other = _named("Nexans France v Commission", key="d-2")
+    assert names_in_prose("as held in Prysmian", mine, (other,), COMMON)
+
+
+def test_a_source_with_no_name_is_never_named_in_prose():
+    """A class that declares no name property opts out, and the check falls
+    back to the identifier alone."""
+    assert not names_in_prose("Hungryhouse", _named(None), (), COMMON)
+
+
+def test_review_accepts_a_source_named_in_prose():
+    src = Source("d-1", ("X-111/22",), "a.md", name="Hungryhouse v Commission")
+    found = review(
+        [Claim(1, "In Hungryhouse the body held that it applies")],
+        {1: [src]}, CUES, COMMON,
+    )
+    assert found == []
+
+
+def test_review_still_reports_a_source_named_no_way_at_all():
+    src = Source("d-1", ("X-111/22",), "a.md", name="Hungryhouse v Commission")
+    found = review(
+        [Claim(1, "The body held that it applies")], {1: [src]}, CUES, COMMON
+    )
+    assert [f.kind for f in found] == ["unnamed_first_mention"]
+
+
+def test_review_without_names_behaves_exactly_as_before():
+    """Every class declaring no name property must leave the check where it
+    was, which is what makes this safe to land on its own."""
+    src = Source("d-1", ("X-111/22",), "a.md")
+    assert review([Claim(1, "The body held it applies")], {1: [src]}, CUES) != []
+    assert review(
+        [Claim(1, "In X-111/22 the body held it applies")], {1: [src]}, CUES
+    ) == []

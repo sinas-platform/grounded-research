@@ -57,6 +57,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 
 import sqlalchemy as sa
@@ -75,6 +76,15 @@ MIN_CORE = 3
 # defects that block publication.
 MAX_FINDINGS = 5
 
+# A word shared by more than this many document names has stopped telling one
+# from another, so writing it names nothing. Three, because one dispute
+# usually yields two to four documents — a judgment, its appeal, an opinion —
+# and a name should still identify its own family while failing to identify
+# one spread across separate disputes. Measured on this corpus: `Hungryhouse`
+# names 1, `Akcros` 3, `Nexans` 5 across two unrelated litigations, `Casino`
+# 68.
+MAX_NAME_SHARE = 3
+
 
 @dataclass(frozen=True)
 class Source:
@@ -90,6 +100,7 @@ class Source:
     identifiers: tuple[str, ...]
     label: str
     pattern: str | None = None
+    name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -229,6 +240,63 @@ def identifier_key(value: str, pattern: str) -> str | None:
     return _key(m) if m else None
 
 
+# A name is written as a proper noun, so a capital and four characters is what
+# separates a party from the ordinary vocabulary of a title. It is a weaker
+# signal than an identifier and deliberately so: it is only ever consulted to
+# EXCUSE a claim, never to accuse one.
+_NAME_TOKEN = re.compile(r"\b[A-ZÀ-Þ][\w'\-]{3,}")
+
+
+def _tokens(name: str | None) -> set[str]:
+    return set(_NAME_TOKEN.findall(name or ""))
+
+
+def distinguishing(name: str | None, common: frozenset[str]) -> set[str]:
+    """The words of a name that could tell one document from another.
+
+    `common` is the words the corpus uses so widely that writing one says
+    nothing about which document is meant. It is counted from the corpus
+    rather than listed here, because the words that carry no information are
+    a fact about a body of documents and not about language: this corpus
+    wears out `Commission`, `relative` and `société`, and another would wear
+    out something else entirely.
+    """
+    return {w for w in _tokens(name) if w not in common}
+
+
+def names_in_prose(
+    text: str,
+    source: "Source",
+    others: "tuple[Source, ...] | list[Source]",
+    common: frozenset[str],
+) -> bool:
+    """Whether the claim names this source by name rather than by identifier.
+
+    House style names a judgment by its parties, and a reader given `Just
+    Eat/Hungryhouse` can follow it. Demanding the docket number as well is
+    pedantry, and the naming check made exactly that demand.
+
+    A word shared with another source the same answer cites does not count.
+    Two Nexans judgments in one answer mean that writing `Nexans` does not say
+    which, and a check that accepted it would excuse the claim on the strength
+    of a word that leaves the reader where they started.
+
+    A class declaring no name property has no name here, and the check falls
+    back to the identifier alone, which is where it was before this existed.
+    """
+    mine = distinguishing(source.name, common)
+    if not mine:
+        return False
+    hit = {w for w in mine if re.search(rf"\b{re.escape(w)}\b", text)}
+    if not hit:
+        return False
+    shared: set[str] = set()
+    for other in others:
+        if other.key != source.key:
+            shared |= hit & _tokens(other.name)
+    return bool(hit - shared)
+
+
 def attributes(text: str, cues: frozenset[str]) -> bool:
     """Whether the claim attributes rather than describes.
 
@@ -245,6 +313,7 @@ def review(
     claims: list[Claim],
     sources: dict[int, list[Source]],
     cues: frozenset[str],
+    common_names: frozenset[str] = frozenset(),
 ) -> list[Finding]:
     """Findings for one answer. Pure: no I/O, no ordering assumptions beyond
     claim sequence, which is what "first mention" is defined against."""
@@ -262,18 +331,27 @@ def review(
             seen.add((claim.seq, source.key))
             attributing.setdefault(source.key, []).append((claim, source))
 
+    # Every source the answer cites, so that a name shared with one of them can
+    # be recognised as saying nothing. Answer scope rather than claim scope:
+    # the reader following a name has the whole answer in front of them.
+    cited = tuple({s.key: s for ss in sources.values() for s in ss}.values())
+
+    def told(claim: Claim, source: Source) -> bool:
+        """Whether this claim tells the reader which source it is relying on,
+        by identifier or by name."""
+        return carries_identifier(claim.text, source.identifiers) or names_in_prose(
+            claim.text, source, cited, common_names
+        )
+
     findings: list[Finding] = []
     for entries in attributing.values():
-        named = any(
-            carries_identifier(claim.text, source.identifiers)
-            for claim, source in entries
-        )
+        named = any(told(claim, source) for claim, source in entries)
         first_claim, source = entries[0]
         if len(entries) > 1 and not named:
             findings.append(
                 Finding("unanchored_chain", source, tuple(c.seq for c, _ in entries))
             )
-        elif not carries_identifier(first_claim.text, source.identifiers):
+        elif not told(first_claim, source):
             findings.append(
                 Finding("unnamed_first_mention", source, (first_claim.seq,))
             )
@@ -386,7 +464,7 @@ _LOAD = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
            dc.attribution_cues, pv.value->>'_' as identifier,
-           dc.identifier_pattern
+           dc.identifier_pattern, nv.value->>'_' as name
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -395,6 +473,10 @@ _LOAD = sa.text(
         on p.document_class_id = dc.id and p.name = dc.identifier_property
       join property_value pv
         on pv.document_id = d.id and pv.property_id = p.id
+      left join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      left join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
        and dc.attribution_cues is not null
@@ -411,7 +493,8 @@ _LOAD = sa.text(
 _LOAD_IDENTIFIED = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
-           pv.value->>'_' as identifier, dc.identifier_pattern
+           pv.value->>'_' as identifier, dc.identifier_pattern,
+           nv.value->>'_' as name
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -420,6 +503,10 @@ _LOAD_IDENTIFIED = sa.text(
         on p.document_class_id = dc.id and p.name = dc.identifier_property
       join property_value pv
         on pv.document_id = d.id and pv.property_id = p.id
+      left join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      left join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
        and dc.identifier_pattern is not null
@@ -429,7 +516,7 @@ _LOAD_IDENTIFIED = sa.text(
 
 def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     """Rows of (sequence, claim text, document id, filename, identifier,
-    identifier pattern) as
+    identifier pattern, name) as
     the claims of an answer and the sources each one cites.
 
     One row per claim, document and identifier, so a claim citing two passages
@@ -438,11 +525,13 @@ def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     claims: dict[int, Claim] = {}
     labels: dict[str, str] = {}
     shapes: dict[str, str | None] = {}
+    names: dict[str, str | None] = {}
     identifiers: dict[tuple[int, str], list[str]] = {}
-    for sequence, text, doc_id, filename, identifier, pattern in rows:
+    for sequence, text, doc_id, filename, identifier, pattern, name in rows:
         claims[sequence] = Claim(sequence, text or "")
         labels[doc_id] = filename
         shapes[doc_id] = pattern
+        names[doc_id] = name
         if identifier:
             identifiers.setdefault((sequence, doc_id), []).extend(
                 _identifier_values(identifier)
@@ -451,9 +540,57 @@ def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
     for (sequence, doc_id), values in identifiers.items():
         sources.setdefault(sequence, []).append(
             Source(doc_id, tuple(dict.fromkeys(values)), labels[doc_id],
-                   shapes.get(doc_id))
+                   shapes.get(doc_id), names.get(doc_id))
         )
     return list(claims.values()), sources
+
+
+_NAMES = sa.text(
+    """
+    select nv.value->>'_'
+      from document d
+      join document_class dc on dc.id = d.document_class_id
+      join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
+     where dc.name_property is not null
+    """
+)
+
+_common_names: frozenset[str] | None = None
+
+
+async def common_names(refresh: bool = False) -> frozenset[str]:
+    """The words too widely shared across document names to identify one.
+
+    Counted from the corpus rather than listed, because which words carry no
+    information is a fact about a body of documents and not about language.
+    This corpus wears out `Commission`, `relative` and `société`; a corpus of
+    clinical trials would wear out something else, and a list written here
+    would be wrong for both.
+
+    Read once per process and held. The count moves only as documents are
+    ingested, a word crossing the threshold changes one finding rather than
+    the answer's shape, and the alternative is reading every name in the
+    corpus on every answer. `refresh` is for a caller that has just ingested
+    and wants the count to reflect it.
+
+    Empty when no class declares a name property, which is the default. Every
+    source then has no name, `names_in_prose` returns False for all of them,
+    and the check is left exactly where it was.
+    """
+    global _common_names
+    if _common_names is not None and not refresh:
+        return _common_names
+    counts: Counter[str] = Counter()
+    async with AsyncSessionLocal() as session:
+        for (name,) in (await session.execute(_NAMES)).all():
+            counts.update(_tokens(name))
+    _common_names = frozenset(
+        word for word, seen in counts.items() if seen > MAX_NAME_SHARE
+    )
+    return _common_names
 
 
 async def findings_for(answer_id: uuid.UUID) -> list[Finding]:

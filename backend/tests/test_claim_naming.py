@@ -66,6 +66,30 @@ def test_absent_identifier_does_not_match():
     assert not carries_identifier("no reference of any kind", ("X-111/22",))
 
 
+def test_an_identifier_punctuated_differently_still_matches():
+    """The same decision is written `AT.39796` by the corpus and
+    `COMP/39.796` by the prose. Comparing on the characters that carry the
+    identity, and not on the separators between them, is what makes those the
+    same thing."""
+    assert carries_identifier(
+        "In Commission Decision COMP/39.796 (Suez Environnement), the "
+        "Commission found a broken seal", ("AT.39796",))
+
+
+def test_two_identifiers_written_side_by_side_both_match():
+    """`Nos. 85-4053, 85-4068` is two identifiers touching. Removing the
+    separators from the claim would run them into one number and hide both."""
+    assert carries_identifier(
+        "In In re Antitrust Grand Jury, Nos. 85-4053, 85-4068, the appellate "
+        "court held", ("85-4053, 85-4068",))
+
+
+def test_a_number_embedded_in_a_longer_one_is_not_a_match():
+    """Dropping separators would otherwise let an identifier match the middle
+    of an unrelated number."""
+    assert not carries_identifier("the 2011122 undertakings", ("X-111/22",))
+
+
 def test_a_core_below_the_minimum_never_matches():
     """A two-character remainder occurs by chance in ordinary prose."""
     assert not carries_identifier("chapter 7 of the report", ("A-7",))

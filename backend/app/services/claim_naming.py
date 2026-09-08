@@ -125,16 +125,38 @@ def identifier_core(value: str) -> str:
     return stripped.split(" ")[0].strip()
 
 
-def carries_identifier(text: str, identifiers: tuple[str, ...]) -> bool:
-    """Whether the claim writes any of these identifiers.
+# How much separator may sit between two characters of one identifier. Enough
+# for `. ` or a hyphen or a line break, and not enough to reach across a
+# clause and assemble an identifier out of unrelated digits.
+_GAP = r"[^0-9A-Za-z]{0,3}"
 
-    Compared with whitespace removed, so an identifier broken across a line or
-    spaced differently still counts.
+
+def _written_as(core: str) -> re.Pattern[str]:
+    """A pattern matching this identifier however it is punctuated.
+
+    Separators are style, not identity: the same decision is written `AT.39796`
+    by the corpus and `COMP/39.796` in prose, and comparing the two literally
+    said that a claim naming its source did not name it.
+
+    The permission is given to the identifier rather than taken from the
+    claim. Stripping the separators out of the claim instead would run two
+    identifiers written side by side into a single number and match neither,
+    which `Nos. 85-4053, 85-4068` does in the corpus today.
+
+    A digit either side refuses the match, so a short identifier cannot be
+    read out of the middle of a longer number: `111/22` is not written by
+    `2011122`.
     """
-    squashed = re.sub(r"\s+", "", text)
+    return re.compile(
+        r"(?<![0-9])" + _GAP.join(re.escape(c) for c in core) + r"(?![0-9])"
+    )
+
+
+def carries_identifier(text: str, identifiers: tuple[str, ...]) -> bool:
+    """Whether the claim writes any of these identifiers."""
     for identifier in identifiers:
-        core = identifier_core(identifier)
-        if len(core) >= MIN_CORE and re.sub(r"\s+", "", core) in squashed:
+        core = re.sub(r"[^0-9A-Za-z]+", "", identifier_core(identifier))
+        if len(core) >= MIN_CORE and _written_as(core).search(text):
             return True
     return False
 

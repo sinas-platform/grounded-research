@@ -1,9 +1,9 @@
 """Unit tests for the record of where an answer's concluding claim is.
 
-Carolina's Q34 finding was that an answer ends off-topic with no conclusion.
-Across the eleven runs carrying gate telemetry, two end on a claim that answers
-the question, two arguably do, and seven end on a case note or a procedural
-aside, so the shape is real and common.
+A reviewer's finding on one question was that the answer ends off-topic with
+no conclusion. Across the eleven runs carrying gate telemetry, two end on a
+claim that answers the question, two arguably do, and seven end on a source
+note or a procedural aside, so the shape is real and common.
 
 The record has to keep three findings apart, because they want different
 remedies: an answer that closes, a conclusion buried at claim N with case notes

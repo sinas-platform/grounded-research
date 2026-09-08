@@ -1934,10 +1934,10 @@ def _coverage_summary(parts: list[dict]) -> dict:
 def _closing_record(data: dict, claim_seqs: set, parts: list[dict]) -> dict:
     """Where the answer's concluding claim is, recorded and blocking nothing.
 
-    Carolina's finding on Q34 was that an answer ends off-topic with no
-    conclusion. Read across eleven runs carrying gate telemetry, two end on a
-    claim that answers the question, two arguably do, and seven end on a case
-    note or a procedural aside. So the shape is real and common.
+    A reviewer's finding on one question was that the answer ends off-topic
+    with no conclusion. Read across eleven runs carrying gate telemetry, two
+    end on a claim that answers the question, two arguably do, and seven end
+    on a source note or a procedural aside. So the shape is real and common.
 
     It cannot be derived from `covered_by`. Measured on those eleven, the union
     of every part's `covered_by` names 11 of 11, 13 of 14, 14 of 14 claims —

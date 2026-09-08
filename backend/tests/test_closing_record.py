@@ -107,6 +107,19 @@ def test_the_gate_boolean_is_recorded_either_way():
     assert rec({})["gate_said_none"] is False
 
 
+def test_a_non_canonical_scalar_is_not_a_yes():
+    """`bool("false")` is True. Read for truthiness, a reply of "false" would
+    manufacture exactly the disagreement this field exists to measure, so the
+    boolean is read strictly and anything else is a reply that did not answer.
+
+    Note the blocking consumer still reads the same field for truthiness, so
+    the two can diverge. That is a defect in the blocking path and is left
+    alone here deliberately: fixing it changes what publishes."""
+    for v in ("false", "no", 0, 1, "true", [], None):
+        assert rec({"no_conclusion": v})["gate_said_none"] is False, v
+    assert rec({"no_conclusion": True})["gate_said_none"] is True
+
+
 def test_disagreement_between_the_two_is_recordable():
     """The measurement worth having. `no_conclusion` has fired in none of the
     39 runs since gate telemetry landed, while three of eleven read by hand end

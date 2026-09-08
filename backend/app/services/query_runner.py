@@ -1998,8 +1998,19 @@ def _closing_record(data: dict, claim_seqs: set, parts: list[dict]) -> dict:
                   else "buried" if at is not None
                   else "absent"),
         # The gate's own boolean, beside the position it gave. Disagreement
-        # between the two is the thing to count.
-        "gate_said_none": bool(data.get("no_conclusion")),
+        # between the two is the thing to count, which is why this is read
+        # strictly rather than for truthiness: `bool("false")` is True, and a
+        # non-canonical scalar read that way would manufacture exactly the
+        # disagreement this exists to measure. The prompt asks for a boolean,
+        # so anything else is a reply that did not answer, recorded as False.
+        #
+        # Worth knowing, and NOT changed here: the consumer that blocks reads
+        # the same field for truthiness (`if data.get("no_conclusion")`), so a
+        # reply of "false" would hold the answer back while this records False.
+        # That divergence is a defect in the blocking path, not in the record,
+        # and fixing it changes what publishes — out of scope for a change that
+        # blocks nothing. It is a reason to have the record.
+        "gate_said_none": data.get("no_conclusion") is True,
         "single_part": len(parts) == 1,
     }
 

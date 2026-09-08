@@ -84,15 +84,16 @@ def test_the_other_four_prefixes_are_unchanged():
 CID = str(uuid.uuid4())
 
 
-def _verdict(over=(), failed=()):
+def _verdict(over=(), failed=(), judged=1, errors=0):
     return {
-        "judged": 1, "passed": 0,
+        "judged": judged, "passed": 0,
         "failed": [{"claim_id": CID, "claim_sequence": s, "reason": "r"}
                    for s in failed],
         "overreaching": [{"claim_id": CID, "claim_sequence": s,
                           "claim_text": f"claim {s}", "uncovered": f"u{s}"}
                          for s in over],
-        "errors": [],
+        "errors": [{"evidence_id": str(uuid.uuid4()),
+                    "error": "no extracted content"} for _ in range(errors)],
     }
 
 
@@ -174,6 +175,7 @@ async def test_a_clean_sweep_records_its_own_pass(sweep):
     v = sweep["state"]["validate"]
     assert v["final_sweeps"] == 1
     assert v["final_sweep_1"] == {
+        "judged": 1, "errors": 0,
         "failed": 0, "overreaching": 0, "overreaching_claims": []}
 
 
@@ -216,3 +218,41 @@ async def test_a_failing_span_is_recorded_beside_the_overreach(sweep):
     sweep["verdicts"].append(_verdict(over=[8], failed=[2]))
     await sweep["run"]()
     assert sweep["state"]["validate"]["final_sweep_1"]["failed"] == 1
+
+
+# -- what the sweep examined, not only what it found ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_records_how_many_spans_it_judged(sweep):
+    """`failed` and `overreaching` say what the sweep found. Neither says
+    whether it looked, and the two readings are the same number."""
+    sweep["verdicts"].append(_verdict(judged=12))
+    await sweep["run"]()
+    assert sweep["state"]["validate"]["final_sweep_1"]["judged"] == 12
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_that_judged_nothing_no_longer_reads_as_a_clean_one(sweep):
+    """The defect this record exists for.
+
+    `validate_answer_evidence` returns errors beside failures, and a span that
+    errored is skipped before any verdict is written: it is not in `failed`,
+    not in `overreaching`, and its row keeps whatever it had. A sweep where
+    every span errored therefore returned exactly the numbers a sweep that
+    judged everything and objected to nothing returns.
+    """
+    sweep["verdicts"].append(_verdict(judged=0, errors=9))
+    await sweep["run"]()
+    r = sweep["state"]["validate"]["final_sweep_1"]
+    assert (r["judged"], r["errors"]) == (0, 9)
+    assert (r["failed"], r["overreaching"]) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_errors_do_not_object_yet(sweep):
+    """Recorded, not acted on. Making them block publication is a behaviour
+    change on a path that has not fired once in 231 published runs, so it
+    waits for the record to say whether it ever does."""
+    sweep["verdicts"].append(_verdict(judged=0, errors=9))
+    assert await sweep["run"]() is True

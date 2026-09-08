@@ -2577,7 +2577,7 @@ async def _gate_answer(
     # and the reviser's feedback is built from the same read. Two reads could
     # disagree, and a telemetry key that disagrees with the feedback it
     # describes is worse than no key.
-    mismatched = await claim_naming.safe_mismatches_for(answer_id)
+    mismatched, mismatch_failed = await claim_naming.safe_mismatches_for(answer_id)
     # A check that cannot run says so where its findings go. An opted-in class
     # with no declared identifier shape yields no mismatches, and no mismatches
     # is what a clean answer yields too, so the silence rides `issues` rather
@@ -2622,6 +2622,8 @@ async def _gate_answer(
     issues += mismatch_notes
     if unshaped:
         issues.append(unshaped)
+    if mismatch_failed:
+        issues.append(mismatch_failed)
     issues += await claim_naming.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
     missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")

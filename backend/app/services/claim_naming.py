@@ -385,7 +385,8 @@ def message(finding: Finding) -> str:
 _LOAD = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
-           dc.attribution_cues, pv.value->>'_' as identifier
+           dc.attribution_cues, pv.value->>'_' as identifier,
+           dc.identifier_pattern
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -463,7 +464,9 @@ async def findings_for(answer_id: uuid.UUID) -> list[Finding]:
     cues: set[str] = set()
     for row in rows:
         cues.update(c.lower() for c in (row[4] or []) if c)
-    claims, sources = _assemble([(r[0], r[1], r[2], r[3], r[5]) for r in rows])
+    claims, sources = _assemble(
+        [(r[0], r[1], r[2], r[3], r[5], r[6]) for r in rows]
+    )
     return review(claims, sources, frozenset(cues))
 
 
@@ -499,8 +502,18 @@ async def issues_for(answer_id: uuid.UUID) -> list[str]:
     try:
         found = await findings_for(answer_id)
     except Exception:
+        # Said here, not only in the log. A check that crashed returns an
+        # empty list, and an empty list is what a clean answer returns, so
+        # swallowing it silently makes a broken check indistinguishable from
+        # a passing one. That is the same defect as a check that was never
+        # configured, and it wants the same remedy: say so in the channel
+        # that carries the findings.
         log.exception("naming check failed for answer %s", answer_id)
-        return []
+        return [
+            "The check that a claim naming a source also names it in the "
+            "prose did not run on this answer: it failed. No claim was "
+            "examined. This is not a finding of none."
+        ]
     return [message(f) for f in found[:MAX_FINDINGS]]
 
 
@@ -562,12 +575,17 @@ async def unshaped_message() -> str | None:
     )
 
 
-async def safe_mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:
+async def safe_mismatches_for(
+    answer_id: uuid.UUID,
+) -> tuple[list[Mismatch], str | None]:
     """Every mismatch in this answer, and never an exception.
 
-    Never raises into the caller, for the same reason `issues_for` does not:
-    this is a quality note, and an answer that is otherwise publishable must
-    not be held up because a check failed.
+    Returns the findings and, when the check could not run, a line for
+    `issues`. Never raises into the caller, for the same reason `issues_for`
+    does not: this is a quality note, and an answer that is otherwise
+    publishable must not be held up because a check failed. But it does not
+    fail silently either — an empty list and a crash are the same bytes to
+    every reader, so the crash is announced where the findings go.
 
     Returns the findings rather than the feedback strings, and returns all of
     them rather than `MAX_FINDINGS` of them. The cap exists to bound what the
@@ -577,7 +595,11 @@ async def safe_mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:
     truncated record cannot answer it.
     """
     try:
-        return await mismatches_for(answer_id)
+        return await mismatches_for(answer_id), None
     except Exception:
         log.exception("naming correspondence check failed for answer %s", answer_id)
-        return []
+        return [], (
+            "The check that a claim names the source it cites did not run on "
+            "this answer: it failed. No claim was examined. This is not a "
+            "finding of none."
+        )

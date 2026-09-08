@@ -559,3 +559,67 @@ def test_a_failure_to_check_is_silent_rather_than_fatal():
         assert asyncio.run(cn.unshaped_message()) is None
     finally:
         cn.unshaped_classes = real
+
+
+# ── the loaders and the assembler must agree on how many columns there are ───
+
+
+def test_every_loader_selects_what_the_assembler_unpacks():
+    """The bug this pins cost the naming check entirely and said nothing.
+
+    `_assemble` was widened to take the identifier pattern, `_LOAD_IDENTIFIED`
+    was given the column and `_LOAD` was not, so `findings_for` built a
+    five-tuple for a six-tuple unpack, raised on every answer, and was caught
+    by a handler that returns an empty list. 157 findings became 0 with
+    nothing in the gate output to show it.
+
+    Counting columns is the cheap structural check that catches the whole
+    class: a loader that feeds the assembler must select what it unpacks.
+    """
+    import inspect
+    import re
+
+    from app.services import claim_naming as cn
+
+    body = inspect.getsource(cn._assemble)
+    unpack = re.search(r"for (.+?) in rows:", body).group(1)
+    wanted = len([x for x in unpack.split(",") if x.strip()])
+
+    def selected(sql: str) -> int:
+        head = sql[sql.index("select") + 6 : sql.index("from")]
+        depth = 0
+        cols = 1
+        for ch in head:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            elif ch == "," and depth == 0:
+                cols += 1
+        return cols
+
+    # _LOAD carries one extra column, the cues, which findings_for reads
+    # directly rather than passing on.
+    assert selected(str(cn._LOAD)) == wanted + 1, "_LOAD"
+    assert selected(str(cn._LOAD_IDENTIFIED)) == wanted, "_LOAD_IDENTIFIED"
+
+
+def test_a_crashed_check_says_so_where_its_findings_go():
+    """An empty list is what a clean answer returns. A check that fell over
+    must not be indistinguishable from one that passed."""
+    import asyncio
+
+    from app.services import claim_naming as cn
+
+    async def boom(_):
+        raise RuntimeError("no database")
+
+    real_f, real_m = cn.findings_for, cn.mismatches_for
+    cn.findings_for, cn.mismatches_for = boom, boom
+    try:
+        notes = asyncio.run(cn.issues_for("a"))
+        found, failed = asyncio.run(cn.safe_mismatches_for("a"))
+    finally:
+        cn.findings_for, cn.mismatches_for = real_f, real_m
+    assert notes and "not a finding of none" in notes[0]
+    assert found == [] and failed and "not a finding of none" in failed

@@ -279,7 +279,8 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
     # worklist from data
     async with AsyncSessionLocal() as session:
         gazetteer, classes, entity_types = await _load_shared(session)
-        work: list[tuple[uuid.UUID, str, str]] = []  # (id, filename, content)
+        work = []  # (id, filename, content)
+        class_by_did: dict = {}
         for did in doc_ids:
             doc = await session.get(Document, did)
             if doc is None or (doc.summary or "").strip():
@@ -292,6 +293,10 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
             if version is None or not (version.content_md or "").strip():
                 continue
             work.append((did, doc.filename or "", version.content_md))
+            # Kept beside `work` rather than inside it. Six places unpack that
+            # tuple, and widening a tuple several readers unpack is how the
+            # naming check was silently killed twice this week.
+            class_by_did[did] = doc.document_class_id
     log.info("extract: %d docs need extraction", len(work))
     if not work:
         return {"extracted": 0, "skipped": len(doc_ids)}
@@ -320,11 +325,21 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
         for wi, (did, fn, content) in enumerate(work):
             rule = one.classify_by_rules(fn)
             hint = rule
-            class_props = None
+            # A filename rule is one way to know the class, not the only one.
+            # A document that arrives already classified -- source-declared, or
+            # classified on an earlier pass -- has a class whether or not its
+            # name matches a rule, and its class's properties and summary
+            # guidance apply just the same. Deriving both from the rule alone
+            # sent those documents a generic prompt and stored a summary
+            # written to nobody's instructions. The live path in
+            # `ingestion_oneshot` reads the document's own class here; this is
+            # the same read, and this is the path most documents take.
+            cid = None
             if rule is not None:
                 cid = next((c for c, n, _ in classes if n == rule[0]), None)
-                if cid is not None:
-                    class_props = props_by_class.get(cid) or None
+            if cid is None:
+                cid = class_by_did.get(did)
+            class_props = props_by_class.get(cid) or None if cid else None
             known = known_by_idx[wi]
             front_prompts.append(one._front_matter_prompt(
                 filename=fn, content=content,
@@ -332,7 +347,7 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 entity_types=entity_types,
                 known_entities=[c for c, _ in known.values()],
                 class_hint=hint, properties=class_props,
-                summary_guidance=guidance_by_class.get(cid) if rule else None))
+                summary_guidance=guidance_by_class.get(cid) if cid else None))
     r1 = await client.run_round("extract-front", agent, front_prompts)
 
     # round 1.5: props follow-up prompts. Docs WITHOUT a filename-rule hint

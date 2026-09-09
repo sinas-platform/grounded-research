@@ -603,9 +603,25 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
 # and the median citation is rank 9. The list is still worth carrying to the end
 # — 13% of citations come from below rank 40 — but not at a flat price per
 # document, which spends the same on rank 3 as on rank 97.
-HEAD_DOCUMENTS = 20
-HEAD_SUMMARY_CHARS = 500
+HEAD_DOCUMENTS = 10
+# The ten highest-ranked documents are the ones the planner builds from, and
+# truncating them is what put the law in the part it never read: every summary
+# in the corpus exceeds 200 characters, median length 973, and the opening is
+# court, date and parties. 4,000 is above every summary there is, longest
+# 1,525, so nothing real is cut. It is a bound rather than no bound so that one
+# pathological summary cannot spend the whole budget and drop the working set
+# behind it.
+HEAD_SUMMARY_CHARS = 4000
 TAIL_SUMMARY_CHARS = 100
+
+# The other two columns of every line, and together they cost as much as the
+# summaries. Measured over all 377 stored result sets that hold a full working
+# set: the properties come to 20,152 characters on the set decomposed, as much
+# as all 100 summaries together, with the retrieval reason behind them. Tuning
+# the head and the tail alone cannot fit the list under the cap, because two
+# thirds of it is not summary.
+REASON_CHARS = 60
+PROPERTY_CHARS = 120
 
 # A table of contents, rendered as line ranges and titles rather than as the
 # repr of its JSON. Half of what the old rendering carried was keys, quotes and
@@ -614,9 +630,12 @@ TOC_CHARS = 300
 
 
 def _manifest_line(r: dict, summary_chars: int = HEAD_SUMMARY_CHARS) -> str:
+    """One document as the planner sees it, bounded by its band's budget."""
+    summary = r["summary"][:summary_chars]
     return (f"- {r['filename']} | {r['class'] or '-'} | "
-            f"{r['annotations'] or '-'} | {r.get('properties') or '-'} | "
-            f"{r['reason'][:120]} | {r['summary'][:summary_chars]}")
+            f"{r['annotations'] or '-'} | "
+            f"{str(r.get('properties') or '-')[:PROPERTY_CHARS]} | "
+            f"{r['reason'][:REASON_CHARS]} | {summary}")
 
 
 def _toc_digest(toc, cap: int = TOC_CHARS) -> str:

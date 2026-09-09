@@ -50,7 +50,7 @@ def manifest_rows(monkeypatch):
 async def test_everything_fits_and_the_record_says_so(manifest_rows):
     manifest_rows["rows"] = rows(10)
     text, cap = await qr._doc_manifest("p")
-    assert cap == {"chars": len(text) + 1, "cap": MANIFEST_CHAR_CAP,
+    assert cap == {"chars": len(text), "cap": MANIFEST_CHAR_CAP,
                    "documents": 10, "shown": 10, "dropped": 0}
     assert text.count("- doc") == 10
 
@@ -119,7 +119,7 @@ async def test_briefing_lines_count_against_the_cap(manifest_rows):
     manifest_rows["rows"] = rows(6, summary_chars=100, briefing=True)
     text, cap = await qr._doc_manifest("p")
     assert "    properties: " in text and "    toc: " in text
-    assert cap["chars"] == len(text) + 1
+    assert cap["chars"] == len(text)
 
 
 @pytest.mark.asyncio
@@ -139,3 +139,15 @@ async def test_the_cap_is_a_parameter(manifest_rows):
     _, wide = await qr._doc_manifest("p", cap=MANIFEST_CHAR_CAP)
     _, tight = await qr._doc_manifest("p", cap=500)
     assert wide["dropped"] == 0 and tight["dropped"] > 0
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_length_is_the_length_that_is_sent(manifest_rows):
+    """`chars` is the manifest, not the manifest plus a newline nobody writes.
+    Counting one per line charged a separator after the last one, which put the
+    figure one above the real length and made the effective cap 59,999."""
+    for n in (1, 2, 7):
+        manifest_rows["rows"] = rows(n, briefing=True)
+        text, cap = await qr._doc_manifest("p")
+        assert cap["chars"] == len(text), f"{n} documents"
+

@@ -644,7 +644,14 @@ async def _doc_manifest(
             toc = brief.get("toc")
             if toc:
                 block.append(f"    toc: {str(toc)[:600]}")
-        cost = sum(len(x) + 1 for x in block)
+        # Exactly what this block adds to the joined string: its own lines,
+        # the newlines between them, and one more to join it to what is
+        # already there -- which the first block does not need. Charging a
+        # newline per line instead counts one that `"\n".join` never writes,
+        # which put `chars` one above the real length and made the effective
+        # cap 59,999: a last document that fit exactly was refused.
+        cost = (sum(len(x) for x in block) + len(block) - 1
+                + (1 if lines else 0))
         # Once one document does not fit, nothing after it is taken either.
         # Letting a later, smaller one through would hand the planner a set
         # that is not the top of the ranking, which is a quieter defect than

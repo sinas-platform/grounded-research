@@ -3,6 +3,7 @@
 
   oneshot_ingest.py --unclassified --limit 10          # classify + extract
   oneshot_ingest.py --unclassified --limit 5 --dry-run # no writes
+  oneshot_ingest.py --ids <uuid> ... --resummarise      # rewrite descriptions
 """
 import argparse
 import asyncio
@@ -26,6 +27,9 @@ async def main() -> int:
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--ids", nargs="*")
     ap.add_argument("--dry-run", action="store_true")
+    ap.add_argument("--resummarise", action="store_true",
+                    help="replace summaries that already exist; without it a "
+                         "document that has one keeps it")
     ap.add_argument("--concurrency", type=int, default=4)
     args = ap.parse_args()
 
@@ -39,7 +43,9 @@ async def main() -> int:
             q = q.limit(args.limit)
             ids = list((await session.execute(q)).scalars())
     print(f"{len(ids)} documents; write={not args.dry_run}", flush=True)
-    reports = await oneshot_ingest(ids, write=not args.dry_run, concurrency=args.concurrency)
+    reports = await oneshot_ingest(ids, write=not args.dry_run,
+                                   concurrency=args.concurrency,
+                                   resummarise=args.resummarise)
     for r in reports:
         print(json.dumps(r, default=str), flush=True)
     return 0

@@ -22,7 +22,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -523,6 +523,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     DocumentClass.name,
                     ResultDocument.reason,
                     Document.summary,
+                    ResultDocument.rank,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -579,7 +580,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         return str(value)
 
     out = []
-    for did, fn, cls, reason, summary in rows:
+    for did, fn, cls, reason, summary, rank in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -591,30 +592,180 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             "document_id": did, "filename": fn, "class": cls or "",
             "annotations": ann, "properties": props, "reason": (reason or ""),
             "summary": (summary or ""),
+            "rank": rank,
             "briefing": briefing_by_doc.get(str(did)),
         })
     return out
 
 
-def _manifest_line(r: dict) -> str:
+# Where the planner's attention actually goes. Measured over 3,854 citations in
+# published answers: 56% name a document in the top ten, 72% in the top twenty,
+# and the median citation is rank 9. The list is still worth carrying to the end
+# — 13% of citations come from below rank 40 — but not at a flat price per
+# document, which spends the same on rank 3 as on rank 97.
+HEAD_DOCUMENTS = 10
+# The ten highest-ranked documents are the ones the planner builds from, and
+# truncating them is what put the law in the part it never read: every summary
+# in the corpus exceeds 200 characters, median length 973, and the opening is
+# court, date and parties. 4,000 is above every summary there is, longest
+# 1,525, so nothing real is cut. It is a bound rather than no bound so that one
+# pathological summary cannot spend the whole budget and drop the working set
+# behind it.
+HEAD_SUMMARY_CHARS = 4000
+TAIL_SUMMARY_CHARS = 100
+
+# The other two columns of every line, and together they cost as much as the
+# summaries. Measured over all 377 stored result sets that hold a full working
+# set: the properties come to 20,152 characters on the set decomposed, as much
+# as all 100 summaries together, with the retrieval reason behind them. Tuning
+# the head and the tail alone cannot fit the list under the cap, because two
+# thirds of it is not summary.
+REASON_CHARS = 60
+PROPERTY_CHARS = 120
+
+# A table of contents, rendered as line ranges and titles rather than as the
+# repr of its JSON. Half of what the old rendering carried was keys, quotes and
+# braces, so this holds roughly the same titles in half the characters.
+TOC_CHARS = 300
+
+
+def _manifest_line(r: dict, summary_chars: int = HEAD_SUMMARY_CHARS) -> str:
+    """One document as the planner sees it, bounded by its band's budget."""
+    summary = r["summary"][:summary_chars]
     return (f"- {r['filename']} | {r['class'] or '-'} | "
-            f"{r['annotations'] or '-'} | {r.get('properties') or '-'} | "
-            f"{r['reason'][:120]} | {r['summary'][:200]}")
+            f"{r['annotations'] or '-'} | "
+            f"{str(r.get('properties') or '-')[:PROPERTY_CHARS]} | "
+            f"{r['reason'][:REASON_CHARS]} | {summary}")
 
 
-async def _doc_manifest(parent_id: uuid.UUID) -> str:
-    lines = []
-    for r in await _manifest_rows(parent_id):
-        lines.append(_manifest_line(r))
+def _toc_digest(toc, cap: int = TOC_CHARS) -> str:
+    """A table of contents as `start-end title`, bounded.
+
+    Stored as JSON and rendered with `str()`, 57% of the characters that
+    reached the planner were structural: `{"line": 1, "level": 1, "title":
+    "...", "line_to": 8487}`. The planner needs the titles and where they
+    begin, so those are what it gets, and more of them fit.
+
+    Never raises for the sake of a table of contents: anything unreadable is
+    passed through truncated, which is what the old rendering did to
+    everything.
+    """
+    if isinstance(toc, str):
+        try:
+            toc = json.loads(toc)
+        except ValueError:
+            return toc[:cap]
+    entries = toc.get("entries") if isinstance(toc, dict) else (
+        toc if isinstance(toc, list) else None)
+    # A mapping of entries is still entries. Iterating a dict yields its keys,
+    # every one a string, and the loop below drops non-dictionaries -- so a
+    # mapping would render as nothing at all where the old `str(toc)` at least
+    # showed the reader something. Not seen in this corpus, where all 5,722
+    # stored tables of contents hold a list; cheap to not depend on that.
+    if isinstance(entries, dict):
+        entries = list(entries.values())
+    if not entries:
+        return str(toc)[:cap]
+    out: list[str] = []
+    used = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        row = f"{e.get('line')}-{e.get('line_to')} {e.get('title') or ''}".strip()
+        if used + len(row) + 2 > cap:
+            break
+        out.append(row)
+        used += len(row) + 2
+    return "; ".join(out)
+
+
+# What the planner may be shown. The prompt slices to this, so a manifest
+# that outgrows it loses its TAIL — the lowest-ranked documents vanish from
+# the planner's view with nothing said. That is worth a number: measured on
+# 99ed1bd0 the manifest is already 50,218 characters, 84% of this, and the
+# margin is one corpus away from being spent.
+MANIFEST_CHAR_CAP = 60000
+
+
+async def _doc_manifest(
+    parent_id: uuid.UUID, cap: int = MANIFEST_CHAR_CAP
+) -> tuple[str, dict]:
+    """The planner's view of the working set, and what the cap cost to build it.
+
+    Returns the text and a record: how many documents the result held, how
+    many survived, and how many the cap dropped.
+
+    Capped per document rather than by slicing the joined string. A slice cuts
+    mid-line, so the last document the planner sees arrives with half a summary
+    and no way to tell that is what happened; and counting what survived would
+    then mean counting "- " prefixes in text that contains a summary with a
+    newline in it (one of the 4,019 summaries in the corpus does). Assembling
+    document by document makes both exact.
+
+    Dropping the tail is the right behaviour when something must go: the rows
+    arrive in rank order, so what is lost is what retrieval ranked last. The
+    defect was never the dropping, only that it happened silently.
+    """
+    rows = await _manifest_rows(parent_id)
+    # Position is rank only when there is a rank. A curated result -- documents
+    # merged in, reached through the graph, or attached by hand -- can carry
+    # rows with no rank at all, and one in this corpus has 178 of 178. Ordering
+    # by a null column leaves the sequence arbitrary, so banding on position
+    # would hand five times the budget to whichever ten happened to come first
+    # and drop the rest of the tail on the same non-reason. Where the ranking is
+    # incomplete, nothing is privileged: every document gets the tail budget and
+    # the record says the banding did not apply.
+    unranked = sum(1 for r in rows if r.get("rank") is None)
+    lines: list[str] = []
+    total = shown = 0
+    ranked_seen = 0
+    used = 0
+    full = False
+    for r in rows:
+        total += 1
+        # Per row, not per result. A ranked row keeps its place in the band; an
+        # unranked one takes the tail budget rather than a place it has not
+        # earned. Deciding this for the whole result would mean one attached
+        # document stripping the head budget from every ranked one beside it,
+        # which is worse than the problem: no result in this corpus mixes the
+        # two, but merge and graph expansion are how one would.
+        has_rank = r.get("rank") is not None
+        if has_rank:
+            ranked_seen += 1
+        block = [_manifest_line(
+            r, HEAD_SUMMARY_CHARS if (has_rank and ranked_seen <= HEAD_DOCUMENTS)
+            else TAIL_SUMMARY_CHARS)]
         brief = r.get("briefing")
         if brief:
             props = brief.get("properties")
             if props:
-                lines.append(f"    properties: {json.dumps(props, ensure_ascii=False)[:400]}")
+                block.append(f"    properties: {json.dumps(props, ensure_ascii=False)[:400]}")
             toc = brief.get("toc")
             if toc:
-                lines.append(f"    toc: {str(toc)[:600]}")
-    return "\n".join(lines)
+                block.append(f"    toc: {_toc_digest(toc)}")
+        # Exactly what this block adds to the joined string: its own lines,
+        # the newlines between them, and one more to join it to what is
+        # already there -- which the first block does not need. Charging a
+        # newline per line instead counts one that `"\n".join` never writes,
+        # which put `chars` one above the real length and made the effective
+        # cap 59,999: a last document that fit exactly was refused.
+        cost = (sum(len(x) for x in block) + len(block) - 1
+                + (1 if lines else 0))
+        # Once one document does not fit, nothing after it is taken either.
+        # Letting a later, smaller one through would hand the planner a set
+        # that is not the top of the ranking, which is a quieter defect than
+        # the one this replaces. The loop still runs to the end so `dropped`
+        # counts the whole tail rather than the point it began.
+        if full or used + cost > cap:
+            full = True
+            continue
+        used += cost
+        shown += 1
+        lines.extend(block)
+    return "\n".join(lines), {
+        "chars": used, "cap": cap, "unranked": unranked,
+        "documents": total, "shown": shown, "dropped": total - shown,
+    }
 
 
 _sinas_usage_engine = None
@@ -1780,7 +1931,7 @@ async def _argument_plan(
             "must state the overall conclusion. If the documents cannot "
             "support a part of the question, plan NO claim for it — the gap "
             "will be reported honestly downstream.\n\n"
-            "QUESTION:\n" + question + "\n\nDOCUMENTS:\n" + manifest[:60000],
+            "QUESTION:\n" + question + "\n\nDOCUMENTS:\n" + manifest,
         )
         cleaned = reply.strip().strip("`").removeprefix("json").strip()
         data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
@@ -1859,7 +2010,16 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
         await _mark(run_id, answer_id=answer_id)
     _ = caller  # ownership derives from the parent result above
 
-    manifest = await _doc_manifest(parent_id)
+    manifest, manifest_cap = await _doc_manifest(parent_id)
+    # Recorded whether or not anything was dropped: a run that fits is the
+    # evidence the margin still exists, and only a stored number can say when
+    # it stops existing.
+    await _tele(run_id, "draft", manifest_cap=manifest_cap)
+    if manifest_cap["dropped"]:
+        _log.warning(
+            "manifest cap dropped %s of %s documents for run %s (%s of %s chars)",
+            manifest_cap["dropped"], manifest_cap["documents"], run_id,
+            manifest_cap["chars"], manifest_cap["cap"])
     # The manifest is navigation: it decides which documents are worth
     # reading. Nothing it says may become a claim — summaries, classes and
     # annotations are interpretation produced at ingestion and verified
@@ -1931,15 +2091,112 @@ def _coverage_summary(parts: list[dict]) -> dict:
     }
 
 
+def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
+                    parts: list[dict]) -> dict:
+    """Where the answer's concluding claim is, recorded and blocking nothing.
+
+    A reviewer's finding on one question was that the answer ends off-topic
+    with no conclusion. Read across eleven runs carrying gate telemetry, two
+    end on a claim that answers the question, two arguably do, and seven end
+    on a source note or a procedural aside. So the shape is real and common.
+
+    It cannot be derived from `covered_by`. Measured on those eleven, the union
+    of every part's `covered_by` names 11 of 11, 13 of 14, 14 of 14 claims —
+    nearly all of them, trailing case notes included, because a note about
+    Deutsche Bahn genuinely does bear on a part about judicial review.
+    Membership says a claim relates to the question; it says nothing about
+    which claim discharges it. Hence a separate reading.
+
+    `no_conclusion` already exists in the verdict and already blocks, through
+    `correctness`. Two things are wrong with relying on it alone. It is a
+    boolean, so "no conclusion anywhere" and "the conclusion is claim 9 of 14"
+    are the same answer, and those want different remedies: the first is a
+    missing claim, the second is an ordering defect that a rewrite would be the
+    wrong instrument for. And it records nothing when false, so a run cannot be
+    asked whether the gate considered the question at all. It has fired in 35
+    runs from before gate-cycle telemetry existed and in none of the 39 since,
+    while at least three of the eleven read by hand end with no conclusion
+    anywhere — 6d7b9989 among them, whose two sibling runs on the same question
+    both close with "The Commission may therefore lawfully take a forensic
+    copy" and which simply has no such claim.
+
+    So both are recorded: the gate's own boolean, and the sequence it puts the
+    conclusion at. Where they disagree is the measurement worth having.
+
+    `single_part` rides along because it decides whether any of the coverage
+    machinery meant anything on this run. A question that decomposes to one
+    part cannot fail coverage — `parts: 1, covered: 1` is the whole check, and
+    every `only_*` counter is computed over covered parts, so all of them are
+    inert. Four of 34 runs decompose that way, Q17 reproducibly across three
+    references. On those runs this record is the only whole-answer signal
+    there is, which is the argument for keeping it.
+
+    Blocks nothing, like `_audit_coverage` before it: recorded so the next
+    batch can say how often each shape happens, and the decision comes after.
+
+    Pure.
+    """
+    last = max(claims_by_seq) if claims_by_seq else None
+    raw = data.get("concludes_at")
+    at = None
+    if not isinstance(raw, bool) and raw is not None:
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            n = None
+        # A sequence naming no claim in the answer is not a location. The gate
+        # can return one: `covered_by_missing` exists because it does.
+        if n is not None and n.is_integer() and int(n) in claims_by_seq:
+            at = int(n)
+    return {
+        "last": last,
+        "concludes_at": at,
+        # The same claim, by identity. A sequence is a position in a list the
+        # run is still editing: a drop renumbers everything after it, and
+        # `_compact_claim_sequences` closes the gaps at publication, so a
+        # number recorded mid-run can name a different claim in the answer a
+        # reviewer reads. Measured on run 493712fa: the gate recorded 12, the
+        # claim at 11 was dropped, and the conclusion published as claim 11
+        # while 12 became a claim about sealed envelopes. The number is kept
+        # because it is the gate's own reading and the disagreement measure
+        # below depends on it; the id is what still resolves afterwards.
+        "concludes_claim_id": (str(claims_by_seq[at]) if at is not None
+                               else None),
+        # The three findings this has to keep apart. `ends_on_it` true is an
+        # answer that closes; false with a sequence is a conclusion buried at
+        # that sequence; null is no conclusion anywhere.
+        "ends_on_it": (at is not None and at == last),
+        "shape": ("closes" if at is not None and at == last
+                  else "buried" if at is not None
+                  else "absent"),
+        # The gate's own boolean, beside the position it gave. Disagreement
+        # between the two is the thing to count, which is why this is read
+        # strictly rather than for truthiness: `bool("false")` is True, and a
+        # non-canonical scalar read that way would manufacture exactly the
+        # disagreement this exists to measure. The prompt asks for a boolean,
+        # so anything else is a reply that did not answer, recorded as False.
+        #
+        # Worth knowing, and NOT changed here: the consumer that blocks reads
+        # the same field for truthiness (`if data.get("no_conclusion")`), so a
+        # reply of "false" would hold the answer back while this records False.
+        # That divergence is a defect in the blocking path, not in the record,
+        # and fixing it changes what publishes — out of scope for a change that
+        # blocks nothing. It is a reason to have the record.
+        "gate_said_none": data.get("no_conclusion") is True,
+        "single_part": len(parts) == 1,
+    }
+
+
 async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
     unaccounted: list[str] | None = None,
     fed: list[dict] | None = None,
     system_waived: list[str] | None = None,
-
-
+    closing: dict | None = None,
     coverage: dict | None = None,
+    naming_mismatches: list[dict] | None = None,
+    checks: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -1999,11 +2256,26 @@ async def _record_gate_cycle(
         # a running total and no dates, so this is the only place the arrival
         # of an obligation is recorded.
         "fed": fed or [], "system_waived": system_waived or [],
+        # Which claims named a case they do not cite. Its own key rather than
+        # a line in `issues`, because this one is on trial: it reports a
+        # different defect from the naming notes it travels with, and whether
+        # it deserves a stronger channel than an issue is a question about its
+        # false-positive rate. Nothing can answer that unless each cycle's
+        # findings are counted where they can be read back per run.
+        "naming_mismatches": naming_mismatches or [],
+        # eligible / judged / flagged per check. Movement, not correctness:
+        # a check judging 200 and flagging 3 every run reads the same whether
+        # those 3 are the right 3 or not.
+        "checks": checks or {},
         # Beside the parts it summarises, not only as a flat key. The parts in
         # this dict already carry the per-part audit, so leaving the summary
         # flat would put a last-write count next to a per-cycle history and
         # invite reading one as the other.
         "coverage": coverage or {},
+        # Beside the coverage summary for the same reason it is: both are
+        # answer-scoped readings of this cycle, and a flat key would be a
+        # last-write sitting next to a history.
+        "closing": closing or {},
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
@@ -2231,12 +2503,20 @@ async def _gate_answer(
     vocabulary, no counting floors — a stateless judge, per part of the
     question.
 
-    Returns (publishable, missing, issues, correctness, points).
+    Returns (publishable, missing, issues, correctness, points, cause).
+    `cause` is "coverage", "accounting" or "" — what held the answer back, so a
+    partial is named by the thing that caused it.
     `publishable` and `correctness` are the hard gate; `issues` are
     best-effort remediation targets that must never block publication on
     their own; `points` are the things revision must be given passages for —
     one entry per part of the question the claims do not answer, then each
     stronger source the gate named.
+
+    Two things clear `publishable`: every part of the question covered, and no
+    source the review itself named left neither cited nor waived. The second is
+    `obligations.actionable`, not `obligations.unaccounted` — the difference is
+    a system waiver, which retires an obligation without accounting for it and
+    so can never be discharged by another cycle.
 
     Everything the gate finds is returned. It used to leave some of it in a
     module-level dict, which a later edit deleted the declaration of — so
@@ -2247,7 +2527,8 @@ async def _gate_answer(
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
-                select(AnswerClaim.sequence, AnswerClaim.claim_text)
+                select(AnswerClaim.sequence, AnswerClaim.claim_text,
+                       AnswerClaim.id)
                 .where(AnswerClaim.answer_id == answer_id)
                 .order_by(AnswerClaim.sequence)
             )
@@ -2281,7 +2562,8 @@ async def _gate_answer(
     # cannot call a judgment "plainly more authoritative" than a bulletin
     # article without being shown which document is which.
     mrows = await _manifest_rows(parent_result_id) if parent_result_id else []
-    claims = "\n".join(f"{seq}. {text}" for seq, text in rows)
+    claims = "\n".join(f"{seq}. {text}" for seq, text, _ in rows)
+    claims_by_seq = {seq: cid for seq, _, cid in rows}
     source_lines = "\n".join(
         f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
         f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
@@ -2345,6 +2627,7 @@ async def _gate_answer(
 'stages are NOT in tension; when in doubt, null. Or null.>",'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
+        ' "concludes_at": <the sequence number of the claim that draws that overall conclusion, or null if no claim does. A claim that states the answer to the question, not one that reports what a single source says.>,'
         ' "unused_sources": ["<filename>: <the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>", ...]}',
     )
     # Only the parse is guarded. A wide try around the whole body turns a
@@ -2415,7 +2698,7 @@ async def _gate_answer(
         # a fixed decomposition binding instead of advisory. Without them the
         # drift returns through the verdict, which is how a part the question
         # does not ask was once added and immediately marked covered.
-        claim_seqs = {seq for seq, _ in rows}
+        claim_seqs = {seq for seq, _, _ in rows}
         seen: dict[int, dict] = {}
         for x in (data.get("parts") or []):
             if not isinstance(x, dict):
@@ -2437,7 +2720,7 @@ async def _gate_answer(
             for n, a in enumerate(fixed, start=1)
         ]
     else:
-        claim_seqs = {seq for seq, _ in rows}
+        claim_seqs = {seq for seq, _, _ in rows}
         parts = [
             {**x, **_audit_coverage(_seq_list(x.get("covered_by")), claim_seqs,
                                     with_evidence, unresponsive_seqs)}
@@ -2551,6 +2834,11 @@ async def _gate_answer(
     # The tie is answer-scoped because it cannot honestly be finer: the gate
     # names sources without saying which part each bears on.
     unaccounted = await obligations.unaccounted(run_id, answer_id)
+    # What the gate blocks on is narrower than what it reports. See
+    # `obligations.actionable`: a system-waived source stays unaccounted
+    # by design, and gating on it would make the run unpublishable rather
+    # than late.
+    blocking = await obligations.actionable(run_id, answer_id)
     if unaccounted:
         # Ahead of the per-source lines, because those read as "a better
         # source exists" and the reviser is told to add a claim only where the
@@ -2565,6 +2853,24 @@ async def _gate_answer(
             "fully answered. Adding a claim that cites one is in scope. "
             "Waiving it with a rationale you can only give after reading its "
             "passages is in scope. Leaving it untouched is not."))
+    # Read before the cycle is recorded, because the record carries the count
+    # and the reviser's feedback is built from the same read. Two reads could
+    # disagree, and a telemetry key that disagrees with the feedback it
+    # describes is worse than no key.
+    mismatched, mismatch_failed = await claim_naming.safe_mismatches_for(answer_id)
+    # A check that cannot run says so where its findings go. An opted-in class
+    # with no declared identifier shape yields no mismatches, and no mismatches
+    # is what a clean answer yields too, so the silence rides `issues` rather
+    # than a telemetry key nobody reads unless already suspicious.
+    unshaped = await claim_naming.unshaped_message()
+    # How far each check got, beside what it found. Recorded every run so a
+    # batch can be compared with the one before it and a check that stopped
+    # reaching anything is visible without anyone deciding to look.
+    reach = await claim_naming.reach_for(answer_id)
+    mismatch_notes = [
+        claim_naming.mismatch_message(m)
+        for m in mismatched[:claim_naming.MAX_FINDINGS]
+    ]
     await _record_gate_cycle(
         run_id, reparse=reparse, unaccounted=unaccounted,
         fed=[{"doc": u["doc"], "feeds": int(u["fed"]) + 1} for u in feed],
@@ -2578,20 +2884,70 @@ async def _gate_answer(
                 "covered_by_unsupported": x.get("covered_by_unsupported") or [],
                 "covered_by_unresponsive": x.get("covered_by_unresponsive") or []}
                for x in parts],
-        coverage=_coverage_summary(parts))
+        coverage=_coverage_summary(parts),
+        naming_mismatches=[
+            {"claim": m.seq, "names": list(m.named), "cites": list(m.cited)}
+            for m in mismatched
+        ],
+        checks=reach,
+        closing=_closing_record(data, claims_by_seq, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,
     # deterministically, and only ever as an issue. The claim is true; it is
     # written so the reader cannot follow it, which is not grounds to hold an
     # answer back.
+    #
+    # The mismatch notes go first. They report the opposite defect and a worse
+    # one: not a source the claim declines to name, but a source it names
+    # wrongly, which sends the reader somewhere rather than nowhere. They are
+    # issues too, for now. One observed true positive against 475 published
+    # claims is not evidence enough to hold answers back on, and moving them
+    # to `correctness` once a sweep has measured the rate is a change to this
+    # line alone.
+    issues += mismatch_notes
+    if unshaped:
+        issues.append(unshaped)
+    if mismatch_failed:
+        issues.append(mismatch_failed)
     issues += await claim_naming.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
-    missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")
-    publishable = bool(data.get("publishable")) and not uncovered
+    if uncovered:
+        missing = "; ".join(uncovered)
+    elif blocking:
+        # Named in `missing` and not only in `issues`, because `missing` is what
+        # the remediation message leads with, what `_gate_key` dedupes on, and
+        # what the partial note explains the run by. An answer held for a debt
+        # whose `missing` was empty would be held for a reason it never stated.
+        missing = (
+            f"{len(blocking)} source(s) this review named as bearing on the "
+            "question are neither cited nor waived: " + ", ".join(blocking[:5])
+        )
+    else:
+        missing = str(data.get("missing") or "")
+    publishable = (
+        bool(data.get("publishable")) and not uncovered and not blocking
+    )
+    # Which of the three held it, decided here because here is where all three
+    # are known. The caller would have to infer it from `missing`'s wording, and
+    # a partial labelled `coverage` for a run whose every part was covered is
+    # the mislabelling `consistency` was split out to stop.
+    #
+    # `holistic` is the judge rejecting the answer as a whole: it said
+    # publishable false while marking every part covered and naming no unmet
+    # source, so there is no part to point at. Falling through to `coverage`
+    # there would report a coverage failure for a run with no uncovered part,
+    # which is the same defect one case further along.
+    cause = (
+        "coverage" if uncovered
+        else "accounting" if blocking
+        else "holistic" if not bool(data.get("publishable"))
+        else ""
+    )
     # Coverage gaps first: they are what blocks publication, and the reviser
     # is given passages for a bounded number of points.
-    return publishable, missing, issues + correctness, correctness, uncovered + stronger
+    return (publishable, missing, issues + correctness, correctness,
+            uncovered + stronger, cause)
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -2668,11 +3024,48 @@ async def _pre_publish_sweep(
     # same kind — 37 across 23 stored runs — and recording the subject in one
     # place and not the other is how the mirrored defects in #103 and #106
     # appeared: two writes of the same fact that drift apart.
-    await _tele(run_id, "validate", final_sweeps=sweeps + 1,
-                final_sweep_result={
-                    "failed": len(fv["failed"]),
-                    "overreaching": len(f_over),
-                    "overreaching_claims": _overreach_detail(f_over)})
+    #
+    # And one key per sweep. `final_sweep_result` was flat, and `_tele` merges
+    # by key and cannot delete, so a run that swept twice kept only the second
+    # finding. That is the fifth field here to need numbering, after `round_N`,
+    # `revision_N`, `cycle_N` and `gate_N`, and it loses the more interesting
+    # half: the first sweep is the one that spends the repair attempt, so what
+    # it objected to and whether the repair answered it were both unreadable.
+    # Q46 run 75b569ba swept twice and its first finding is gone.
+    #
+    # `final_sweeps` stays as it is. It is the control-flow counter this
+    # function reads back to decide whether the repair chance is spent, and
+    # numbering the detail does not change what it means.
+    #
+    # `final_sweep_dropped`, `final_sweep_dropped_detail` and
+    # `final_sweep_published_after_drop` stay flat, and are safe: they are
+    # written only in the `sweeps >= 1` branch below, which returns or raises,
+    # so at most one sweep per run reaches them. They also share the prefix
+    # without being cycles, which is exactly what `_is_numbered` is for.
+    cycle = await _next_cycle_key(run_id, "validate", "final_sweep")
+    # `judged` and `errors` say whether the sweep looked; `failed` and
+    # `overreaching` say what it found. Only the second pair was recorded, and
+    # the two readings are the same numbers.
+    #
+    # `validate_answer_evidence` returns errors beside failures, and an errored
+    # span is skipped before any verdict is written: it is not in `failed`, not
+    # in `overreaching`, and its row keeps whatever it had. So a sweep where
+    # every span errored recorded `failed: 0, overreaching: 0` and returned
+    # True, which is character for character what a sweep that judged all forty
+    # and objected to nothing records.
+    #
+    # Recorded, not acted on. The early return below still reads only `failed`
+    # and `overreaching`. Making an error object is a behaviour change on a
+    # path that has not fired once in 231 published runs — no published answer
+    # carries an unjudged or failing span — and it should arrive with evidence
+    # from this record rather than on the strength of the argument for it.
+    await _tele(run_id, "validate", final_sweeps=sweeps + 1, **{
+        cycle: {
+            "judged": fv["judged"],
+            "errors": len(fv.get("errors") or []),
+            "failed": len(fv["failed"]),
+            "overreaching": len(f_over),
+            "overreaching_claims": _overreach_detail(f_over)}})
     if not fv["failed"] and not f_over:
         return True
     fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
@@ -2715,7 +3108,7 @@ async def _pre_publish_sweep(
         # survives still answers the question. If it does, publish; the
         # partial state is reserved for the corpus genuinely not answering,
         # not for the repair budget running out one claim short.
-        ok, missing, issues, correctness, _pts = await _gate_answer(
+        ok, missing, issues, correctness, _pts, sweep_cause = await _gate_answer(
             sinas, question, answer_id, run_id)
         # This pass opens a cycle like any other, and used to discard its
         # issues because the caller had no use for them. The record did: a
@@ -2727,6 +3120,18 @@ async def _pre_publish_sweep(
         if ok and not correctness:
             await _tele(run_id, "validate", final_sweep_published_after_drop=True)
             return True
+        if sweep_cause == "holistic":
+            raise PartialOutcome(
+                "holistic",
+                "after removing claims the final review could not support, the "
+                "review rejected the answer as a whole without naming a part it "
+                "fails to address" + (f" — {missing}" if missing else ""))
+        if sweep_cause == "accounting":
+            raise PartialOutcome(
+                "accounting",
+                "after removing claims the final review could not support, a "
+                "source this review named as bearing on the question is neither "
+                "cited nor waived — " + (missing or " ".join(fb))[:600])
         raise PartialOutcome(
             "coverage",
             "after removing claims the final review could not support, the "
@@ -3580,6 +3985,136 @@ async def _revise_answer(
     return touched
 
 
+def _overreach_seqs(verdict: dict) -> set[int]:
+    """The claim numbers this round found overreaching. Pure.
+
+    A verdict entry carries `claim_sequence`; anything that is not a whole
+    number names no claim and is dropped rather than guessed at.
+    """
+    out: set[int] = set()
+    for o in (verdict.get("overreaching") or []):
+        if not isinstance(o, dict):
+            continue
+        raw = o.get("claim_sequence")
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if n.is_integer():
+            out.add(int(n))
+    return out
+
+
+def _seqs_of(entries) -> set[int]:
+    """The claim numbers named by a list of verdict entries. Pure.
+
+    Same digit test the overreach reader applies, and for the same reason:
+    int() reads 9.5 as claim 9 and True as claim 1, and a sequence that is not
+    a whole number names no claim.
+    """
+    out: set[int] = set()
+    for f in (entries or []):
+        if not isinstance(f, dict):
+            continue
+        raw = f.get("claim_sequence")
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if n.is_integer():
+            out.add(int(n))
+    return out
+
+
+def _failed_seqs(verdict: dict) -> set[int]:
+    """The claim numbers with a span that failed validation this round. Pure."""
+    return _seqs_of(verdict.get("failed"))
+
+
+def _errored_seqs(verdict: dict) -> set[int]:
+    """The claim numbers whose span could not be judged this round. Pure.
+
+    An errored row is never marked validated, so it stays pending exactly as a
+    failing one does. Errors carried no sequence until this was needed, so a
+    verdict from before then names none and this is empty rather than wrong.
+    """
+    return _seqs_of(verdict.get("errors"))
+
+
+def _pending_seqs(verdict: dict) -> set[int]:
+    """The claim numbers holding a row that will still be pending next round.
+
+    Failed and errored together, because the criterion below cares about one
+    property they share: the row is not validated, so the claim is re-judged
+    next round whether or not anybody touched it.
+    """
+    return _failed_seqs(verdict) | _errored_seqs(verdict)
+
+
+def _still_narrowing(overreach: list[set[int]], pending: list[set[int]]) -> bool:
+    """Whether a claim was re-marked overreaching *because it was rewritten*.
+
+    Repetition alone does not prove a rewrite, and the difference is the whole
+    correctness of this criterion.
+
+    Evidence is judged with `pending_only=True`. A claim whose spans have ALL
+    PASSED holds no pending row, is not re-judged, and produces no coverage
+    verdict, so it stops being reported rather than being reported again. For
+    that claim, a repeat can only mean the revision bound new spans — revising
+    deletes the claim's evidence and re-binds it, and `_bind_spans` writes
+    `validated=False` — which puts it back in front of the judge. Repetition is
+    proof of movement.
+
+    But a claim carrying a FAILING span keeps that row pending whether anybody
+    touches it or not. It is re-judged every round for free, and its coverage
+    verdict comes back with it. Repetition there proves nothing, and counting
+    it would buy rounds for a claim nobody is working on.
+
+    A span the judge could not read at all does the same thing. An errored row
+    is never marked validated, so it is pending on exactly the same terms, and
+    the claim comes back for free. It reaches here through `_pending_seqs`,
+    which is failed and errored together, because what matters is the property
+    the two share rather than which of them happened.
+
+    That is a fact about the EARLIER round, and only the earlier one. A claim
+    clean in the earlier round held no pending row, so it came back solely
+    because its evidence was re-bound, and it was rewritten. If the rewrite
+    then bound a span that failed, that failure is the product of the work,
+    not evidence the claim was riding along untouched. Excluding it reads a
+    new defect as proof no revision happened, which inverts the signal.
+
+    So the exclusion is `pending[-2]` alone: a sequence holding an unvalidated
+    row in the earlier of the two rounds. What survives is a claim that was clean on
+    the evidence, was re-judged anyway, and can only have been re-judged
+    because it was rebuilt.
+
+    Q46, run `804a684d`, is the case. Seq 12 was marked overreaching in round
+    3 with the round's `failed` at zero, was rewritten from an assertion of
+    inspection authority into a statement of what bounds the overlap, was
+    marked again in round 4, and was deleted when the budget ran out. Under
+    `failed[-1] | failed[-2]` it does not qualify, because the rewrite's own
+    span failed.
+
+    A claim cannot ride this indefinitely: qualifying requires being clean in
+    the earlier round, so one that keeps failing is excluded at the very next
+    decision, and HARD_VALIDATE_ROUNDS still binds.
+
+    What this still cannot say is how much better the claim got: the coverage
+    verdict is `full` or `partial` with no degree, so "partial again" reads the
+    same whether the claim shrank by half or barely changed. Reliable that work
+    is happening, silent on how much.
+
+    Pure.
+    """
+    if len(overreach) < 2 or len(pending) < 2:
+        return False
+    return bool((overreach[-1] & overreach[-2]) - pending[-2])
+
+
 async def _stage_validate_publish(
     run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int | None = None
 ) -> None:
@@ -3597,6 +4132,16 @@ async def _stage_validate_publish(
 
     await _mark(run_id, status="validating")
     failed_history: list[int] = []
+    # Kept apart from `failed_history` on purpose. That list counts failed
+    # evidence rows and `answer_regress` reads the same counts out of
+    # `round_N` by prefix; folding overreach into it would change what every
+    # stored run means after the fact.
+    overreach_history: list[set[int]] = []
+    # Which claims hold an unvalidated row, per round: failed spans and spans
+    # the judge could not read. Either way the row stays pending, so the claim
+    # is re-judged every round whether or not anybody touched it, and its
+    # coverage verdict repeating says nothing about revision.
+    pending_seq_history: list[set[int]] = []
     round_no = 0
     while True:
         round_no += 1
@@ -3606,25 +4151,50 @@ async def _stage_validate_publish(
                 "budget_ceiling",
                 f"run spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) "
                 f"in validation round {round_no}")
+        extended_because = None
         if round_no > MAX_VALIDATE_ROUNDS:
             converging = (len(failed_history) >= 2
                           and failed_history[-1] < failed_history[-2])
-            if round_no > HARD_VALIDATE_ROUNDS or not converging:
+            # A second reason to grant a round, disjoint from the first rather
+            # than folded into it: a claim marked overreaching twice running is
+            # a claim the reviser is rewriting, and the failed-row count cannot
+            # see that because a coverage verdict never fails a row.
+            narrowing = _still_narrowing(overreach_history, pending_seq_history)
+            if round_no > HARD_VALIDATE_ROUNDS or not (converging or narrowing):
                 break
+            extended_because = "converging" if converging else "narrowing"
             await _tele(run_id, "validate", extended_to_round=round_no)
         async with AsyncSessionLocal() as session:
             verdict = await validate_answer_evidence(session, caller, answer_id,
                                               pending_only=True, run_id=run_id)
         failed_history.append(len(verdict["failed"]))
+        overreach_history.append(_overreach_seqs(verdict))
+        pending_seq_history.append(_pending_seqs(verdict))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
             "overreaching": len(verdict.get("overreaching") or []),
+            # Why this round exists at all, when it is past the base budget.
+            # Carried in a local from the decision to the one write at the end
+            # of the round, rather than written where it happens: a flat key
+            # would keep only the last extension of the run.
+            **({"extended_because": extended_because} if extended_because else {}),
             # The count stays where it is: answer_regress reads it by prefix.
             # This is the same finding with its subject attached, so a run can
             # be asked which claim was objected to and on what ground.
             "overreaching_claims": _overreach_detail(
                 verdict.get("overreaching") or []),
+            # The sequences behind the `failed` count above. Without them the
+            # exclusion this criterion turns on cannot be checked after the
+            # fact: establishing that Q46 seq 12 was the round-4 failure meant
+            # matching the rounds-exhausted removal record against the claim
+            # text, which is an inference, where `failed` at zero in round 3 is
+            # a measurement. Sorted so the key is stable to compare across runs.
+            "failed_claims": sorted(_failed_seqs(verdict)),
+            # Beside them because they mean the same thing to the criterion:
+            # an unjudged row is as pending as a failed one, and the exclusion
+            # is only checkable after the fact if both are recorded.
+            "errored_claims": sorted(_errored_seqs(verdict)),
         }})
         # A claim whose every span passes can still assert more than those
         # spans establish — "the whole period" on passages about a second
@@ -3647,7 +4217,7 @@ async def _stage_validate_publish(
             if pending is None:
                 async with AsyncSessionLocal() as session:
                     question = (await session.get(QueryRun, run_id)).question
-                ok, missing, issues, correctness, points = await _gate_answer(
+                ok, missing, issues, correctness, points, gate_cause = await _gate_answer(
                     sinas, question, answer_id, run_id)
                 # Amended here, where the gate's output is final, rather than
                 # on the branches below. `issues` is complete the moment
@@ -3681,6 +4251,22 @@ async def _stage_validate_publish(
                             last_attempt=True)
                         return await _stage_validate_publish(run_id, sinas, 0)
                     if not ok:
+                        # Named by what held it. `accounting` is not a coverage
+                        # gap: every part was covered and a named source was
+                        # left neither cited nor waived, and calling that
+                        # "coverage" tells the reader the sources were silent
+                        # on something they were not silent on.
+                        if gate_cause == "accounting":
+                            raise PartialOutcome(
+                                "accounting",
+                                "the answer does not account for every source this "
+                                "review named as bearing on the question — " + missing)
+                        if gate_cause == "holistic":
+                            raise PartialOutcome(
+                                "holistic",
+                                "the review rejected the answer as a whole without "
+                                "naming a part it fails to address"
+                                + (f" — {missing}" if missing else ""))
                         raise PartialOutcome(
                             "coverage",
                             f"the validated claims no longer answer the question — {missing}")
@@ -3765,7 +4351,7 @@ async def _stage_validate_publish(
         await _record_removal(run_id, "rounds_exhausted", dropped)
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
-    ok, missing, issues, correctness, points = await _gate_answer(
+    ok, missing, issues, correctness, points, gate_cause = await _gate_answer(
         sinas, question, answer_id, run_id)
     # Same reason as the other call site: final here, and some paths below
     # return before any later write.
@@ -3793,6 +4379,17 @@ async def _stage_validate_publish(
                                  points or ([missing] if missing else []),
                                  last_attempt=True)
             return await _stage_validate_publish(run_id, sinas, 0)
+        if not ok and gate_cause == "accounting":
+            raise PartialOutcome(
+                "accounting",
+                "validation exhausted with a source this review named as bearing "
+                "on the question neither cited nor waived — " + missing)
+        if not ok and gate_cause == "holistic":
+            raise PartialOutcome(
+                "holistic",
+                "validation exhausted and the review still rejected the answer as "
+                "a whole without naming a part it fails to address"
+                + (f" — {missing}" if missing else ""))
         raise PartialOutcome(
             "coverage",
             ("validation exhausted and the surviving claims do not answer the "

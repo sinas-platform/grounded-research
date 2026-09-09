@@ -68,6 +68,63 @@ def wrap_property_value(value):
     return {"_": value}
 
 
+def _prompt_property_lines(properties: list[dict]) -> str:
+    """One line per property, as the extractor sees it.
+
+    Cardinality is stated only when it is `many`: saying "cardinality: one" on
+    every scalar would add a line's worth of tokens per property to every chunk
+    prompt to restate the default. What matters is telling a `many` property
+    that it may return several, which nothing did.
+    """
+    return "\n".join(
+        f'- "{p["name"]}": {p.get("description") or ""} '
+        f'(schema: {json.dumps(p["schema"])}'
+        + (", cardinality: many — return every value that applies, as a "
+           "JSON array" if p.get("cardinality") == "many" else "")
+        + ")"
+        for p in properties
+    )
+
+
+_SILENT_PROPS: set = set()
+
+
+def _prop_for_prompt(p) -> dict:
+    """What the extractor is told about one property.
+
+    `guidance` is the field the schema author fills and it wins: it is the
+    extraction-specific instruction, where `description` is the generic one. The
+    prompt interpolated `description`, which is null on every property in this
+    deployment, so nothing was sent. That makes the precedence bug latent rather
+    than live here, which is exactly how it would be missed later.
+    So the instructions were written, stored, and never sent — the extractor
+    saw `- "case_number":  (schema: ...)` and had to guess. Entity types have
+    always read `guidance or description`; properties simply never did.
+
+    `cardinality` goes with it. A property declared `many` never told the model
+    it may return more than one, and the JSON schema it did send says
+    `"type": "string"`, so the model returned one.
+    """
+    text = (p.guidance or p.description or "").strip()
+    if not text and p.id not in _SILENT_PROPS:
+        # Once per property per process, not once per document. A property with
+        # no instruction is indistinguishable from one whose instruction was
+        # dropped, which is how this went unnoticed: the extractor is asked for
+        # a value and told nothing about what the field means.
+        _SILENT_PROPS.add(p.id)
+        logging.getLogger(__name__).warning(
+            "property %r has neither description nor guidance — the extractor "
+            "is given only its name and JSON schema", p.name,
+        )
+    return {
+        "name": p.name,
+        "description": text,
+        "schema": p.schema,
+        "cardinality": p.cardinality,
+        "id": p.id,
+    }
+
+
 def classify_by_rules(filename: str) -> tuple[str, float, str] | None:
     for pattern, cls, conf, reason in CLASS_RULES:
         if re.search(pattern, filename):
@@ -244,6 +301,25 @@ def _presence_filter(name: str, content_lower: str) -> bool:
     return _locate(name, content_lower) is not None
 
 
+def _should_write_summary(
+    *, existing: str | None, incoming: str | None, resummarise: bool
+) -> bool:
+    """Whether this run may write the document's summary.
+
+    An existing summary is kept by default: re-running ingestion must not
+    silently rewrite a description someone may have read or corrected.
+
+    That guard also sealed them. A description written under the wrong
+    instructions — and every description in a deployment was, while the class
+    instructions were never sent — could not be corrected by any route,
+    because the only writer refused to touch a document that already had one.
+    So the caller may say so explicitly, and only explicitly.
+    """
+    if not (incoming or "").strip():
+        return False
+    return resummarise or not (existing or "").strip()
+
+
 def _front_matter_prompt(
     *,
     filename: str,
@@ -253,6 +329,7 @@ def _front_matter_prompt(
     known_entities: list[str],
     class_hint: tuple[str, float, str] | None,
     properties: list[dict] | None,
+    summary_guidance: str | None = None,
 ) -> str:
     # A class declared by the source or already assigned is FIXED: no
     # pick-one list, no classification ask — the call spends its attention
@@ -276,12 +353,21 @@ def _front_matter_prompt(
         if class_hint and not fixed_class
         else ""
     )
+    # What a good summary of THIS class looks like is deployment knowledge, so
+    # the class says it and the platform only passes it on. Nothing read the
+    # column before: every instruction a deployment wrote was stored, exported
+    # and never sent, which is the same defect as the property guidance one
+    # commit earlier and looks identical from outside — a field that imports,
+    # validates and exports while nothing consumes it.
+    summary_block = ""
+    if (summary_guidance or "").strip():
+        summary_block = (
+            "\nSUMMARY (follow this class's instructions exactly):\n"
+            f"{summary_guidance.strip()}\n"
+        )
     prop_block = ""
     if properties:
-        plines = "\n".join(
-            f'- "{p["name"]}": {p.get("description") or ""} (schema: {json.dumps(p["schema"])})'
-            for p in properties
-        )
+        plines = _prompt_property_lines(properties)
         prop_block = (
             "\nPROPERTIES to extract for this class (null when the document "
             f"does not state a value):\n{plines}\n"
@@ -295,12 +381,12 @@ ENTITY TYPES (follow each type's guidance exactly):
 
 Entities already recorded for this document (do NOT repeat them):
 {known}
-{prop_block}
+{summary_block}{prop_block}
 Reply JSON schema:
 {{
   "document_class": "<class name>",
   "class_confidence": <0..1>,
-  "summary": "<8-12 sentence factual summary: parties, authority, dates, outcome, legal basis>",
+  "summary": "<8-12 sentence factual summary of the document>",
   "properties": {{"<property name>": <value per its schema> , ...}},
   "entities": [{{"name": "<canonical name>", "type": "<entity type>", "confidence": <0..1>}}, ...]
 }}
@@ -356,6 +442,7 @@ async def oneshot_ingest_document(
     classes: list[tuple[uuid.UUID, str, str]],
     entity_types: list[dict],
     write: bool = True,
+    resummarise: bool = False,
 ) -> dict[str, Any]:
     """Run the one-shot path for a single document. Returns a report dict."""
     doc = await session.get(Document, document_id)
@@ -451,10 +538,21 @@ async def oneshot_ingest_document(
                 )
             )
         ).scalars().all()
-        class_props = [
-            {"name": p.name, "description": p.description, "schema": p.schema, "id": p.id}
-            for p in rows
-        ]
+        class_props = [_prop_for_prompt(p) for p in rows]
+
+    # Read here rather than carried in `classes`: that tuple is unpacked at
+    # four call sites, and widening a tuple several readers unpack is how the
+    # naming check was silently killed twice this week. One small read costs
+    # less than the drift.
+    summary_guidance = None
+    if known_class_id:
+        summary_guidance = (
+            await session.execute(
+                select(DocumentClass.summarization_guidance).where(
+                    DocumentClass.id == known_class_id
+                )
+            )
+        ).scalar_one_or_none()
 
     hint = None
     if doc.document_class_id is not None:
@@ -468,6 +566,7 @@ async def oneshot_ingest_document(
     elif rule and not rule_written:
         hint = rule
     prompt = _front_matter_prompt(
+        summary_guidance=summary_guidance,
         filename=doc.filename or "",
         content=content,
         classes=[(n, d) for _, n, d in classes],
@@ -509,12 +608,21 @@ async def oneshot_ingest_document(
                     )
                 )
             ).scalars().all()
-            class_props = [
-                {"name": p.name, "description": p.description, "schema": p.schema, "id": p.id}
-                for p in rows
-            ]
-            if class_props:
+            class_props = [_prop_for_prompt(p) for p in rows]
+            summary_guidance = (
+                await session.execute(
+                    select(DocumentClass.summarization_guidance).where(
+                        DocumentClass.id == cls_id
+                    )
+                )
+            ).scalar_one_or_none()
+            # Guidance is reason enough to ask again. Gating this on the class
+            # having properties meant a class that says how to summarise its
+            # documents and declares no properties never got a guided summary
+            # at all -- which is most of the point of the field.
+            if class_props or (summary_guidance or "").strip():
                 prop_prompt = _front_matter_prompt(
+                    summary_guidance=summary_guidance,
                     filename=doc.filename or "",
                     content=content,
                     classes=[(n, d) for _, n, d in classes],
@@ -531,9 +639,19 @@ async def oneshot_ingest_document(
                 report["llm_calls"] += 1
                 data2 = _parse_json_reply(reply2)
                 data["properties"] = data2.get("properties") or {}
+                # And the summary, which is what the guidance was sent for.
+                # Taking only the properties left the first reply's unguided
+                # summary to be persisted, so the guided one was written,
+                # charged for and thrown away on exactly the path where the
+                # class is not known until the first reply comes back.
+                if (data2.get("summary") or "").strip():
+                    data["summary"] = data2["summary"]
 
     # summary
-    if data.get("summary") and write and not (doc.summary or "").strip():
+    if write and _should_write_summary(
+        existing=doc.summary, incoming=data.get("summary"),
+        resummarise=resummarise,
+    ):
         doc.summary = str(data["summary"])[:8000]
 
     # table of contents: deterministic parse of the stored markdown —
@@ -692,7 +810,7 @@ async def oneshot_ingest_document(
 
 async def oneshot_ingest(
     document_ids: list[uuid.UUID], *, write: bool = True, concurrency: int = 4,
-    sinas: Any | None = None,
+    sinas: Any | None = None, resummarise: bool = False,
 ) -> list[dict[str, Any]]:
     """Drive the one-shot path over many documents. `sinas` accepts any
     object with the client's async invoke(agent, message) shape — the
@@ -741,6 +859,7 @@ async def oneshot_ingest(
                         classes=classes,
                         entity_types=entity_types,
                         write=write,
+                        resummarise=resummarise,
                     )
                 except Exception as exc:  # per-doc isolation
                     r = {"document": str(doc_id), "error": str(exc)[:300]}

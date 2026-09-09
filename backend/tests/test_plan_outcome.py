@@ -1,10 +1,9 @@
 """What became of each planned claim.
 
-Written after a run where a planned claim -- "Advocate General Bobek's
-Nordzucker Opinion sets out how the ne bis in idem principle..." -- was
-retrieved at rank 8, anchored, read whole, extracted without error, and then
-appeared nowhere in the answer. Establishing that took nine queries across the
-plan, the extraction record and the citations. This record answers it in one.
+Written after a run where a planned claim was retrieved at rank 8, anchored,
+read whole, extracted without error, and then appeared nowhere in the answer.
+Establishing that took nine queries across the plan, the extraction record and
+the citations. This record answers it in one.
 """
 
 from __future__ import annotations
@@ -23,18 +22,18 @@ def test_a_planned_claim_the_extractor_found_nothing_for():
 def test_a_planned_claim_shown_and_left_out():
     """The case this exists for: passages extracted, shown, and no drafted
     claim cites any of their documents."""
-    extracts = [{"n": 8, "passages": [{"filename": "62020CC0151.md"},
-                                      {"filename": "62020CC0151.md"}]}]
-    out = _plan_outcome(extracts, drafted=[(1, {"62019CJ0857.md"})])
+    extracts = [{"n": 8, "passages": [{"filename": "a.md"},
+                                      {"filename": "a.md"}]}]
+    out = _plan_outcome(extracts, drafted=[(1, {"b.md"})])
     assert out[0]["state"] == "extracted_unused"
     assert out[0]["passages"] == 2
-    assert out[0]["documents"] == ["62020CC0151.md"]
+    assert out[0]["documents"] == ["a.md"]
     assert out[0]["cited_by"] == []
 
 
 def test_a_planned_claim_the_answer_used():
-    extracts = [{"n": 2, "passages": [{"filename": "62018CC0606.md"}]}]
-    out = _plan_outcome(extracts, drafted=[(3, {"62018CC0606.md"}),
+    extracts = [{"n": 2, "passages": [{"filename": "a.md"}]}]
+    out = _plan_outcome(extracts, drafted=[(3, {"a.md"}),
                                            (5, {"other.md"})])
     assert out[0]["state"] == "used"
     assert out[0]["cited_by"] == [3]
@@ -46,10 +45,10 @@ def test_unused_is_the_claim_that_cannot_be_wrong():
     when one of them was -- so `used` may over-report and `extracted_unused`
     may not. A claim reported unused had none of its documents cited at all.
     """
-    shared = [{"filename": "62018CC0606.md"}]
+    shared = [{"filename": "a.md"}]
     out = _plan_outcome([{"n": 1, "passages": shared},
                          {"n": 2, "passages": shared}],
-                        drafted=[(4, {"62018CC0606.md"})])
+                        drafted=[(4, {"a.md"})])
     assert [o["state"] for o in out] == ["used", "used"], "over-reports, by design"
 
     out2 = _plan_outcome([{"n": 1, "passages": shared},

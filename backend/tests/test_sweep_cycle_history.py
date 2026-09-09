@@ -37,6 +37,23 @@ FLAT = {
 }
 
 
+
+def _unpack_width(module, function, callee) -> int:
+    """How many names the given function unpacks from a call to `callee`.
+
+    Counted from the source so a stub cannot drift from the thing it stands
+    in for. Returns the count of assignment targets on the line that awaits
+    `callee`.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(getattr(module, function))
+    m = re.search(r"^\s*([\w, ]+?)\s*=\s*await\s+" + re.escape(callee) + r"\(", src, re.M)
+    if not m:
+        raise AssertionError(f"no unpack of {callee} found in {function}")
+    return len([t for t in m.group(1).split(",") if t.strip()])
+
 def test_a_flat_key_sharing_the_prefix_is_not_a_cycle():
     """Counting on the prefix alone would open a run's history at
     `final_sweep_4`."""
@@ -143,8 +160,17 @@ def sweep(monkeypatch):
     async def fake_record_removal(run_id, path, swept):
         dropped.append((path, swept))
 
+    # Width taken from the call site rather than written here. `_gate_answer`
+    # has gained a return value twice, and a stub that pins the old width
+    # fails at runtime with no conflict to warn anyone: the branch adding the
+    # value and the branch carrying the stub are each green alone and break
+    # only once merged. Reading the arity from the source under test means
+    # this stub moves with it instead of against it.
+    _gate_arity = _unpack_width(qr, "_pre_publish_sweep", "_gate_answer")
+
     async def fake_gate(sinas, question, answer_id, run_id):
-        return True, "", [], [], []
+        head = (True, "", [], [], [])
+        return head + ("",) * (_gate_arity - len(head))
 
     async def fake_amend(run_id, **kw):
         return None

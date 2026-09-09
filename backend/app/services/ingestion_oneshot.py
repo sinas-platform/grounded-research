@@ -609,14 +609,18 @@ async def oneshot_ingest_document(
                 )
             ).scalars().all()
             class_props = [_prop_for_prompt(p) for p in rows]
-            if class_props:
-                summary_guidance = (
-                    await session.execute(
-                        select(DocumentClass.summarization_guidance).where(
-                            DocumentClass.id == cls_id
-                        )
+            summary_guidance = (
+                await session.execute(
+                    select(DocumentClass.summarization_guidance).where(
+                        DocumentClass.id == cls_id
                     )
-                ).scalar_one_or_none()
+                )
+            ).scalar_one_or_none()
+            # Guidance is reason enough to ask again. Gating this on the class
+            # having properties meant a class that says how to summarise its
+            # documents and declares no properties never got a guided summary
+            # at all -- which is most of the point of the field.
+            if class_props or (summary_guidance or "").strip():
                 prop_prompt = _front_matter_prompt(
                     summary_guidance=summary_guidance,
                     filename=doc.filename or "",
@@ -635,6 +639,13 @@ async def oneshot_ingest_document(
                 report["llm_calls"] += 1
                 data2 = _parse_json_reply(reply2)
                 data["properties"] = data2.get("properties") or {}
+                # And the summary, which is what the guidance was sent for.
+                # Taking only the properties left the first reply's unguided
+                # summary to be persisted, so the guided one was written,
+                # charged for and thrown away on exactly the path where the
+                # class is not known until the first reply comes back.
+                if (data2.get("summary") or "").strip():
+                    data["summary"] = data2["summary"]
 
     # summary
     if write and _should_write_summary(

@@ -262,7 +262,7 @@ async def _load_shared(session):
          "guidance": (t.guidance or t.description or "").strip(),
          "creation_mode": t.creation_mode}
         for t in (await session.execute(select(EntityType))).scalars()]
-    return gazetteer, classes, entity_types
+    return gazetteer, classes, entity_types, guidance_by_class
 
 
 async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
@@ -278,7 +278,8 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
 
     # worklist from data
     async with AsyncSessionLocal() as session:
-        gazetteer, classes, entity_types = await _load_shared(session)
+        gazetteer, classes, entity_types, guidance_by_class = await _load_shared(
+            session)
         work = []  # (id, filename, content)
         class_by_did: dict = {}
         for did in doc_ids:

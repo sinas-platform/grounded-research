@@ -250,12 +250,19 @@ async def _load_shared(session):
     gazetteer = await _load_gazetteer(session)
     classes = [(c.id, c.name, c.description or "") for c in
                (await session.execute(select(DocumentClass))).scalars()]
+    # Keyed beside the properties rather than added to the `classes` tuple:
+    # four call sites unpack that tuple, and widening one several readers
+    # unpack is how the naming check was silently killed twice this week.
+    guidance_by_class = {
+        c.id: c.summarization_guidance
+        for c in (await session.execute(select(DocumentClass))).scalars()
+    }
     entity_types = [
         {"id": t.id, "name": t.name,
          "guidance": (t.guidance or t.description or "").strip(),
          "creation_mode": t.creation_mode}
         for t in (await session.execute(select(EntityType))).scalars()]
-    return gazetteer, classes, entity_types
+    return gazetteer, classes, entity_types, guidance_by_class
 
 
 async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
@@ -271,8 +278,10 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
 
     # worklist from data
     async with AsyncSessionLocal() as session:
-        gazetteer, classes, entity_types = await _load_shared(session)
-        work: list[tuple[uuid.UUID, str, str]] = []  # (id, filename, content)
+        gazetteer, classes, entity_types, guidance_by_class = await _load_shared(
+            session)
+        work = []  # (id, filename, content)
+        class_by_did: dict = {}
         for did in doc_ids:
             doc = await session.get(Document, did)
             if doc is None or (doc.summary or "").strip():
@@ -285,6 +294,10 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
             if version is None or not (version.content_md or "").strip():
                 continue
             work.append((did, doc.filename or "", version.content_md))
+            # Kept beside `work` rather than inside it. Six places unpack that
+            # tuple, and widening a tuple several readers unpack is how the
+            # naming check was silently killed twice this week.
+            class_by_did[did] = doc.document_class_id
     log.info("extract: %d docs need extraction", len(work))
     if not work:
         return {"extracted": 0, "skipped": len(doc_ids)}
@@ -305,24 +318,49 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 select(DocumentClassProperty).where(
                     DocumentClassProperty.document_class_id == cid,
                     DocumentClassProperty.manual.is_(False)))).scalars().all()
-            props_by_class[cid] = [
-                {"name": p.name, "description": p.description,
-                 "schema": p.schema, "id": p.id} for p in rows]
+            # Same shape the one-shot sends, from the same helper: this is the
+            # path bulk ingestion takes, so a prompt fix that lands only in
+            # `ingestion_oneshot` never reaches the documents that arrive in
+            # bulk, which is most of them.
+            props_by_class[cid] = [one._prop_for_prompt(p) for p in rows]
         for wi, (did, fn, content) in enumerate(work):
             rule = one.classify_by_rules(fn)
             hint = rule
-            class_props = None
-            if rule is not None:
+            # A filename rule is one way to know the class, not the only one.
+            # A document that arrives already classified -- source-declared, or
+            # classified on an earlier pass -- has a class whether or not its
+            # name matches a rule, and its class's properties and summary
+            # guidance apply just the same. Deriving both from the rule alone
+            # sent those documents a generic prompt and stored a summary
+            # written to nobody's instructions. The live path in
+            # `ingestion_oneshot` reads the document's own class here; this is
+            # the same read, and this is the path most documents take.
+            # Precedence follows the live path: a class the document already
+            # has wins over one its filename suggests. Persistence keeps the
+            # assigned class either way, so preferring the rule would extract
+            # against one class's properties and store a summary written to its
+            # guidance while the document remains another -- a summary for the
+            # wrong class, which is worse than a generic one.
+            cid = class_by_did.get(did)
+            if cid is not None:
+                # State it rather than only reading its config. Loading a
+                # class's properties while still asking the model to pick
+                # invites a different class back, whose properties are then
+                # discarded and whose summary is not.
+                fixed = next((n for c, n, _ in classes if c == cid), None)
+                if fixed:
+                    hint = (fixed, 1.0, "already assigned")
+            elif rule is not None:
                 cid = next((c for c, n, _ in classes if n == rule[0]), None)
-                if cid is not None:
-                    class_props = props_by_class.get(cid) or None
+            class_props = props_by_class.get(cid) or None if cid else None
             known = known_by_idx[wi]
             front_prompts.append(one._front_matter_prompt(
                 filename=fn, content=content,
                 classes=[(n, d) for _, n, d in classes],
                 entity_types=entity_types,
                 known_entities=[c for c, _ in known.values()],
-                class_hint=hint, properties=class_props))
+                class_hint=hint, properties=class_props,
+                summary_guidance=guidance_by_class.get(cid) if cid else None))
     r1 = await client.run_round("extract-front", agent, front_prompts)
 
     # round 1.5: props follow-up prompts. Docs WITHOUT a filename-rule hint
@@ -355,7 +393,8 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 entity_types=entity_types,
                 known_entities=[c for c, _ in known.values()],
                 class_hint=(cls_name, 1.0, "already classified"),
-                properties=cprops))
+                properties=cprops,
+                summary_guidance=guidance_by_class.get(cid)))
             props_owners.append(fn)
     r15 = (await client.run_round("extract-props", agent, props_prompts)
            if props_prompts else [])

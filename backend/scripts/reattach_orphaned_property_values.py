@@ -133,11 +133,22 @@ _ORPHANS = sa.text(
 # statement. And the optional filters above are cast because `$1 is null` gives
 # Postgres nothing to infer a type from and it refuses to prepare the
 # statement. Both were found by running the dry run, which is what it is for.
+# The occupancy the plan read is a fact about the moment the orphans were
+# selected, and the plan is printed for a human before anything is written.
+# Extraction, the ingestion API or a second run of this script can fill the
+# target in between, and there is no uniqueness constraint on
+# (document_id, property_id) to catch it. So the condition is restated here,
+# where it is evaluated against the row being written rather than remembered:
+# a target that has since acquired a value refuses the move instead of
+# doubling up, and the caller counts what did not land.
 _REATTACH = sa.text(
     """
-    update property_value
+    update property_value pv
        set property_id = cast(:target as uuid), updated_at = now()
-     where id = cast(:value_id as uuid)
+     where pv.id = cast(:value_id as uuid)
+       and not exists (select 1 from property_value x
+                        where x.document_id = pv.document_id
+                          and x.property_id = cast(:target as uuid))
     """
 )
 
@@ -172,25 +183,39 @@ async def main() -> None:
             elif a.kind == "target_occupied":
                 print(f"  {o.filename:34} {o.property_name:22} "
                       f"left alone: {o.belongs_to} already holds a value")
+            elif a.kind == "contested_target":
+                print(f"  {o.filename:34} {o.property_name:22} "
+                      f"left alone: another orphan wants the same empty "
+                      f"property on {o.belongs_to}")
 
         counts = summarise(actions)
         print(f"\n{counts.get('reattach', 0)} to re-attach, "
               f"{counts.get('target_occupied', 0)} already hold a value, "
+              f"{counts.get('contested_target', 0)} contested by another "
+              f"orphan, "
               f"{counts.get('no_property_on_class', 0)} stranded with nowhere "
               f"to go, {len(actions)} orphaned values seen")
         if not args.apply:
             print("dry run, nothing written. Re-run with --apply to write.")
             return
 
-        written = 0
+        written = refused = 0
         for a in actions:
             if a.kind != "reattach":
                 continue
-            await session.execute(_REATTACH, {
+            result = await session.execute(_REATTACH, {
                 "target": a.target_property_id, "value_id": a.orphan.value_id})
-            written += 1
+            if result.rowcount:
+                written += 1
+            else:
+                refused += 1
+                print(f"  {a.orphan.filename:34} {a.orphan.property_name:22} "
+                      f"not moved: the target acquired a value after the plan "
+                      f"was made")
         await session.commit()
-        print(f"re-attached {written} values")
+        print(f"re-attached {written} values"
+              + (f", refused {refused} whose target filled in the meantime"
+                 if refused else ""))
 
 
 if __name__ == "__main__":

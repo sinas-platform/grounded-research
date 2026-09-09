@@ -8,6 +8,8 @@ Run from the backend directory:
 `python -m pytest tests/test_reattach_orphaned_property_values.py`
 """
 
+import inspect
+
 from scripts.reattach_orphaned_property_values import Orphan, plan, summarise
 
 
@@ -113,4 +115,31 @@ def test_a_contested_target_that_is_already_occupied_is_reported_as_occupied():
     pair = [_orphan(value_id="pv-1", target_occupied=True),
             _orphan(value_id="pv-2", target_occupied=True)]
     assert [a.kind for a in plan(pair)] == ["target_occupied", "target_occupied"]
+
+
+def test_the_summary_names_every_outcome_it_counts():
+    """A kind that writes nothing still has to appear, or the operator sees a
+    gap between the categories and the total with nothing explaining it."""
+    import scripts.reattach_orphaned_property_values as mod
+    src = inspect.getsource(mod.main)
+    kinds = {a.kind for a in plan([
+        _orphan(value_id="v1", target_property_id="t-1"),
+        _orphan(value_id="v2", target_property_id=None),
+        _orphan(value_id="v3", target_occupied=True),
+        _orphan(value_id="v4", target_property_id="t-3"),
+        _orphan(value_id="v5", target_property_id="t-3"),
+    ])}
+    for kind in kinds:
+        assert kind in src, f"{kind} is planned but never reported"
+
+
+def test_the_write_restates_the_condition_the_plan_assumed():
+    """Occupancy is read when the orphans are selected and the plan is printed
+    for a human before anything is written. The target can fill in between, and
+    there is no uniqueness constraint to catch it, so the update carries the
+    check rather than trusting the earlier read."""
+    import scripts.reattach_orphaned_property_values as mod
+    sql = str(mod._REATTACH)
+    assert "not exists" in sql.lower()
+    assert "x.property_id = cast(:target as uuid)" in sql
 

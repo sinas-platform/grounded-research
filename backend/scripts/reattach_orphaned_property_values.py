@@ -164,6 +164,18 @@ async def main() -> None:
     args = ap.parse_args()
 
     async with AsyncSessionLocal() as session:
+        # One repair at a time, transaction-scoped: two concurrent --apply
+        # runs could each see the same destination empty (the conditional
+        # UPDATE checks NOT EXISTS under READ COMMITTED, which neither locks
+        # an absent row nor is backed by a uniqueness constraint) and both
+        # write. The advisory lock serialises the script against itself; a
+        # concurrent ingestion filling the same property remains possible in
+        # principle, but ingestion writes properties for documents it is
+        # ingesting, and an orphan by definition belongs to a document whose
+        # class changed after ingestion — the sets do not meet in practice,
+        # and the conditional UPDATE still refuses any fill it can see.
+        await session.execute(sa.text(
+            "SELECT pg_advisory_xact_lock(hashtext('reattach_orphans'))"))
         rows = (await session.execute(_ORPHANS, {
             "class_name": args.class_name,
             "property_name": args.property_name})).all()

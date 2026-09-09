@@ -2084,6 +2084,13 @@ async def _draft_from_extracts(
                               claim_type=str(c.get("type") or "legal_principle")[:50])
             session.add(row)
             await session.flush()
+            # What actually became a citation, not what the drafter offered.
+            # Two things drop evidence between the two: the cap at four, and a
+            # filename that resolves to no document. `plan_outcome` reads this
+            # to decide whether a planned claim was used, and a claim counted
+            # as used on a citation that was never written is the one reading
+            # the record must not produce.
+            cited_here: set[str] = set()
             for ev_ in (c.get("evidence") or [])[:4]:
                 fn_ = str(ev_.get("filename") or "")
                 doc = (await session.execute(
@@ -2109,9 +2116,9 @@ async def _draft_from_extracts(
                     document_version_id=doc.current_version_id,
                     span=span, quote=(quote or None) and quote[:2000],
                     validated=False))
+                cited_here.add(fn_)
             written += 1
-            drafted.append((i, {str(e_.get("filename") or "")
-                                for e_ in (c.get("evidence") or [])}))
+            drafted.append((i, cited_here))
         await session.commit()
     await _tele(run_id, "draft", extract_mode=True, claims=written,
                 **({"plan_outcome": _plan_outcome(extracts, drafted)}

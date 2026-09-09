@@ -67,3 +67,23 @@ def test_every_planned_claim_appears_whatever_happened_to_it():
     out = _plan_outcome(extracts, drafted=[(1, {"a.md"})])
     assert [o["n"] for o in out] == [1, 2, 3]
     assert [o["state"] for o in out] == ["used", "no_passages", "extracted_unused"]
+
+
+def test_drafted_carries_what_was_persisted_not_what_was_offered():
+    """A planned claim must not read as used on a citation never written.
+
+    Two things drop evidence between the drafter's reply and the rows: the
+    cap at four, and a filename that resolves to no document. Reading the
+    raw list would count both as citations, and `used` is the one state
+    whose whole value is that something reached the answer.
+    """
+    import inspect
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._draft_from_extracts)
+    assert "drafted.append((i, cited_here))" in src, (
+        "drafted must carry the set built while persisting, not the reply")
+    body = src[src.index("cited_here: set[str] = set()"):src.index("drafted.append")]
+    assert "[:4]" in body, "the set must be built inside the capped loop"
+    assert body.index("if doc is None") < body.index("cited_here.add"), (
+        "a filename that resolves to no document must not be added")

@@ -50,8 +50,8 @@ def manifest_rows(monkeypatch):
 async def test_everything_fits_and_the_record_says_so(manifest_rows):
     manifest_rows["rows"] = rows(10)
     text, cap = await qr._doc_manifest("p")
-    assert cap == {"chars": len(text) + 1, "cap": MANIFEST_CHAR_CAP,
-                   "ranked": True,
+    assert cap == {"chars": len(text), "cap": MANIFEST_CHAR_CAP,
+                   "unranked": 0,
                    "documents": 10, "shown": 10, "dropped": 0}
     assert text.count("- doc") == 10
 
@@ -124,7 +124,7 @@ async def test_briefing_lines_count_against_the_cap(manifest_rows):
     manifest_rows["rows"] = rows(6, summary_chars=100, briefing=True)
     text, cap = await qr._doc_manifest("p")
     assert "    properties: " in text and "    toc: " in text
-    assert cap["chars"] == len(text) + 1
+    assert cap["chars"] == len(text)
 
 
 @pytest.mark.asyncio
@@ -254,7 +254,7 @@ async def test_an_unranked_result_is_not_banded(manifest_rows):
     text, rec = await qr._doc_manifest("p")
     lines = [l for l in text.split("\n") if l.startswith("- ")]
     assert len({len(l) for l in lines}) == 1, "every line the same budget"
-    assert rec["ranked"] is False
+    assert rec["unranked"] == len(built)
 
 
 @pytest.mark.asyncio
@@ -266,7 +266,7 @@ async def test_a_ranked_result_is_still_banded(manifest_rows):
     text, rec = await qr._doc_manifest("p")
     lines = [l for l in text.split("\n") if l.startswith("- ")]
     assert len(lines[0]) > len(lines[-1]), "the head keeps more than the tail"
-    assert rec["ranked"] is True
+    assert rec["unranked"] == 0
 
 
 def test_a_mapping_of_toc_entries_still_renders():
@@ -276,3 +276,31 @@ def test_a_mapping_of_toc_entries_still_renders():
     as_list = qr._toc_digest({"entries": [{"line": 1, "line_to": 8, "title": "One"}]})
     as_map = qr._toc_digest({"entries": {"a": {"line": 1, "line_to": 8, "title": "One"}}})
     assert as_list == as_map == "1-8 One"
+
+
+@pytest.mark.asyncio
+async def test_one_unranked_document_does_not_cost_the_others_their_budget(manifest_rows):
+    """Deciding per result rather than per row would let a single attached
+    document strip the head band from every ranked one beside it. No result in
+    this corpus mixes the two; merge and graph expansion are how one would."""
+    built = rows(qr.HEAD_DOCUMENTS + 5, summary_chars=2000)
+    for i, r in enumerate(built):
+        r["rank"] = i
+    built[-1]["rank"] = None
+    manifest_rows["rows"] = built
+    text, rec = await qr._doc_manifest("p")
+    lines = [l for l in text.split("\n") if l.startswith("- ")]
+    assert len(lines[0]) > len(lines[-1]), "the ranked head still keeps more"
+    assert rec["unranked"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_recorded_length_is_the_length_that_is_sent(manifest_rows):
+    """`chars` is the manifest, not the manifest plus a newline nobody writes.
+    Counting one per line charged a separator after the last one, which put the
+    figure one above the real length and made the effective cap 59,999."""
+    for n in (1, 2, 7):
+        manifest_rows["rows"] = rows(n, briefing=True)
+        text, cap = await qr._doc_manifest("p")
+        assert cap["chars"] == len(text), f"{n} documents"
+

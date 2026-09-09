@@ -217,6 +217,32 @@ async def unmet(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[dict[str, Any]]
 
 
 @_best_effort(list)
+async def actionable(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[str]:
+    """The unaccounted debt a reviser could still discharge this run.
+
+    `unaccounted` is the honest record: a system waiver retires an obligation
+    without accounting for it, so it stays on that list forever. That is right
+    for reporting and wrong for gating. A source already retired by `MAX_FEEDS`
+    is not fed again, so blocking publication on it blocks on something no
+    further cycle can change — the run cannot succeed rather than might not.
+
+    So this is the subset the gate blocks on: named, not cited, and not yet
+    waived by anyone. A reviser waiver discharges it because that is a
+    judgment; a system waiver removes it from here because it is a record of
+    giving up, and there is nothing left to ask for. It stays in `unaccounted`,
+    which is what the run's telemetry reports.
+    """
+    entries = await _load(run_id)
+    if not entries:
+        return []
+    cited = await _cited(answer_id)
+    return [
+        doc for doc, e in entries.items()
+        if doc not in cited and not (e.get("waived") or {})
+    ]
+
+
+@_best_effort(list)
 async def unaccounted(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[str]:
     """Documents the gate named that the answer has not accounted for.
 

@@ -2668,11 +2668,30 @@ async def _pre_publish_sweep(
     # same kind — 37 across 23 stored runs — and recording the subject in one
     # place and not the other is how the mirrored defects in #103 and #106
     # appeared: two writes of the same fact that drift apart.
-    await _tele(run_id, "validate", final_sweeps=sweeps + 1,
-                final_sweep_result={
-                    "failed": len(fv["failed"]),
-                    "overreaching": len(f_over),
-                    "overreaching_claims": _overreach_detail(f_over)})
+    #
+    # And one key per sweep. `final_sweep_result` was flat, and `_tele` merges
+    # by key and cannot delete, so a run that swept twice kept only the second
+    # finding. That is the fifth field here to need numbering, after `round_N`,
+    # `revision_N`, `cycle_N` and `gate_N`, and it loses the more interesting
+    # half: the first sweep is the one that spends the repair attempt, so what
+    # it objected to and whether the repair answered it were both unreadable.
+    # Q46 run 75b569ba swept twice and its first finding is gone.
+    #
+    # `final_sweeps` stays as it is. It is the control-flow counter this
+    # function reads back to decide whether the repair chance is spent, and
+    # numbering the detail does not change what it means.
+    #
+    # `final_sweep_dropped`, `final_sweep_dropped_detail` and
+    # `final_sweep_published_after_drop` stay flat, and are safe: they are
+    # written only in the `sweeps >= 1` branch below, which returns or raises,
+    # so at most one sweep per run reaches them. They also share the prefix
+    # without being cycles, which is exactly what `_is_numbered` is for.
+    cycle = await _next_cycle_key(run_id, "validate", "final_sweep")
+    await _tele(run_id, "validate", final_sweeps=sweeps + 1, **{
+        cycle: {
+            "failed": len(fv["failed"]),
+            "overreaching": len(f_over),
+            "overreaching_claims": _overreach_detail(f_over)}})
     if not fv["failed"] and not f_over:
         return True
     fb = [f"Claim {f['claim_sequence']}: {f['reason']}"

@@ -27,7 +27,7 @@ def rows(n, summary_chars=100, briefing=False):
     out = []
     for i in range(n):
         r = {"filename": f"doc{i:03}.md", "class": "Court Decision",
-             "annotations": "-", "properties": "-",
+             "annotations": "-", "properties": "-", "rank": i,
              "reason": "mentions something", "summary": "s" * summary_chars}
         if briefing:
             r["briefing"] = {"properties": {"k": "v" * 50}, "toc": "t" * 200}
@@ -51,6 +51,7 @@ async def test_everything_fits_and_the_record_says_so(manifest_rows):
     manifest_rows["rows"] = rows(10)
     text, cap = await qr._doc_manifest("p")
     assert cap == {"chars": len(text) + 1, "cap": MANIFEST_CHAR_CAP,
+                   "ranked": True,
                    "documents": 10, "shown": 10, "dropped": 0}
     assert text.count("- doc") == 10
 
@@ -211,3 +212,41 @@ def test_a_compact_toc_carries_more_title_in_the_same_space():
     raw = str({"entries": entries})[:qr.TOC_CHARS]
     digest = qr._toc_digest({"entries": entries}, cap=qr.TOC_CHARS)
     assert digest.count("Chapter") > raw.count("Chapter")
+
+@pytest.mark.asyncio
+async def test_an_unranked_result_is_not_banded(manifest_rows):
+    """A curated result can carry rows with no rank at all -- merged in,
+    reached through the graph, or attached by hand. One result in the corpus
+    has 178 of 178 unranked, and four runs have used such a result as their
+    parent. Ordering by a null column leaves the sequence arbitrary, so the
+    head band would be spent on whichever ten arrived first.
+    """
+    built = rows(qr.HEAD_DOCUMENTS + 5, summary_chars=2000)
+    for r in built:
+        r["rank"] = None
+    manifest_rows["rows"] = built
+    text, rec = await qr._doc_manifest("p")
+    lines = [l for l in text.split("\n") if l.startswith("- ")]
+    assert len({len(l) for l in lines}) == 1, "every line the same budget"
+    assert rec["ranked"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_ranked_result_is_still_banded(manifest_rows):
+    built = rows(qr.HEAD_DOCUMENTS + 5, summary_chars=2000)
+    for i, r in enumerate(built):
+        r["rank"] = i
+    manifest_rows["rows"] = built
+    text, rec = await qr._doc_manifest("p")
+    lines = [l for l in text.split("\n") if l.startswith("- ")]
+    assert len(lines[0]) > len(lines[-1]), "the head keeps more than the tail"
+    assert rec["ranked"] is True
+
+
+def test_a_mapping_of_toc_entries_still_renders():
+    """Iterating a dict yields its keys, and the digest drops non-dictionaries,
+    so a mapping would render as nothing. Not present in this corpus; pinned so
+    it cannot start being true quietly."""
+    as_list = qr._toc_digest({"entries": [{"line": 1, "line_to": 8, "title": "One"}]})
+    as_map = qr._toc_digest({"entries": {"a": {"line": 1, "line_to": 8, "title": "One"}}})
+    assert as_list == as_map == "1-8 One"

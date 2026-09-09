@@ -3580,6 +3580,136 @@ async def _revise_answer(
     return touched
 
 
+def _overreach_seqs(verdict: dict) -> set[int]:
+    """The claim numbers this round found overreaching. Pure.
+
+    A verdict entry carries `claim_sequence`; anything that is not a whole
+    number names no claim and is dropped rather than guessed at.
+    """
+    out: set[int] = set()
+    for o in (verdict.get("overreaching") or []):
+        if not isinstance(o, dict):
+            continue
+        raw = o.get("claim_sequence")
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if n.is_integer():
+            out.add(int(n))
+    return out
+
+
+def _seqs_of(entries) -> set[int]:
+    """The claim numbers named by a list of verdict entries. Pure.
+
+    Same digit test the overreach reader applies, and for the same reason:
+    int() reads 9.5 as claim 9 and True as claim 1, and a sequence that is not
+    a whole number names no claim.
+    """
+    out: set[int] = set()
+    for f in (entries or []):
+        if not isinstance(f, dict):
+            continue
+        raw = f.get("claim_sequence")
+        if isinstance(raw, bool) or raw is None:
+            continue
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if n.is_integer():
+            out.add(int(n))
+    return out
+
+
+def _failed_seqs(verdict: dict) -> set[int]:
+    """The claim numbers with a span that failed validation this round. Pure."""
+    return _seqs_of(verdict.get("failed"))
+
+
+def _errored_seqs(verdict: dict) -> set[int]:
+    """The claim numbers whose span could not be judged this round. Pure.
+
+    An errored row is never marked validated, so it stays pending exactly as a
+    failing one does. Errors carried no sequence until this was needed, so a
+    verdict from before then names none and this is empty rather than wrong.
+    """
+    return _seqs_of(verdict.get("errors"))
+
+
+def _pending_seqs(verdict: dict) -> set[int]:
+    """The claim numbers holding a row that will still be pending next round.
+
+    Failed and errored together, because the criterion below cares about one
+    property they share: the row is not validated, so the claim is re-judged
+    next round whether or not anybody touched it.
+    """
+    return _failed_seqs(verdict) | _errored_seqs(verdict)
+
+
+def _still_narrowing(overreach: list[set[int]], pending: list[set[int]]) -> bool:
+    """Whether a claim was re-marked overreaching *because it was rewritten*.
+
+    Repetition alone does not prove a rewrite, and the difference is the whole
+    correctness of this criterion.
+
+    Evidence is judged with `pending_only=True`. A claim whose spans have ALL
+    PASSED holds no pending row, is not re-judged, and produces no coverage
+    verdict, so it stops being reported rather than being reported again. For
+    that claim, a repeat can only mean the revision bound new spans — revising
+    deletes the claim's evidence and re-binds it, and `_bind_spans` writes
+    `validated=False` — which puts it back in front of the judge. Repetition is
+    proof of movement.
+
+    But a claim carrying a FAILING span keeps that row pending whether anybody
+    touches it or not. It is re-judged every round for free, and its coverage
+    verdict comes back with it. Repetition there proves nothing, and counting
+    it would buy rounds for a claim nobody is working on.
+
+    A span the judge could not read at all does the same thing. An errored row
+    is never marked validated, so it is pending on exactly the same terms, and
+    the claim comes back for free. It reaches here through `_pending_seqs`,
+    which is failed and errored together, because what matters is the property
+    the two share rather than which of them happened.
+
+    That is a fact about the EARLIER round, and only the earlier one. A claim
+    clean in the earlier round held no pending row, so it came back solely
+    because its evidence was re-bound, and it was rewritten. If the rewrite
+    then bound a span that failed, that failure is the product of the work,
+    not evidence the claim was riding along untouched. Excluding it reads a
+    new defect as proof no revision happened, which inverts the signal.
+
+    So the exclusion is `pending[-2]` alone: a sequence holding an unvalidated
+    row in the earlier of the two rounds. What survives is a claim that was clean on
+    the evidence, was re-judged anyway, and can only have been re-judged
+    because it was rebuilt.
+
+    Q46, run `804a684d`, is the case. Seq 12 was marked overreaching in round
+    3 with the round's `failed` at zero, was rewritten from an assertion of
+    inspection authority into a statement of what bounds the overlap, was
+    marked again in round 4, and was deleted when the budget ran out. Under
+    `failed[-1] | failed[-2]` it does not qualify, because the rewrite's own
+    span failed.
+
+    A claim cannot ride this indefinitely: qualifying requires being clean in
+    the earlier round, so one that keeps failing is excluded at the very next
+    decision, and HARD_VALIDATE_ROUNDS still binds.
+
+    What this still cannot say is how much better the claim got: the coverage
+    verdict is `full` or `partial` with no degree, so "partial again" reads the
+    same whether the claim shrank by half or barely changed. Reliable that work
+    is happening, silent on how much.
+
+    Pure.
+    """
+    if len(overreach) < 2 or len(pending) < 2:
+        return False
+    return bool((overreach[-1] & overreach[-2]) - pending[-2])
+
+
 async def _stage_validate_publish(
     run_id: uuid.UUID, sinas: _Sinas, gate_cycles: int | None = None
 ) -> None:
@@ -3597,6 +3727,16 @@ async def _stage_validate_publish(
 
     await _mark(run_id, status="validating")
     failed_history: list[int] = []
+    # Kept apart from `failed_history` on purpose. That list counts failed
+    # evidence rows and `answer_regress` reads the same counts out of
+    # `round_N` by prefix; folding overreach into it would change what every
+    # stored run means after the fact.
+    overreach_history: list[set[int]] = []
+    # Which claims hold an unvalidated row, per round: failed spans and spans
+    # the judge could not read. Either way the row stays pending, so the claim
+    # is re-judged every round whether or not anybody touched it, and its
+    # coverage verdict repeating says nothing about revision.
+    pending_seq_history: list[set[int]] = []
     round_no = 0
     while True:
         round_no += 1
@@ -3606,25 +3746,50 @@ async def _stage_validate_publish(
                 "budget_ceiling",
                 f"run spend reached ${spent:.2f} (cap ${RUN_COST_CAP_USD:.0f}) "
                 f"in validation round {round_no}")
+        extended_because = None
         if round_no > MAX_VALIDATE_ROUNDS:
             converging = (len(failed_history) >= 2
                           and failed_history[-1] < failed_history[-2])
-            if round_no > HARD_VALIDATE_ROUNDS or not converging:
+            # A second reason to grant a round, disjoint from the first rather
+            # than folded into it: a claim marked overreaching twice running is
+            # a claim the reviser is rewriting, and the failed-row count cannot
+            # see that because a coverage verdict never fails a row.
+            narrowing = _still_narrowing(overreach_history, pending_seq_history)
+            if round_no > HARD_VALIDATE_ROUNDS or not (converging or narrowing):
                 break
+            extended_because = "converging" if converging else "narrowing"
             await _tele(run_id, "validate", extended_to_round=round_no)
         async with AsyncSessionLocal() as session:
             verdict = await validate_answer_evidence(session, caller, answer_id,
                                               pending_only=True, run_id=run_id)
         failed_history.append(len(verdict["failed"]))
+        overreach_history.append(_overreach_seqs(verdict))
+        pending_seq_history.append(_pending_seqs(verdict))
         await _tele(run_id, "validate", **{f"round_{round_no}": {
             "judged": verdict["judged"], "passed": verdict["passed"],
             "failed": len(verdict["failed"]), "errors": len(verdict["errors"]),
             "overreaching": len(verdict.get("overreaching") or []),
+            # Why this round exists at all, when it is past the base budget.
+            # Carried in a local from the decision to the one write at the end
+            # of the round, rather than written where it happens: a flat key
+            # would keep only the last extension of the run.
+            **({"extended_because": extended_because} if extended_because else {}),
             # The count stays where it is: answer_regress reads it by prefix.
             # This is the same finding with its subject attached, so a run can
             # be asked which claim was objected to and on what ground.
             "overreaching_claims": _overreach_detail(
                 verdict.get("overreaching") or []),
+            # The sequences behind the `failed` count above. Without them the
+            # exclusion this criterion turns on cannot be checked after the
+            # fact: establishing that Q46 seq 12 was the round-4 failure meant
+            # matching the rounds-exhausted removal record against the claim
+            # text, which is an inference, where `failed` at zero in round 3 is
+            # a measurement. Sorted so the key is stable to compare across runs.
+            "failed_claims": sorted(_failed_seqs(verdict)),
+            # Beside them because they mean the same thing to the criterion:
+            # an unjudged row is as pending as a failed one, and the exclusion
+            # is only checkable after the fact if both are recorded.
+            "errored_claims": sorted(_errored_seqs(verdict)),
         }})
         # A claim whose every span passes can still assert more than those
         # spans establish — "the whole period" on passages about a second

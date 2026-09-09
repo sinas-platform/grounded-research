@@ -696,15 +696,25 @@ async def _doc_manifest(
     # and drop the rest of the tail on the same non-reason. Where the ranking is
     # incomplete, nothing is privileged: every document gets the tail budget and
     # the record says the banding did not apply.
-    ranked = bool(rows) and all(r.get("rank") is not None for r in rows)
+    unranked = sum(1 for r in rows if r.get("rank") is None)
     lines: list[str] = []
     total = shown = 0
+    ranked_seen = 0
     used = 0
     full = False
     for r in rows:
         total += 1
+        # Per row, not per result. A ranked row keeps its place in the band; an
+        # unranked one takes the tail budget rather than a place it has not
+        # earned. Deciding this for the whole result would mean one attached
+        # document stripping the head budget from every ranked one beside it,
+        # which is worse than the problem: no result in this corpus mixes the
+        # two, but merge and graph expansion are how one would.
+        has_rank = r.get("rank") is not None
+        if has_rank:
+            ranked_seen += 1
         block = [_manifest_line(
-            r, HEAD_SUMMARY_CHARS if (ranked and total <= HEAD_DOCUMENTS)
+            r, HEAD_SUMMARY_CHARS if (has_rank and ranked_seen <= HEAD_DOCUMENTS)
             else TAIL_SUMMARY_CHARS)]
         brief = r.get("briefing")
         if brief:
@@ -727,7 +737,7 @@ async def _doc_manifest(
         shown += 1
         lines.extend(block)
     return "\n".join(lines), {
-        "chars": used, "cap": cap, "ranked": ranked,
+        "chars": used, "cap": cap, "unranked": unranked,
         "documents": total, "shown": shown, "dropped": total - shown,
     }
 

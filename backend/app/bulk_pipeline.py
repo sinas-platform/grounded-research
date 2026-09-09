@@ -339,6 +339,16 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 cid = next((c for c, n, _ in classes if n == rule[0]), None)
             if cid is None:
                 cid = class_by_did.get(did)
+                if cid is not None:
+                    # State the class rather than only reading its config. The
+                    # live path does this: a document already classified has
+                    # its class named in the prompt instead of being asked to
+                    # pick one. Loading the class's properties while still
+                    # asking for a pick invites a different class back, whose
+                    # properties are then discarded and whose summary is not.
+                    fixed = next((n for c, n, _ in classes if c == cid), None)
+                    if fixed:
+                        hint = (fixed, 1.0, "already assigned")
             class_props = props_by_class.get(cid) or None if cid else None
             known = known_by_idx[wi]
             front_prompts.append(one._front_matter_prompt(

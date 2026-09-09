@@ -334,21 +334,23 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
             # written to nobody's instructions. The live path in
             # `ingestion_oneshot` reads the document's own class here; this is
             # the same read, and this is the path most documents take.
-            cid = None
-            if rule is not None:
+            # Precedence follows the live path: a class the document already
+            # has wins over one its filename suggests. Persistence keeps the
+            # assigned class either way, so preferring the rule would extract
+            # against one class's properties and store a summary written to its
+            # guidance while the document remains another -- a summary for the
+            # wrong class, which is worse than a generic one.
+            cid = class_by_did.get(did)
+            if cid is not None:
+                # State it rather than only reading its config. Loading a
+                # class's properties while still asking the model to pick
+                # invites a different class back, whose properties are then
+                # discarded and whose summary is not.
+                fixed = next((n for c, n, _ in classes if c == cid), None)
+                if fixed:
+                    hint = (fixed, 1.0, "already assigned")
+            elif rule is not None:
                 cid = next((c for c, n, _ in classes if n == rule[0]), None)
-            if cid is None:
-                cid = class_by_did.get(did)
-                if cid is not None:
-                    # State the class rather than only reading its config. The
-                    # live path does this: a document already classified has
-                    # its class named in the prompt instead of being asked to
-                    # pick one. Loading the class's properties while still
-                    # asking for a pick invites a different class back, whose
-                    # properties are then discarded and whose summary is not.
-                    fixed = next((n for c, n, _ in classes if c == cid), None)
-                    if fixed:
-                        hint = (fixed, 1.0, "already assigned")
             class_props = props_by_class.get(cid) or None if cid else None
             known = known_by_idx[wi]
             front_prompts.append(one._front_matter_prompt(

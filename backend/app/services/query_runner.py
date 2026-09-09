@@ -523,6 +523,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     DocumentClass.name,
                     ResultDocument.reason,
                     Document.summary,
+                    ResultDocument.rank,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -579,7 +580,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         return str(value)
 
     out = []
-    for did, fn, cls, reason, summary in rows:
+    for did, fn, cls, reason, summary, rank in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -591,6 +592,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             "document_id": did, "filename": fn, "class": cls or "",
             "annotations": ann, "properties": props, "reason": (reason or ""),
             "summary": (summary or ""),
+            "rank": rank,
             "briefing": briefing_by_doc.get(str(did)),
         })
     return out
@@ -655,6 +657,13 @@ def _toc_digest(toc, cap: int = TOC_CHARS) -> str:
             return toc[:cap]
     entries = toc.get("entries") if isinstance(toc, dict) else (
         toc if isinstance(toc, list) else None)
+    # A mapping of entries is still entries. Iterating a dict yields its keys,
+    # every one a string, and the loop below drops non-dictionaries -- so a
+    # mapping would render as nothing at all where the old `str(toc)` at least
+    # showed the reader something. Not seen in this corpus, where all 5,722
+    # stored tables of contents hold a list; cheap to not depend on that.
+    if isinstance(entries, dict):
+        entries = list(entries.values())
     if not entries:
         return str(toc)[:cap]
     out: list[str] = []
@@ -697,15 +706,24 @@ async def _doc_manifest(
     arrive in rank order, so what is lost is what retrieval ranked last. The
     defect was never the dropping, only that it happened silently.
     """
+    rows = await _manifest_rows(parent_id)
+    # Position is rank only when there is a rank. A curated result -- documents
+    # merged in, reached through the graph, or attached by hand -- can carry
+    # rows with no rank at all, and one in this corpus has 178 of 178. Ordering
+    # by a null column leaves the sequence arbitrary, so banding on position
+    # would hand five times the budget to whichever ten happened to come first
+    # and drop the rest of the tail on the same non-reason. Where the ranking is
+    # incomplete, nothing is privileged: every document gets the tail budget and
+    # the record says the banding did not apply.
+    ranked = bool(rows) and all(r.get("rank") is not None for r in rows)
     lines: list[str] = []
     total = shown = 0
     used = 0
     full = False
-    for r in await _manifest_rows(parent_id):
+    for r in rows:
         total += 1
-        # Rows arrive in rank order, so position is rank.
         block = [_manifest_line(
-            r, HEAD_SUMMARY_CHARS if total <= HEAD_DOCUMENTS
+            r, HEAD_SUMMARY_CHARS if (ranked and total <= HEAD_DOCUMENTS)
             else TAIL_SUMMARY_CHARS)]
         brief = r.get("briefing")
         if brief:
@@ -728,7 +746,7 @@ async def _doc_manifest(
         shown += 1
         lines.extend(block)
     return "\n".join(lines), {
-        "chars": used, "cap": cap,
+        "chars": used, "cap": cap, "ranked": ranked,
         "documents": total, "shown": shown, "dropped": total - shown,
     }
 

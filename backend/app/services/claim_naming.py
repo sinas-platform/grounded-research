@@ -26,6 +26,20 @@ The second is the worse defect: one unnamed attribution is a sentence to fix,
 a chain of them is a passage with no visible foundation. A source is reported
 under one shape or the other, never both.
 
+A third shape is checked separately, by `mismatches`, and is not silence but
+its opposite. A claim can name a case and rest on a different one: the reader
+is given an identifier, follows it, and finds a judgment that does not contain
+the passage. That is the defect legal reviewers report most often, and it is
+worse than an unnamed source, because a missing name asks the reader to do
+work while a wrong one sends them somewhere.
+
+It is deliberately not folded into the checks above. Those ask what a claim
+fails to say, so they need to know whether it was attributing at all, which is
+what the cue vocabulary is for. This one reads what the claim does say. A
+written case number is itself the attribution, so no cue is required and none
+is consulted, which is what lets it reach a claim that attributes with "per
+paragraph 87 of" rather than with a verb the cue list happens to hold.
+
 Only the identifier is checked. A house style may also want the source's name
 in prose, and that is a reasonable thing to want, but a name cannot be verified
 mechanically: labels arrive in several shapes, some truncated, and some sources
@@ -64,11 +78,19 @@ MAX_FINDINGS = 5
 
 @dataclass(frozen=True)
 class Source:
-    """A document a claim cites, and what identifies it."""
+    """A document a claim cites, and what identifies it.
+
+    `pattern` is the identifier shape its class declares, or None where the
+    class declares none. It rides on the source rather than on the answer
+    because one claim can cite documents of different classes, and each is
+    read with its own class's shape.
+    """
 
     key: str
     identifiers: tuple[str, ...]
     label: str
+    pattern: str | None = None
+    name: str = ""
 
 
 @dataclass(frozen=True)
@@ -88,6 +110,42 @@ class Finding:
         return self.seqs[0]
 
 
+@dataclass(frozen=True)
+class Reach:
+    """How far a check got on one answer: what it could have judged, what it
+    did judge, and what it flagged.
+
+    Recorded because a check that stops working returns an empty list, and an
+    empty list is what a clean answer returns. Three numbers separate the three
+    ways that happens. `judged` falling to zero is a check that broke or was
+    switched off. `judged` far below `eligible` is a check that is running and
+    looking at almost nothing, which is what the attribution word list did for
+    months without anyone noticing. `flagged` over `judged` is the only one of
+    the three that says anything about the answers.
+
+    It detects MOVEMENT, not correctness. A check judging 200 and flagging 3
+    every run looks identical whether those 3 are the right 3 or not.
+    """
+
+    eligible: int
+    judged: int
+    flagged: int
+
+    def as_dict(self) -> dict[str, int]:
+        return {"eligible": self.eligible, "judged": self.judged,
+                "flagged": self.flagged}
+
+
+@dataclass(frozen=True)
+class Mismatch:
+    """A claim that names one case and rests on another."""
+
+    seq: int
+    named: tuple[str, ...]
+    cited: tuple[str, ...]
+    labels: tuple[str, ...]
+
+
 def identifier_core(value: str) -> str:
     """The distinguishing part of an identifier, for comparison.
 
@@ -101,44 +159,185 @@ def identifier_core(value: str) -> str:
     return stripped.split(" ")[0].strip()
 
 
-def carries_identifier(text: str, identifiers: tuple[str, ...]) -> bool:
-    """Whether the claim writes any of these identifiers.
+# How much separator may sit between two characters of one identifier. Enough
+# for `. ` or a hyphen or a line break, and not enough to reach across a
+# clause and assemble an identifier out of unrelated digits.
+_GAP = r"[^0-9A-Za-z]{0,3}"
 
-    Compared with whitespace removed, so an identifier broken across a line or
-    spaced differently still counts.
+
+def _written_as(core: str) -> re.Pattern[str]:
+    """A pattern matching this identifier however it is punctuated.
+
+    Separators are style, not identity: the same decision is written `AT.39796`
+    by the corpus and `COMP/39.796` in prose, and comparing the two literally
+    said that a claim naming its source did not name it.
+
+    The permission is given to the identifier rather than taken from the
+    claim. Stripping the separators out of the claim instead would run two
+    identifiers written side by side into a single number and match neither,
+    which `Nos. 85-4053, 85-4068` does in the corpus today.
+
+    A digit either side refuses the match, so a short identifier cannot be
+    read out of the middle of a longer number: `111/22` is not written by
+    `2011122`.
     """
-    squashed = re.sub(r"\s+", "", text)
+    return re.compile(
+        r"(?<![0-9])" + _GAP.join(re.escape(c) for c in core) + r"(?![0-9])"
+    )
+
+
+def carries_identifier(text: str, identifiers: tuple[str, ...]) -> bool:
+    """Whether the claim writes any of these identifiers."""
     for identifier in identifiers:
-        core = identifier_core(identifier)
-        if len(core) >= MIN_CORE and re.sub(r"\s+", "", core) in squashed:
+        core = re.sub(r"[^0-9A-Za-z]+", "", identifier_core(identifier))
+        if len(core) >= MIN_CORE and _written_as(core).search(text):
             return True
     return False
 
 
-def attributes(text: str, cues: frozenset[str]) -> bool:
-    """Whether the claim attributes rather than describes.
+# The shape of an identifier is deployment knowledge, not platform knowledge.
+# A court case number, a merger reference, an invoice number and a bug id are
+# all identifiers, and nothing here can be written to know any of them without
+# naming a deployment in a repo that must not name one. So the shape arrives
+# from configuration, as `attribution_cues` already does: a class declares
+# `identifier_pattern` beside `identifier_property`, and a class that declares
+# none is not judged by this check.
+#
+# The pattern's CAPTURE GROUPS are the comparison key. That is the whole
+# contract, and it is what lets a deployment say which differences matter
+# without SGR knowing why: capture the parts that identify, leave out the
+# parts that decorate. A deployment whose identifiers carry a procedural
+# suffix that does not change identity simply does not capture it, and two
+# values differing only by that suffix then compare equal here without this
+# module knowing what a suffix is.
+_PATTERNS: dict[str, re.Pattern[str]] = {}
 
-    A cue matches as a whole word, so a cue that is a common substring does not
-    fire on every claim that happens to contain it.
+
+def _compiled(pattern: str) -> re.Pattern[str]:
+    """The class's pattern, compiled once. Raises on a pattern that will not
+    compile, which the package schema refuses at import so it cannot arrive
+    here from a validated package."""
+    got = _PATTERNS.get(pattern)
+    if got is None:
+        got = _PATTERNS[pattern] = re.compile(pattern)
+    return got
+
+
+def _key(match: re.Match[str]) -> str:
+    """The comparison key of one match: its capture groups, or the whole match
+    when the pattern captures nothing.
+
+    Case-folded and stripped, because those are differences of typing rather
+    than of identity in every scheme. Nothing else is normalised: a deployment
+    that wants two spellings to compare equal writes a pattern that captures
+    them the same way, which keeps the judgement where the knowledge is.
     """
-    if not cues:
+    groups = [g for g in match.groups() if g is not None] or [match.group(0)]
+    return "\u0000".join(g.strip().upper() for g in groups)
+
+
+def identifiers_named(text: str, pattern: str) -> dict[str, str]:
+    """The identifiers a claim writes, as key -> the text that wrote it.
+
+    The text is kept for the message: a reader is told what the claim says,
+    not the key it reduced to.
+    """
+    return {_key(m): m.group(0) for m in _compiled(pattern).finditer(text)}
+
+
+def identifier_key(value: str, pattern: str) -> str | None:
+    """The key of a stored identifier, or None if it does not match the shape.
+
+    Anchored, so a value has to BE an identifier rather than merely contain
+    something shaped like one. Being strict here can only shrink the set a
+    claim is judged against, which loses a finding rather than inventing one.
+    """
+    m = _compiled(pattern).match(value.strip())
+    return _key(m) if m else None
+
+
+# A word has to be this long before it can distinguish anything. Shorter runs
+# are prepositions and initials in every language this has been read in.
+NAME_WORD = re.compile(r"[^\W\d_]{4,}")
+
+
+def _name_words(text: str) -> set[str]:
+    return {w.lower() for w in NAME_WORD.findall(text or "")}
+
+
+def distinctive_words(names: list[str], share: float = 0.2) -> set[str]:
+    """The words that tell these documents apart, measured rather than listed.
+
+    A claim naming a source in prose writes part of its name, and most of a
+    name is not distinguishing: across the documents one answer cites, words
+    like commission, court, judgment and chamber appear in most of the names,
+    and a claim containing one of them has named nothing. Measured on one
+    working set of 85 names: commission in 56, the in 52, european in 44,
+    court in 44, judgment in 36. The party names appear once or twice.
+
+    So a word counts when it appears in at most `share` of the names. The
+    threshold is deliberately loose because the measurement says the answer
+    barely moves with it: over 1,566 claim-and-source pairs the rule fires on
+    730 at a 5% share, 730 at 10% and 733 at 20%, while dropping the test
+    entirely fires on 1,174. The 444 it excludes are matches on boilerplate,
+    and 38% is also the false-positive rate measured when the word test is
+    removed from the check this feeds, which is the same population seen from
+    the other side.
+
+    Nothing here is a stopword list and nothing knows what kind of document
+    this is. In a corpus of invoices "invoice" would be the common word and
+    the vendor the distinguishing one, and this would say so.
+    """
+    if not names:
+        return set()
+    seen: dict[str, int] = {}
+    for name in names:
+        for word in _name_words(name):
+            seen[word] = seen.get(word, 0) + 1
+    cap = max(1, int(len(names) * share))
+    return {w for w, n in seen.items() if n <= cap}
+
+
+def carries_name(text: str, name: str, distinctive: set[str]) -> bool:
+    """Whether the claim names this document in prose.
+
+    One distinctive word is enough. Requiring two would miss a source named by
+    a single party, which is how most of them are written on second mention.
+    """
+    if not name:
         return False
-    words = set(re.findall(r"[^\W\d_]+", text.lower()))
-    return bool(words & cues)
+    return bool(_name_words(name) & distinctive & _name_words(text))
 
 
 def review(
     claims: list[Claim],
     sources: dict[int, list[Source]],
-    cues: frozenset[str],
 ) -> list[Finding]:
     """Findings for one answer. Pure: no I/O, no ordering assumptions beyond
     claim sequence, which is what "first mention" is defined against."""
+    return review_with_reach(claims, sources)[0]
+
+
+def review_with_reach(
+    claims: list[Claim],
+    sources: dict[int, list[Source]],
+) -> tuple[list[Finding], Reach]:
+    """`review`, and how far it got.
+
+    Split so `review` keeps the shape its callers and tests already use, and
+    nothing has to be counted twice to know what it looked at.
+    """
     attributing: dict[str, list[tuple[Claim, Source]]] = {}
     seen: set[tuple[int, str]] = set()
+    eligible: set[tuple[int, str]] = set()
     for claim in sorted(claims, key=lambda c: c.seq):
-        if not attributes(claim.text, cues):
-            continue
+        # Kept after the word test was removed, so the record still reports
+        # what was in scope. With no word test left to narrow it, `eligible`
+        # and `judged` are now equal by construction, and that equality is
+        # itself the reading: nothing is being skipped before the check.
+        for source in sources.get(claim.seq, ()):
+            if source.identifiers:
+                eligible.add((claim.seq, source.key))
         for source in sources.get(claim.seq, ()):
             # One claim can hold several pieces of evidence from the same
             # document. That is one claim relying on one source, not a chain of
@@ -148,24 +347,131 @@ def review(
             seen.add((claim.seq, source.key))
             attributing.setdefault(source.key, []).append((claim, source))
 
+    # Measured over the names of the documents this answer cites, so the words
+    # that distinguish them are the ones this answer's own set makes rare.
+    distinctive = distinctive_words(
+        [s.name for entries in attributing.values() for _, s in entries if s.name]
+    )
+
+    def names_it(claim: Claim, source: Source) -> bool:
+        """Named by its identifier or named in prose. Either is naming it.
+
+        The check exists so a reader can follow the claim to the source, and a
+        reader follows a party name as readily as a docket number. Reporting
+        "in Ferriere Nord v Commission the Court held" as naming nothing is
+        the largest group of wrong findings this produces.
+        """
+        return carries_identifier(claim.text, source.identifiers) or carries_name(
+            claim.text, source.name, distinctive
+        )
+
     findings: list[Finding] = []
     for entries in attributing.values():
-        named = any(
-            carries_identifier(claim.text, source.identifiers)
-            for claim, source in entries
-        )
+        named = any(names_it(claim, source) for claim, source in entries)
         first_claim, source = entries[0]
         if len(entries) > 1 and not named:
             findings.append(
                 Finding("unanchored_chain", source, tuple(c.seq for c, _ in entries))
             )
-        elif not carries_identifier(first_claim.text, source.identifiers):
+        elif not names_it(first_claim, source):
             findings.append(
                 Finding("unnamed_first_mention", source, (first_claim.seq,))
             )
     # Chains first: they are the worse defect, and the cap below is a real cut.
     findings.sort(key=lambda f: (f.kind != "unanchored_chain", f.seq))
-    return findings
+    return findings, Reach(len(eligible), len(seen), len(findings))
+
+
+def mismatches(
+    claims: list[Claim],
+    sources: dict[int, list[Source]],
+) -> list[Mismatch]:
+    """Claims that name a case and cite none of the cases they name. Pure.
+
+    Judged per claim, not per source. A claim that rests on a judgment and its
+    appeal, or on joined cases filed separately, names one of them and means
+    both; per source the unnamed one would fire on ordinary writing. Naming a
+    second case beside the cited one is ordinary too, and common: an appeal
+    relation, a case the cited judgment itself cites, a case being
+    distinguished. What none of those does is leave the cited case unwritten.
+    So the condition is not that the claim names something extra, but that it
+    names nothing it cites.
+
+    A claim citing no document with a readable case number is not judged. It
+    has nothing to be compared against, and a book chapter or a merger
+    reference may discuss whatever cases it likes.
+    """
+    return mismatches_with_reach(claims, sources)[0]
+
+
+def mismatches_with_reach(
+    claims: list[Claim],
+    sources: dict[int, list[Source]],
+) -> tuple[list[Mismatch], Reach]:
+    """`mismatches`, and how far it got. Pure."""
+    found: list[Mismatch] = []
+    eligible = judged = 0
+    for claim in sorted(claims, key=lambda c: c.seq):
+        here = sources.get(claim.seq, ())
+        # One claim can cite two classes with different shapes, so the prose is
+        # read once per distinct shape and the results unioned.
+        shapes = {s.pattern for s in here if s.pattern}
+        if not shapes:
+            continue
+        # It could have judged this claim: something it cites declares a shape.
+        eligible += 1
+        named: dict[str, str] = {}
+        for shape in shapes:
+            named.update(identifiers_named(claim.text, shape))
+        if not named:
+            continue
+        # key -> (what the source calls it, which document), so the message
+        # can show a reader the identifier rather than the key it reduced to.
+        cited: dict[str, tuple[str, str]] = {}
+        for source in here:
+            if not source.pattern:
+                continue
+            for identifier in source.identifiers:
+                key = identifier_key(identifier, source.pattern)
+                if key:
+                    cited.setdefault(key, (identifier, source.label))
+        if not cited:
+            continue
+        # It did judge it: the claim writes an identifier and something it
+        # cites carries one, so the two can be compared.
+        judged += 1
+        if set(named) & set(cited):
+            continue
+        found.append(
+            Mismatch(
+                seq=claim.seq,
+                named=tuple(sorted(named.values())),
+                cited=tuple(sorted(v[0] for v in cited.values())),
+                labels=tuple(dict.fromkeys(v[1] for v in cited.values())),
+            )
+        )
+    return found, Reach(eligible, judged, len(found))
+
+
+def mismatch_message(mismatch: Mismatch) -> str:
+    """The mismatch as feedback the reviser can act on.
+
+    Both halves are given because either one can be the wrong half. The claim
+    may rest on the right judgment and cite it under the wrong number, or it
+    may have taken a passage from one judgment and attributed it to another it
+    never read. Only the reviser, holding the passage, can tell which, so both
+    repairs are offered rather than one prescribed.
+    """
+    named = ", ".join(mismatch.named)
+    cited = ", ".join(mismatch.cited)
+    labels = ", ".join(mismatch.labels)
+    return (
+        f"Claim {mismatch.seq} names {named}, but the evidence bound to it is "
+        f"{cited} ({labels}). A reader who follows {named} will not find the "
+        f"passage the claim rests on. Either cite {named}, if that is the "
+        f"judgment the point comes from, or attribute the point to {cited}, "
+        f"which is what was actually read."
+    )
 
 
 def message(finding: Finding) -> str:
@@ -195,7 +501,8 @@ def message(finding: Finding) -> str:
 _LOAD = sa.text(
     """
     select ac.sequence, ac.claim_text, d.id::text, d.filename,
-           dc.attribution_cues, pv.value->>'_' as identifier
+           pv.value->>'_' as identifier,
+           dc.identifier_pattern, coalesce(nv.value->>'_', '') as doc_name
       from answer_claim ac
       join claim_evidence ce on ce.claim_id = ac.id
       join document d on d.id = ce.document_id
@@ -204,36 +511,97 @@ _LOAD = sa.text(
         on p.document_class_id = dc.id and p.name = dc.identifier_property
       join property_value pv
         on pv.document_id = d.id and pv.property_id = p.id
+      left join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      left join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
      where ac.answer_id = :answer_id
        and dc.identifier_property is not null
-       and dc.attribution_cues is not null
     """
 )
+
+
+# The same rows without the cue predicate. The correspondence check reads what
+# a claim says rather than what it fails to say, so it needs no cue vocabulary
+# and must not inherit one: a class that identifies its documents but declares
+# no cues is out of scope for `review` and in scope here. Kept as a second
+# statement rather than a relaxed `_LOAD`, so that widening this check's reach
+# cannot quietly widen the other's.
+_LOAD_IDENTIFIED = sa.text(
+    """
+    select ac.sequence, ac.claim_text, d.id::text, d.filename,
+           pv.value->>'_' as identifier, dc.identifier_pattern,
+           coalesce(nv.value->>'_', '') as doc_name
+      from answer_claim ac
+      join claim_evidence ce on ce.claim_id = ac.id
+      join document d on d.id = ce.document_id
+      join document_class dc on dc.id = d.document_class_id
+      join document_class_property p
+        on p.document_class_id = dc.id and p.name = dc.identifier_property
+      join property_value pv
+        on pv.document_id = d.id and pv.property_id = p.id
+      left join document_class_property np
+        on np.document_class_id = dc.id and np.name = dc.name_property
+      left join property_value nv
+        on nv.document_id = d.id and nv.property_id = np.id
+     where ac.answer_id = :answer_id
+       and dc.identifier_property is not null
+       and dc.identifier_pattern is not null
+    """
+)
+
+
+def _assemble(rows) -> tuple[list[Claim], dict[int, list[Source]]]:
+    """Rows of (sequence, claim text, document id, filename, identifier,
+    identifier pattern) as
+    the claims of an answer and the sources each one cites.
+
+    One row per claim, document and identifier, so a claim citing two passages
+    of one document arrives twice and becomes one source.
+    """
+    claims: dict[int, Claim] = {}
+    labels: dict[str, str] = {}
+    shapes: dict[str, str | None] = {}
+    names: dict[str, str] = {}
+    identifiers: dict[tuple[int, str], list[str]] = {}
+    for sequence, text, doc_id, filename, identifier, pattern, name in rows:
+        claims[sequence] = Claim(sequence, text or "")
+        labels[doc_id] = filename
+        shapes[doc_id] = pattern
+        names[doc_id] = name or ""
+        if identifier:
+            identifiers.setdefault((sequence, doc_id), []).extend(
+                _identifier_values(identifier)
+            )
+    sources: dict[int, list[Source]] = {}
+    for (sequence, doc_id), values in identifiers.items():
+        sources.setdefault(sequence, []).append(
+            Source(doc_id, tuple(dict.fromkeys(values)), labels[doc_id],
+                   shapes.get(doc_id), names.get(doc_id, ""))
+        )
+    return list(claims.values()), sources
 
 
 async def findings_for(answer_id: uuid.UUID) -> list[Finding]:
     """Findings for a published-or-drafting answer. Returns nothing at all when
     no document class opts in, which is the default."""
-    claims: dict[int, Claim] = {}
-    sources: dict[int, list[Source]] = {}
-    identifiers: dict[tuple[int, str], list[str]] = {}
-    labels: dict[str, str] = {}
-    cues: set[str] = set()
     async with AsyncSessionLocal() as session:
         rows = (await session.execute(_LOAD, {"answer_id": answer_id})).all()
-    for sequence, text, doc_id, filename, class_cues, identifier in rows:
-        claims[sequence] = Claim(sequence, text or "")
-        labels[doc_id] = filename
-        cues.update(c.lower() for c in (class_cues or []) if c)
-        if identifier:
-            identifiers.setdefault((sequence, doc_id), []).extend(
-                _identifier_values(identifier)
-            )
-    for (sequence, doc_id), values in identifiers.items():
-        sources.setdefault(sequence, []).append(
-            Source(doc_id, tuple(dict.fromkeys(values)), labels[doc_id])
-        )
-    return review(list(claims.values()), sources, frozenset(cues))
+    # Straight through, with no index list. `_LOAD` now selects exactly what
+    # `_assemble` unpacks, which is what `mismatches_for` has always done and
+    # why it never acquired the tuple-width bug this line carried twice.
+    claims, sources = _assemble(rows)
+    return review(claims, sources)
+
+
+async def mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:
+    """Claims of this answer that name a case they do not cite."""
+    async with AsyncSessionLocal() as session:
+        rows = (
+            await session.execute(_LOAD_IDENTIFIED, {"answer_id": answer_id})
+        ).all()
+    claims, sources = _assemble(rows)
+    return mismatches(claims, sources)
 
 
 def _identifier_values(raw: str) -> list[str]:
@@ -258,6 +626,131 @@ async def issues_for(answer_id: uuid.UUID) -> list[str]:
     try:
         found = await findings_for(answer_id)
     except Exception:
+        # Said here, not only in the log. A check that crashed returns an
+        # empty list, and an empty list is what a clean answer returns, so
+        # swallowing it silently makes a broken check indistinguishable from
+        # a passing one. That is the same defect as a check that was never
+        # configured, and it wants the same remedy: say so in the channel
+        # that carries the findings.
         log.exception("naming check failed for answer %s", answer_id)
-        return []
+        return [
+            "The check that a claim naming a source also names it in the "
+            "prose did not run on this answer: it failed. No claim was "
+            "examined. This is not a finding of none."
+        ]
     return [message(f) for f in found[:MAX_FINDINGS]]
+
+
+_UNSHAPED = sa.text(
+    """
+    select name from document_class
+     where identifier_property is not null
+       and identifier_pattern is null
+     order by name
+    """
+)
+
+
+async def unshaped_classes() -> list[str]:
+    """Classes that opt into the correspondence check and cannot be checked.
+
+    A class declaring `identifier_property` and no `identifier_pattern` has
+    said which property identifies its documents and not what an identifier
+    looks like, so the check has nothing to read prose with and returns
+    nothing for it.
+
+    This exists because returning nothing is what a clean answer also looks
+    like. The same shape has cost us four times: a class pointing at a
+    property it did not define, a word list excluding half the pairs it could
+    reach, a size limit cutting a ranked list with no marker, and this one in
+    the window between a migration and a re-import. Every one is a
+    precondition failing, the check returning empty, and empty being
+    indistinguishable from a pass.
+
+    So the rule this encodes is narrow: A CHECK THAT CANNOT RUN MUST SAY SO IN
+    THE SAME CHANNEL THAT CARRIES ITS FINDINGS. A telemetry key is a sibling
+    channel, read only by someone who already suspects. The caller puts this
+    into `issues`, which the gate record, the reviser's feedback and the run
+    export all already carry.
+
+    The package refuses this combination at import, so in steady state the
+    list is empty. It is not empty between a migration adding the column and
+    the re-import that fills it, which is exactly when nobody is looking.
+    """
+    async with AsyncSessionLocal() as session:
+        return [r[0] for r in (await session.execute(_UNSHAPED)).all()]
+
+
+async def unshaped_message() -> str | None:
+    """One line for `issues`, or None when every opted-in class can be read."""
+    try:
+        names = await unshaped_classes()
+    except Exception:
+        log.warning("unshaped-class check failed", exc_info=True)
+        return None
+    if not names:
+        return None
+    return (
+        "The check that a claim names the source it cites did not run for "
+        + ", ".join(names)
+        + ": the class declares which property identifies its documents but "
+        "not what an identifier looks like, so no claim of these classes was "
+        "examined. This is not a finding of none."
+    )
+
+
+async def reach_for(answer_id: uuid.UUID) -> dict[str, dict[str, int]]:
+    """How far each check got on this answer, for the run record.
+
+    Best-effort per check: a check that cannot be measured contributes
+    nothing rather than failing the pair, because this is bookkeeping and the
+    checks it measures are themselves quality notes.
+    """
+    out: dict[str, dict[str, int]] = {}
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(_LOAD, {"answer_id": answer_id})).all()
+        claims, sources = _assemble(rows)
+        out["naming"] = review_with_reach(claims, sources)[1].as_dict()
+    except Exception:
+        log.exception("naming reach failed for answer %s", answer_id)
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (
+                await session.execute(_LOAD_IDENTIFIED, {"answer_id": answer_id})
+            ).all()
+        claims, sources = _assemble(rows)
+        out["correspondence"] = mismatches_with_reach(claims, sources)[1].as_dict()
+    except Exception:
+        log.exception("correspondence reach failed for answer %s", answer_id)
+    return out
+
+
+async def safe_mismatches_for(
+    answer_id: uuid.UUID,
+) -> tuple[list[Mismatch], str | None]:
+    """Every mismatch in this answer, and never an exception.
+
+    Returns the findings and, when the check could not run, a line for
+    `issues`. Never raises into the caller, for the same reason `issues_for`
+    does not: this is a quality note, and an answer that is otherwise
+    publishable must not be held up because a check failed. But it does not
+    fail silently either — an empty list and a crash are the same bytes to
+    every reader, so the crash is announced where the findings go.
+
+    Returns the findings rather than the feedback strings, and returns all of
+    them rather than `MAX_FINDINGS` of them. The cap exists to bound what the
+    reviser is asked to read in one round, and applies where the strings are
+    built. A count kept for measurement wants none: the question this check is
+    on trial for is how often it fires and how often it is right, and a
+    truncated record cannot answer it.
+    """
+    try:
+        return await mismatches_for(answer_id), None
+    except Exception:
+        log.exception("naming correspondence check failed for answer %s", answer_id)
+        return [], (
+            "The check that a claim names the source it cites did not run on "
+            "this answer: it failed. No claim was examined. This is not a "
+            "finding of none."
+        )

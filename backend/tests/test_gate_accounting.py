@@ -197,8 +197,68 @@ def test_the_reviser_is_told_the_question_is_not_fully_answered():
     assert "Adding a claim that cites one is in scope" in SRC
 
 
-def test_publication_is_not_tied_to_it():
-    """Deliberate. With a measured 0% conversion after three feeds, blocking
-    would turn most runs partial without getting anything cited."""
-    assert "publishable = bool(data.get(\"publishable\")) and not uncovered" in SRC
-    assert "and not unaccounted" not in SRC.split("publishable = ")[1][:120]
+def test_publication_is_tied_to_the_actionable_debt_only():
+    """Changed from "not tied at all", on wider evidence.
+
+    The earlier decision recorded a measured 0% conversion after three feeds.
+    That measurement stands, and it is exactly why `actionable` drops
+    system-waived sources: past `MAX_FEEDS` a source converts at 0%, so gating
+    on it buys partials and no citations. Below the cap the picture inverts —
+    of 19 debts that settled across the runs carrying per-cycle history, 17
+    settled in the very next cycle and 17 ended up cited.
+
+    So the gate blocks on debt a further cycle could still discharge, and on
+    nothing else.
+    """
+    flat = " ".join(SRC.split())
+    assert "and not uncovered and not blocking" in flat
+    assert "blocking = await obligations.actionable(run_id, answer_id)" in flat
+    # the reported figure stays the honest one
+    assert '"accounted": not unaccounted' in SRC
+
+
+# -- what the gate may block on ----------------------------------------------
+#
+# `unaccounted` is the record and `actionable` is the gate. They differ on
+# exactly one thing: a system waiver. Keeping the pair apart is what stops a
+# retired obligation making a run unpublishable rather than late.
+
+
+async def actionable():
+    return await obligations.actionable(RUN, ANSWER)
+
+
+@pytest.mark.asyncio
+async def test_a_plain_debt_is_both_unaccounted_and_actionable(ledger):
+    ledger["entries"] = {"a.md": entry()}
+    assert await unaccounted() == ["a.md"]
+    assert await actionable() == ["a.md"]
+
+
+@pytest.mark.asyncio
+async def test_a_system_waiver_leaves_the_record_and_clears_the_gate(ledger):
+    ledger["entries"] = {"a.md": entry(waived=waiver("system"))}
+    assert await unaccounted() == ["a.md"]
+    assert await actionable() == []
+
+
+@pytest.mark.asyncio
+async def test_a_reviser_waiver_clears_both(ledger):
+    ledger["entries"] = {"a.md": entry(waived=waiver("reviser"))}
+    assert await unaccounted() == []
+    assert await actionable() == []
+
+
+@pytest.mark.asyncio
+async def test_citing_clears_both(ledger):
+    ledger["entries"] = {"a.md": entry()}
+    ledger["cited"] = {"a.md"}
+    assert await unaccounted() == []
+    assert await actionable() == []
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_ledger_does_not_block(ledger):
+    ledger["entries"] = {"a.md": entry()}
+    ledger["raise_on"] = "entries"
+    assert await actionable() == []

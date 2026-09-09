@@ -365,7 +365,8 @@ async def validate_answer_evidence(
     for ev, claim in rows:
         content = await _content_for(ev)
         if not content:
-            errors.append({"evidence_id": ev.id, "error": "no extracted content"})
+            errors.append({"evidence_id": ev.id, "error": "no extracted content",
+                           "claim_sequence": claim.sequence})
             continue
         span_text, lf, lt = _slice_span(content, ev.span or {})
         # Deterministic: a span wholly inside the front-matter envelope is
@@ -445,7 +446,16 @@ async def validate_answer_evidence(
                 overreaching.append(v)
             continue
         if "error" in v:
-            errors.append(v)
+            # With the sequence attached. An errored row is never marked
+            # validated, so it stays pending and is re-judged next round for
+            # free — the same shape as a failing span, and a caller that
+            # excludes claims on that ground needs to see these too. Without
+            # it the claim is invisible by number and its free re-judge looks
+            # like work. The id may be missing or unknown on a malformed
+            # verdict, so the lookup cannot assume either.
+            ev_err = by_id.get(v.get("evidence_id"))
+            errors.append({**v, "claim_sequence": claims_by_ev[ev_err.id].sequence}
+                          if ev_err is not None else v)
             continue
         ev = by_id[v["evidence_id"]]
         ev.validated = v["validated"]

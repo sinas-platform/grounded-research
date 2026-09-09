@@ -22,7 +22,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -1931,7 +1931,8 @@ def _coverage_summary(parts: list[dict]) -> dict:
     }
 
 
-def _closing_record(data: dict, claim_seqs: set, parts: list[dict]) -> dict:
+def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
+                    parts: list[dict]) -> dict:
     """Where the answer's concluding claim is, recorded and blocking nothing.
 
     A reviewer's finding on one question was that the answer ends off-topic
@@ -1975,7 +1976,7 @@ def _closing_record(data: dict, claim_seqs: set, parts: list[dict]) -> dict:
 
     Pure.
     """
-    last = max(claim_seqs) if claim_seqs else None
+    last = max(claims_by_seq) if claims_by_seq else None
     raw = data.get("concludes_at")
     at = None
     if not isinstance(raw, bool) and raw is not None:
@@ -1985,11 +1986,22 @@ def _closing_record(data: dict, claim_seqs: set, parts: list[dict]) -> dict:
             n = None
         # A sequence naming no claim in the answer is not a location. The gate
         # can return one: `covered_by_missing` exists because it does.
-        if n is not None and n.is_integer() and int(n) in claim_seqs:
+        if n is not None and n.is_integer() and int(n) in claims_by_seq:
             at = int(n)
     return {
         "last": last,
         "concludes_at": at,
+        # The same claim, by identity. A sequence is a position in a list the
+        # run is still editing: a drop renumbers everything after it, and
+        # `_compact_claim_sequences` closes the gaps at publication, so a
+        # number recorded mid-run can name a different claim in the answer a
+        # reviewer reads. Measured on run 493712fa: the gate recorded 12, the
+        # claim at 11 was dropped, and the conclusion published as claim 11
+        # while 12 became a claim about sealed envelopes. The number is kept
+        # because it is the gate's own reading and the disagreement measure
+        # below depends on it; the id is what still resolves afterwards.
+        "concludes_claim_id": (str(claims_by_seq[at]) if at is not None
+                               else None),
         # The three findings this has to keep apart. `ends_on_it` true is an
         # answer that closes; false with a sequence is a conclusion buried at
         # that sequence; null is no conclusion anywhere.
@@ -2334,7 +2346,8 @@ async def _gate_answer(
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
-                select(AnswerClaim.sequence, AnswerClaim.claim_text)
+                select(AnswerClaim.sequence, AnswerClaim.claim_text,
+                       AnswerClaim.id)
                 .where(AnswerClaim.answer_id == answer_id)
                 .order_by(AnswerClaim.sequence)
             )
@@ -2368,7 +2381,8 @@ async def _gate_answer(
     # cannot call a judgment "plainly more authoritative" than a bulletin
     # article without being shown which document is which.
     mrows = await _manifest_rows(parent_result_id) if parent_result_id else []
-    claims = "\n".join(f"{seq}. {text}" for seq, text in rows)
+    claims = "\n".join(f"{seq}. {text}" for seq, text, _ in rows)
+    claims_by_seq = {seq: cid for seq, _, cid in rows}
     source_lines = "\n".join(
         f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
         f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
@@ -2503,7 +2517,7 @@ async def _gate_answer(
         # a fixed decomposition binding instead of advisory. Without them the
         # drift returns through the verdict, which is how a part the question
         # does not ask was once added and immediately marked covered.
-        claim_seqs = {seq for seq, _ in rows}
+        claim_seqs = {seq for seq, _, _ in rows}
         seen: dict[int, dict] = {}
         for x in (data.get("parts") or []):
             if not isinstance(x, dict):
@@ -2525,7 +2539,7 @@ async def _gate_answer(
             for n, a in enumerate(fixed, start=1)
         ]
     else:
-        claim_seqs = {seq for seq, _ in rows}
+        claim_seqs = {seq for seq, _, _ in rows}
         parts = [
             {**x, **_audit_coverage(_seq_list(x.get("covered_by")), claim_seqs,
                                     with_evidence, unresponsive_seqs)}
@@ -2667,7 +2681,7 @@ async def _gate_answer(
                 "covered_by_unresponsive": x.get("covered_by_unresponsive") or []}
                for x in parts],
         coverage=_coverage_summary(parts),
-        closing=_closing_record(data, claim_seqs, parts))
+        closing=_closing_record(data, claims_by_seq, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

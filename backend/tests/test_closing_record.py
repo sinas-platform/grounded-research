@@ -20,12 +20,18 @@ Run from the backend directory:
 `python -m pytest tests/test_closing_record.py`
 """
 
+import uuid
+
 import pytest
 
 from app.services import query_runner as qr
 from app.services.query_runner import _closing_record
 
-SEQS = {1, 2, 3, 9, 14}
+# Sequence to claim id, which is what the recorder is given. A bare set of
+# sequences was enough until the numbers turned out not to survive the run:
+# `_compact_claim_sequences` renumbers 1..N at publication, so a number
+# recorded mid-run can name a different claim in the answer a reviewer reads.
+SEQS = {n: uuid.uuid4() for n in (1, 2, 3, 9, 14)}
 PARTS3 = [{"asks": "a"}, {"asks": "b"}, {"asks": "c"}]
 
 
@@ -211,3 +217,41 @@ async def test_it_is_not_summarised_into_the_flat_coverage_key(telemetry):
                                 coverage={"parts": 1, "covered": 1})
     assert "closing" not in telemetry["validate"]["gate_coverage"]
     assert telemetry["validate"]["gate_1"]["closing"]["shape"] == "absent"
+
+
+# -- the number does not survive the run, the identity does --------------------
+
+
+def test_the_conclusion_is_recorded_by_identity_as_well_as_by_number():
+    """A sequence is a position in a list that is still being edited. The id
+    is the claim. Both are kept: the number is the gate's own reading and the
+    disagreement measure depends on it, the id is what still resolves later."""
+    r = rec({"concludes_at": 9})
+    assert r["concludes_at"] == 9
+    assert r["concludes_claim_id"] == str(SEQS[9])
+
+
+def test_no_conclusion_means_no_claim_id():
+    for value in (None, "not a number", True, 2.5, 99):
+        assert rec({"concludes_at": value})["concludes_claim_id"] is None
+
+
+def test_renumbering_after_a_drop_leaves_the_number_wrong_and_the_id_right():
+    """The defect this fixes, as it happened on a real run.
+
+    The gate recorded the conclusion at sequence 12. The claim at sequence 11
+    was then dropped, and `_compact_claim_sequences` closed the gap at
+    publication, so the concluding claim became 11 and sequence 12 became a
+    different claim about sealed envelopes. Anyone reading the record for the
+    conclusion landed on the wrong sentence.
+    """
+    conclusion, other = uuid.uuid4(), uuid.uuid4()
+    during_the_run = {10: uuid.uuid4(), 11: other, 12: conclusion}
+    r = _closing_record({"concludes_at": 12}, during_the_run, PARTS3)
+
+    # the drop of 11, then compaction: what was 12 is now 11
+    published = {10: uuid.uuid4(), 11: conclusion}
+
+    assert published.get(r["concludes_at"]) is None, "the number went stale"
+    assert r["concludes_claim_id"] == str(conclusion)
+    assert str(published[11]) == r["concludes_claim_id"], "the id still resolves"

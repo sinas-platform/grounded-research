@@ -90,16 +90,24 @@ async def _retrieval_guidance() -> tuple[str, list[str]]:
         if not rows:
             return "", []
         scoped = (await session.execute(
-            select(PlaybookScope.playbook_id, PlaybookScope.document_class_id)
+            select(PlaybookScope.playbook_id,
+                   PlaybookScope.document_class_id,
+                   PlaybookScope.dossier_class_id)
             .where(PlaybookScope.playbook_id.in_([r[0] for r in rows]))
         )).all()
-    # A scope row with a null class is the everywhere-sentinel the importer
-    # writes to own the row; a row naming a class is a real restriction.
-    classes: dict = {}
-    for pb_id, cls_id in scoped:
-        classes.setdefault(pb_id, set()).add(cls_id)
+    # A scope row is the everywhere-sentinel only when BOTH class refs are
+    # null; the importer writes that row to own an everywhere-scoped playbook.
+    # Reading document_class_id alone would make a dossier-only scope look
+    # like the sentinel, and a playbook restricted to one dossier class would
+    # then be injected into every plan -- the opposite of what its scope says.
+    # A scope this cannot evaluate is a restriction, so it is not applied.
+    restricted: dict = {}
+    for pb_id, cls_id, dossier_id in scoped:
+        restricted.setdefault(pb_id, False)
+        if cls_id is not None or dossier_id is not None:
+            restricted[pb_id] = True
     return _playbook_block([
-        (name, content, (classes.get(pb_id) or set()) <= {None})
+        (name, content, not restricted.get(pb_id, False))
         for pb_id, name, content in rows
     ])
 

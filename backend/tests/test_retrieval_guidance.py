@@ -72,3 +72,23 @@ def test_both_prompts_still_format_with_every_slot_filled():
         corpus_map="schema", question="q", domain="some-domain ",
         guidance="G")
     assert _ROUND2_PROMPT.format(matches="m", question="q", guidance="G")
+
+
+def test_a_dossier_only_scope_is_a_restriction_not_the_sentinel():
+    """Reading document_class_id alone cannot tell them apart.
+
+    The sentinel the importer writes for an everywhere-scoped playbook has
+    both class refs null. A dossier-scoped playbook has a null document
+    class and a real dossier class. Looking at the document class alone
+    makes the second look like the first, and a playbook restricted to one
+    dossier class is then injected into every plan.
+    """
+    import inspect
+    from app import retrieval_first as rf
+
+    src = inspect.getsource(rf._retrieval_guidance)
+    assert "dossier_class_id" in src, (
+        "the scope query must read both class refs; reading one makes a "
+        "dossier-only scope indistinguishable from the everywhere sentinel")
+    assert "cls_id is not None or dossier_id is not None" in src, (
+        "either ref being set is a restriction")

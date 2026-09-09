@@ -2231,12 +2231,20 @@ async def _gate_answer(
     vocabulary, no counting floors — a stateless judge, per part of the
     question.
 
-    Returns (publishable, missing, issues, correctness, points).
+    Returns (publishable, missing, issues, correctness, points, cause).
+    `cause` is "coverage", "accounting" or "" — what held the answer back, so a
+    partial is named by the thing that caused it.
     `publishable` and `correctness` are the hard gate; `issues` are
     best-effort remediation targets that must never block publication on
     their own; `points` are the things revision must be given passages for —
     one entry per part of the question the claims do not answer, then each
     stronger source the gate named.
+
+    Two things clear `publishable`: every part of the question covered, and no
+    source the review itself named left neither cited nor waived. The second is
+    `obligations.actionable`, not `obligations.unaccounted` — the difference is
+    a system waiver, which retires an obligation without accounting for it and
+    so can never be discharged by another cycle.
 
     Everything the gate finds is returned. It used to leave some of it in a
     module-level dict, which a later edit deleted the declaration of — so
@@ -2551,6 +2559,11 @@ async def _gate_answer(
     # The tie is answer-scoped because it cannot honestly be finer: the gate
     # names sources without saying which part each bears on.
     unaccounted = await obligations.unaccounted(run_id, answer_id)
+    # What the gate blocks on is narrower than what it reports. See
+    # `obligations.actionable`: a system-waived source stays unaccounted
+    # by design, and gating on it would make the run unpublishable rather
+    # than late.
+    blocking = await obligations.actionable(run_id, answer_id)
     if unaccounted:
         # Ahead of the per-source lines, because those read as "a better
         # source exists" and the reviser is told to add a claim only where the
@@ -2587,11 +2600,42 @@ async def _gate_answer(
     # answer back.
     issues += await claim_naming.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
-    missing = "; ".join(uncovered) if uncovered else str(data.get("missing") or "")
-    publishable = bool(data.get("publishable")) and not uncovered
+    if uncovered:
+        missing = "; ".join(uncovered)
+    elif blocking:
+        # Named in `missing` and not only in `issues`, because `missing` is what
+        # the remediation message leads with, what `_gate_key` dedupes on, and
+        # what the partial note explains the run by. An answer held for a debt
+        # whose `missing` was empty would be held for a reason it never stated.
+        missing = (
+            f"{len(blocking)} source(s) this review named as bearing on the "
+            "question are neither cited nor waived: " + ", ".join(blocking[:5])
+        )
+    else:
+        missing = str(data.get("missing") or "")
+    publishable = (
+        bool(data.get("publishable")) and not uncovered and not blocking
+    )
+    # Which of the three held it, decided here because here is where all three
+    # are known. The caller would have to infer it from `missing`'s wording, and
+    # a partial labelled `coverage` for a run whose every part was covered is
+    # the mislabelling `consistency` was split out to stop.
+    #
+    # `holistic` is the judge rejecting the answer as a whole: it said
+    # publishable false while marking every part covered and naming no unmet
+    # source, so there is no part to point at. Falling through to `coverage`
+    # there would report a coverage failure for a run with no uncovered part,
+    # which is the same defect one case further along.
+    cause = (
+        "coverage" if uncovered
+        else "accounting" if blocking
+        else "holistic" if not bool(data.get("publishable"))
+        else ""
+    )
     # Coverage gaps first: they are what blocks publication, and the reviser
     # is given passages for a bounded number of points.
-    return publishable, missing, issues + correctness, correctness, uncovered + stronger
+    return (publishable, missing, issues + correctness, correctness,
+            uncovered + stronger, cause)
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -2734,7 +2778,7 @@ async def _pre_publish_sweep(
         # survives still answers the question. If it does, publish; the
         # partial state is reserved for the corpus genuinely not answering,
         # not for the repair budget running out one claim short.
-        ok, missing, issues, correctness, _pts = await _gate_answer(
+        ok, missing, issues, correctness, _pts, sweep_cause = await _gate_answer(
             sinas, question, answer_id, run_id)
         # This pass opens a cycle like any other, and used to discard its
         # issues because the caller had no use for them. The record did: a
@@ -2746,6 +2790,18 @@ async def _pre_publish_sweep(
         if ok and not correctness:
             await _tele(run_id, "validate", final_sweep_published_after_drop=True)
             return True
+        if sweep_cause == "holistic":
+            raise PartialOutcome(
+                "holistic",
+                "after removing claims the final review could not support, the "
+                "review rejected the answer as a whole without naming a part it "
+                "fails to address" + (f" — {missing}" if missing else ""))
+        if sweep_cause == "accounting":
+            raise PartialOutcome(
+                "accounting",
+                "after removing claims the final review could not support, a "
+                "source this review named as bearing on the question is neither "
+                "cited nor waived — " + (missing or " ".join(fb))[:600])
         raise PartialOutcome(
             "coverage",
             "after removing claims the final review could not support, the "
@@ -3831,7 +3887,7 @@ async def _stage_validate_publish(
             if pending is None:
                 async with AsyncSessionLocal() as session:
                     question = (await session.get(QueryRun, run_id)).question
-                ok, missing, issues, correctness, points = await _gate_answer(
+                ok, missing, issues, correctness, points, gate_cause = await _gate_answer(
                     sinas, question, answer_id, run_id)
                 # Amended here, where the gate's output is final, rather than
                 # on the branches below. `issues` is complete the moment
@@ -3865,6 +3921,22 @@ async def _stage_validate_publish(
                             last_attempt=True)
                         return await _stage_validate_publish(run_id, sinas, 0)
                     if not ok:
+                        # Named by what held it. `accounting` is not a coverage
+                        # gap: every part was covered and a named source was
+                        # left neither cited nor waived, and calling that
+                        # "coverage" tells the reader the sources were silent
+                        # on something they were not silent on.
+                        if gate_cause == "accounting":
+                            raise PartialOutcome(
+                                "accounting",
+                                "the answer does not account for every source this "
+                                "review named as bearing on the question — " + missing)
+                        if gate_cause == "holistic":
+                            raise PartialOutcome(
+                                "holistic",
+                                "the review rejected the answer as a whole without "
+                                "naming a part it fails to address"
+                                + (f" — {missing}" if missing else ""))
                         raise PartialOutcome(
                             "coverage",
                             f"the validated claims no longer answer the question — {missing}")
@@ -3949,7 +4021,7 @@ async def _stage_validate_publish(
         await _record_removal(run_id, "rounds_exhausted", dropped)
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
-    ok, missing, issues, correctness, points = await _gate_answer(
+    ok, missing, issues, correctness, points, gate_cause = await _gate_answer(
         sinas, question, answer_id, run_id)
     # Same reason as the other call site: final here, and some paths below
     # return before any later write.
@@ -3977,6 +4049,17 @@ async def _stage_validate_publish(
                                  points or ([missing] if missing else []),
                                  last_attempt=True)
             return await _stage_validate_publish(run_id, sinas, 0)
+        if not ok and gate_cause == "accounting":
+            raise PartialOutcome(
+                "accounting",
+                "validation exhausted with a source this review named as bearing "
+                "on the question neither cited nor waived — " + missing)
+        if not ok and gate_cause == "holistic":
+            raise PartialOutcome(
+                "holistic",
+                "validation exhausted and the review still rejected the answer as "
+                "a whole without naming a part it fails to address"
+                + (f" — {missing}" if missing else ""))
         raise PartialOutcome(
             "coverage",
             ("validation exhausted and the surviving claims do not answer the "

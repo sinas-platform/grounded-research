@@ -86,7 +86,7 @@ async def _gate(reply, split=DEFAULT_SPLIT):
 
 @pytest.mark.asyncio
 async def test_not_publishable_blocks(gate_env):
-    ok, missing, _issues, _corr, uncovered = await _gate(
+    ok, missing, _issues, _corr, uncovered, _cause = await _gate(
         json.dumps(
             {
                 "publishable": False,
@@ -102,7 +102,7 @@ async def test_not_publishable_blocks(gate_env):
 
 @pytest.mark.asyncio
 async def test_uncovered_part_blocks_even_when_judge_says_publishable(gate_env):
-    ok, missing, _issues, _corr, uncovered = await _gate(
+    ok, missing, _issues, _corr, uncovered, _cause = await _gate(
         json.dumps(
             {
                 "publishable": True,
@@ -123,8 +123,125 @@ async def test_uncovered_part_blocks_even_when_judge_says_publishable(gate_env):
 
 
 @pytest.mark.asyncio
+async def test_an_actionable_debt_blocks_even_when_every_part_is_covered(
+    gate_env, monkeypatch
+):
+    """The second thing that clears `publishable`. A source the review itself
+    named, still uncited and not waived by anyone, holds the answer back even
+    though the judge said publishable and no part is uncovered."""
+    from app.services import obligations
+
+    async def _actionable(_run, _answer):
+        return ["owed.md"]
+
+    monkeypatch.setattr(obligations, "actionable", _actionable)
+    ok, missing, _issues, _corr, _pts, _cause = await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}],
+            }
+        )
+    )
+    assert ok is False
+    assert "owed.md" in missing
+    assert "neither cited nor waived" in missing
+
+
+@pytest.mark.asyncio
+async def test_the_cause_names_which_of_the_two_held_it(gate_env, monkeypatch):
+    """A partial labelled `coverage` for a run whose every part was covered
+    tells the reader the sources were silent on something they were not silent
+    on. The gate knows which held it, so the gate says."""
+    from app.services import obligations
+
+    async def _debt(_run, _answer):
+        return ["owed.md"]
+
+    monkeypatch.setattr(obligations, "actionable", _debt)
+    _ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": True,
+                    "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}]}))
+    assert cause == "accounting"
+
+
+@pytest.mark.asyncio
+async def test_a_holistic_rejection_gets_its_own_cause(gate_env):
+    """The judge can say publishable false while marking every part covered and
+    naming no unmet source. There is no part to point at, so falling through to
+    `coverage` would report a coverage failure for a run with no uncovered
+    part."""
+    ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": False,
+                    "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}]}))
+    assert ok is False
+    assert cause == "holistic"
+
+
+@pytest.mark.asyncio
+async def test_coverage_still_outranks_a_holistic_rejection(gate_env):
+    """An uncovered part is the more specific finding: name that."""
+    _ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": False,
+                    "parts": [{"n": 1, "covered": True},
+                              {"n": 2, "covered": False, "gap": "nothing addresses it"}]}))
+    assert cause == "coverage"
+
+
+@pytest.mark.asyncio
+async def test_an_uncovered_part_is_still_called_coverage(gate_env, monkeypatch):
+    """And it outranks the debt when both are present: a part nothing answers
+    is the more fundamental gap, and the reviser is fed for it first."""
+    from app.services import obligations
+
+    async def _debt(_run, _answer):
+        return ["owed.md"]
+
+    monkeypatch.setattr(obligations, "actionable", _debt)
+    _ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": True,
+                    "parts": [{"n": 1, "covered": True},
+                              {"n": 2, "covered": False, "gap": "nothing addresses it"}]}))
+    assert cause == "coverage"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_verdict_names_no_cause(gate_env):
+    _ok, _m, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": True,
+                    "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}]}))
+    assert cause == ""
+
+
+@pytest.mark.asyncio
+async def test_a_system_waived_debt_does_not_block(gate_env, monkeypatch):
+    """`actionable` is empty once the obligation is retired, so the run
+    publishes late rather than never. This is the case that made blocking on
+    raw `unaccounted` untenable."""
+    from app.services import obligations
+
+    async def _actionable(_run, _answer):
+        return []
+
+    async def _unaccounted(_run, _answer):
+        return ["retired.md"]
+
+    monkeypatch.setattr(obligations, "actionable", _actionable)
+    monkeypatch.setattr(obligations, "unaccounted", _unaccounted)
+    ok, _missing, _issues, _corr, _pts, _cause = await _gate(
+        json.dumps(
+            {
+                "publishable": True,
+                "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}],
+            }
+        )
+    )
+    assert ok is True
+
+
+@pytest.mark.asyncio
 async def test_correctness_defects_are_separated_from_quality_issues(gate_env):
-    _ok, _missing, issues, correctness, _unc = await _gate(
+    _ok, _missing, issues, correctness, _unc, _cause = await _gate(
         json.dumps(
             {
                 "publishable": True,
@@ -148,7 +265,7 @@ async def test_a_named_stronger_source_becomes_a_point_to_ground(gate_env):
     line of it, and correctly changed nothing — which read as the reviser
     ignoring the gate.
     """
-    _ok, _missing, issues, _corr, points = await _gate(
+    _ok, _missing, issues, _corr, points, _cause = await _gate(
         json.dumps(
             {
                 "publishable": True,
@@ -212,7 +329,7 @@ async def test_a_reply_that_cannot_be_read_is_repaired_once(gate_env):
     """The drafter repairs its own malformed reply; this is that, on the one
     call that decides whether an answer is publishable."""
     sinas = _SequenceSinas("I cannot judge this.", VALID)
-    ok, missing, _issues, _corr, _unc = await _gate_seq(sinas)
+    ok, missing, _issues, _corr, _unc, _cause = await _gate_seq(sinas)
     assert len(verdicts(sinas)) == 2
     assert ok is False
     assert missing == "no conclusion is drawn"
@@ -234,7 +351,7 @@ async def test_a_reply_that_is_not_an_object_is_repaired(gate_env):
     """It parses. It carries no verdict, and letting it through was the
     silent pass in another costume."""
     sinas = _SequenceSinas('["not", "a", "verdict"]', VALID)
-    ok, _missing, _issues, _corr, _unc = await _gate_seq(sinas)
+    ok, _missing, _issues, _corr, _unc, _cause = await _gate_seq(sinas)
     assert len(verdicts(sinas)) == 2
     assert ok is False
 
@@ -296,7 +413,7 @@ async def test_a_thin_decomposition_is_visible(gate_env):
     """The failure this exists to expose: one part enumerated for a question
     that asks more. It is now the split that is thin rather than the verdict,
     and the recorded decomposition is still the only thing that shows it."""
-    ok, missing, _issues, _corr, _unc = await _gate(
+    ok, missing, _issues, _corr, _unc, _cause = await _gate(
         json.dumps({"publishable": True, "parts": [{"n": 1, "covered": True}]}),
         split=SPLIT_ONE,
     )
@@ -311,7 +428,7 @@ async def test_a_verdict_naming_no_part_leaves_every_part_uncovered(gate_env):
     decomposition the record is the run's parts, not the verdict's, so a
     verdict that names none of them leaves all of them uncovered. Silence
     about a part cannot read as coverage."""
-    ok, _missing, _issues, _corr, uncovered = await _gate(
+    ok, _missing, _issues, _corr, uncovered, _cause = await _gate(
         json.dumps({"publishable": True})
     )
     assert ok is False
@@ -396,7 +513,7 @@ async def test_what_is_recorded_is_what_the_check_judged(gate_env):
     fixed decomposition it cannot be absent, because the record is the run's
     parts. An element the check cannot read leaves its part uncovered
     instead, which is the same rule seen from the other side."""
-    ok, _missing, _issues, _corr, uncovered = await _gate(
+    ok, _missing, _issues, _corr, uncovered, _cause = await _gate(
         json.dumps(
             {"publishable": True, "parts": ["not an object", {"n": 2, "covered": True}]}
         )
@@ -461,7 +578,7 @@ async def test_the_question_is_split_before_the_verdict(gate_env):
             }
         ),
     )
-    ok, _missing, _issues, _corr, _unc = await _run(sinas)
+    ok, _missing, _issues, _corr, _unc, _cause = await _run(sinas)
     assert len(sinas.calls) == 2
     assert "Split the question" in sinas.calls[0]
     assert "PARTS OF THE QUESTION (fixed for this run" in sinas.calls[1]
@@ -524,7 +641,7 @@ async def test_a_part_the_runner_did_not_ask_about_is_dropped(gate_env):
             }
         ),
     )
-    ok, _missing, _issues, _corr, uncovered = await _run(sinas)
+    ok, _missing, _issues, _corr, uncovered, _cause = await _run(sinas)
     assert ok is True
     assert uncovered == []
 
@@ -537,7 +654,7 @@ async def test_a_part_with_no_verdict_is_uncovered_not_assumed(gate_env):
         DEFAULT_SPLIT,
         json.dumps({"publishable": True, "parts": [{"n": 1, "covered": True}]}),
     )
-    ok, missing, _issues, _corr, uncovered = await _run(sinas)
+    ok, missing, _issues, _corr, uncovered, _cause = await _run(sinas)
     assert ok is False
     assert uncovered == ["the review returned no verdict for this part"]
     assert "no verdict" in missing
@@ -561,7 +678,7 @@ async def test_an_uncovered_fixed_part_still_blocks(gate_env):
             }
         ),
     )
-    ok, missing, _issues, _corr, uncovered = await _run(sinas)
+    ok, missing, _issues, _corr, uncovered, _cause = await _run(sinas)
     assert ok is False
     assert uncovered == ["nothing says whether it is mandatory"]
     assert "mandatory" in missing
@@ -585,7 +702,7 @@ async def test_an_unreadable_split_falls_back_to_deriving_it(gate_env):
             }
         ),
     )
-    ok, _missing, _issues, _corr, uncovered = await _run(sinas)
+    ok, _missing, _issues, _corr, uncovered, _cause = await _run(sinas)
     assert len(sinas.calls) == 3
     assert "First split the QUESTION" in sinas.calls[2]
     assert ok is True

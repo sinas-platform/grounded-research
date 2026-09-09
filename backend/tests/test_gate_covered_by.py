@@ -198,7 +198,7 @@ def test_the_audit_reaches_the_telemetry():
     for k in ("covered_by", "covered_by_missing", "covered_by_unsupported",
               "covered_by_unresponsive"):
         assert f'"{k}": x.get("{k}")' in s, k
-    assert "coverage=_coverage_summary(parts))" in s
+    assert "coverage=_coverage_summary(parts)" in s
     assert "gate_coverage=coverage)" in s
 
 

@@ -22,7 +22,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -1931,14 +1931,109 @@ def _coverage_summary(parts: list[dict]) -> dict:
     }
 
 
+def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
+                    parts: list[dict]) -> dict:
+    """Where the answer's concluding claim is, recorded and blocking nothing.
+
+    A reviewer's finding on one question was that the answer ends off-topic
+    with no conclusion. Read across eleven runs carrying gate telemetry, two
+    end on a claim that answers the question, two arguably do, and seven end
+    on a source note or a procedural aside. So the shape is real and common.
+
+    It cannot be derived from `covered_by`. Measured on those eleven, the union
+    of every part's `covered_by` names 11 of 11, 13 of 14, 14 of 14 claims —
+    nearly all of them, trailing case notes included, because a note about
+    Deutsche Bahn genuinely does bear on a part about judicial review.
+    Membership says a claim relates to the question; it says nothing about
+    which claim discharges it. Hence a separate reading.
+
+    `no_conclusion` already exists in the verdict and already blocks, through
+    `correctness`. Two things are wrong with relying on it alone. It is a
+    boolean, so "no conclusion anywhere" and "the conclusion is claim 9 of 14"
+    are the same answer, and those want different remedies: the first is a
+    missing claim, the second is an ordering defect that a rewrite would be the
+    wrong instrument for. And it records nothing when false, so a run cannot be
+    asked whether the gate considered the question at all. It has fired in 35
+    runs from before gate-cycle telemetry existed and in none of the 39 since,
+    while at least three of the eleven read by hand end with no conclusion
+    anywhere — 6d7b9989 among them, whose two sibling runs on the same question
+    both close with "The Commission may therefore lawfully take a forensic
+    copy" and which simply has no such claim.
+
+    So both are recorded: the gate's own boolean, and the sequence it puts the
+    conclusion at. Where they disagree is the measurement worth having.
+
+    `single_part` rides along because it decides whether any of the coverage
+    machinery meant anything on this run. A question that decomposes to one
+    part cannot fail coverage — `parts: 1, covered: 1` is the whole check, and
+    every `only_*` counter is computed over covered parts, so all of them are
+    inert. Four of 34 runs decompose that way, Q17 reproducibly across three
+    references. On those runs this record is the only whole-answer signal
+    there is, which is the argument for keeping it.
+
+    Blocks nothing, like `_audit_coverage` before it: recorded so the next
+    batch can say how often each shape happens, and the decision comes after.
+
+    Pure.
+    """
+    last = max(claims_by_seq) if claims_by_seq else None
+    raw = data.get("concludes_at")
+    at = None
+    if not isinstance(raw, bool) and raw is not None:
+        try:
+            n = float(raw)
+        except (TypeError, ValueError):
+            n = None
+        # A sequence naming no claim in the answer is not a location. The gate
+        # can return one: `covered_by_missing` exists because it does.
+        if n is not None and n.is_integer() and int(n) in claims_by_seq:
+            at = int(n)
+    return {
+        "last": last,
+        "concludes_at": at,
+        # The same claim, by identity. A sequence is a position in a list the
+        # run is still editing: a drop renumbers everything after it, and
+        # `_compact_claim_sequences` closes the gaps at publication, so a
+        # number recorded mid-run can name a different claim in the answer a
+        # reviewer reads. Measured on run 493712fa: the gate recorded 12, the
+        # claim at 11 was dropped, and the conclusion published as claim 11
+        # while 12 became a claim about sealed envelopes. The number is kept
+        # because it is the gate's own reading and the disagreement measure
+        # below depends on it; the id is what still resolves afterwards.
+        "concludes_claim_id": (str(claims_by_seq[at]) if at is not None
+                               else None),
+        # The three findings this has to keep apart. `ends_on_it` true is an
+        # answer that closes; false with a sequence is a conclusion buried at
+        # that sequence; null is no conclusion anywhere.
+        "ends_on_it": (at is not None and at == last),
+        "shape": ("closes" if at is not None and at == last
+                  else "buried" if at is not None
+                  else "absent"),
+        # The gate's own boolean, beside the position it gave. Disagreement
+        # between the two is the thing to count, which is why this is read
+        # strictly rather than for truthiness: `bool("false")` is True, and a
+        # non-canonical scalar read that way would manufacture exactly the
+        # disagreement this exists to measure. The prompt asks for a boolean,
+        # so anything else is a reply that did not answer, recorded as False.
+        #
+        # Worth knowing, and NOT changed here: the consumer that blocks reads
+        # the same field for truthiness (`if data.get("no_conclusion")`), so a
+        # reply of "false" would hold the answer back while this records False.
+        # That divergence is a defect in the blocking path, not in the record,
+        # and fixing it changes what publishes — out of scope for a change that
+        # blocks nothing. It is a reason to have the record.
+        "gate_said_none": data.get("no_conclusion") is True,
+        "single_part": len(parts) == 1,
+    }
+
+
 async def _record_gate_cycle(
     run_id: uuid.UUID, *, parts: list[dict],
     reparse: str | None = None, unparseable: str | None = None,
     unaccounted: list[str] | None = None,
     fed: list[dict] | None = None,
     system_waived: list[str] | None = None,
-
-
+    closing: dict | None = None,
     coverage: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
@@ -2004,6 +2099,10 @@ async def _record_gate_cycle(
         # flat would put a last-write count next to a per-cycle history and
         # invite reading one as the other.
         "coverage": coverage or {},
+        # Beside the coverage summary for the same reason it is: both are
+        # answer-scoped readings of this cycle, and a flat key would be a
+        # last-write sitting next to a history.
+        "closing": closing or {},
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
@@ -2255,7 +2354,8 @@ async def _gate_answer(
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
-                select(AnswerClaim.sequence, AnswerClaim.claim_text)
+                select(AnswerClaim.sequence, AnswerClaim.claim_text,
+                       AnswerClaim.id)
                 .where(AnswerClaim.answer_id == answer_id)
                 .order_by(AnswerClaim.sequence)
             )
@@ -2289,7 +2389,8 @@ async def _gate_answer(
     # cannot call a judgment "plainly more authoritative" than a bulletin
     # article without being shown which document is which.
     mrows = await _manifest_rows(parent_result_id) if parent_result_id else []
-    claims = "\n".join(f"{seq}. {text}" for seq, text in rows)
+    claims = "\n".join(f"{seq}. {text}" for seq, text, _ in rows)
+    claims_by_seq = {seq: cid for seq, _, cid in rows}
     source_lines = "\n".join(
         f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
         f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
@@ -2353,6 +2454,7 @@ async def _gate_answer(
 'stages are NOT in tension; when in doubt, null. Or null.>",'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
+        ' "concludes_at": <the sequence number of the claim that draws that overall conclusion, or null if no claim does. A claim that states the answer to the question, not one that reports what a single source says.>,'
         ' "unused_sources": ["<filename>: <the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>", ...]}',
     )
     # Only the parse is guarded. A wide try around the whole body turns a
@@ -2423,7 +2525,7 @@ async def _gate_answer(
         # a fixed decomposition binding instead of advisory. Without them the
         # drift returns through the verdict, which is how a part the question
         # does not ask was once added and immediately marked covered.
-        claim_seqs = {seq for seq, _ in rows}
+        claim_seqs = {seq for seq, _, _ in rows}
         seen: dict[int, dict] = {}
         for x in (data.get("parts") or []):
             if not isinstance(x, dict):
@@ -2445,7 +2547,7 @@ async def _gate_answer(
             for n, a in enumerate(fixed, start=1)
         ]
     else:
-        claim_seqs = {seq for seq, _ in rows}
+        claim_seqs = {seq for seq, _, _ in rows}
         parts = [
             {**x, **_audit_coverage(_seq_list(x.get("covered_by")), claim_seqs,
                                     with_evidence, unresponsive_seqs)}
@@ -2591,7 +2693,8 @@ async def _gate_answer(
                 "covered_by_unsupported": x.get("covered_by_unsupported") or [],
                 "covered_by_unresponsive": x.get("covered_by_unresponsive") or []}
                for x in parts],
-        coverage=_coverage_summary(parts))
+        coverage=_coverage_summary(parts),
+        closing=_closing_record(data, claims_by_seq, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

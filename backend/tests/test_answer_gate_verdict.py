@@ -23,6 +23,8 @@ import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
+_CLAIM_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
+
 import pytest
 
 from app.services import query_runner as qr
@@ -63,7 +65,10 @@ def gate_env(monkeypatch):
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(all=lambda: []),
                 scalar_one_or_none=lambda: None,
-                all=lambda: [(1, "The Commission may inspect business premises.")],
+                # (sequence, text, claim id): the gate reads the id so the
+                # closing record can name the claim rather than its position.
+                all=lambda: [(1, "The Commission may inspect business premises.",
+                              _CLAIM_ID)],
             )
 
     @asynccontextmanager

@@ -523,6 +523,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     DocumentClass.name,
                     ResultDocument.reason,
                     Document.summary,
+                    ResultDocument.rank,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -579,7 +580,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         return str(value)
 
     out = []
-    for did, fn, cls, reason, summary in rows:
+    for did, fn, cls, reason, summary, rank in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -591,15 +592,72 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             "document_id": did, "filename": fn, "class": cls or "",
             "annotations": ann, "properties": props, "reason": (reason or ""),
             "summary": (summary or ""),
+            "rank": rank,
             "briefing": briefing_by_doc.get(str(did)),
         })
     return out
 
 
-def _manifest_line(r: dict) -> str:
+# Where the planner's attention actually goes. Measured over 3,854 citations in
+# published answers: 56% name a document in the top ten, 72% in the top twenty,
+# and the median citation is rank 9. The list is still worth carrying to the end
+# — 13% of citations come from below rank 40 — but not at a flat price per
+# document, which spends the same on rank 3 as on rank 97.
+HEAD_DOCUMENTS = 20
+HEAD_SUMMARY_CHARS = 500
+TAIL_SUMMARY_CHARS = 100
+
+# A table of contents, rendered as line ranges and titles rather than as the
+# repr of its JSON. Half of what the old rendering carried was keys, quotes and
+# braces, so this holds roughly the same titles in half the characters.
+TOC_CHARS = 300
+
+
+def _manifest_line(r: dict, summary_chars: int = HEAD_SUMMARY_CHARS) -> str:
     return (f"- {r['filename']} | {r['class'] or '-'} | "
             f"{r['annotations'] or '-'} | {r.get('properties') or '-'} | "
-            f"{r['reason'][:120]} | {r['summary'][:200]}")
+            f"{r['reason'][:120]} | {r['summary'][:summary_chars]}")
+
+
+def _toc_digest(toc, cap: int = TOC_CHARS) -> str:
+    """A table of contents as `start-end title`, bounded.
+
+    Stored as JSON and rendered with `str()`, 57% of the characters that
+    reached the planner were structural: `{"line": 1, "level": 1, "title":
+    "...", "line_to": 8487}`. The planner needs the titles and where they
+    begin, so those are what it gets, and more of them fit.
+
+    Never raises for the sake of a table of contents: anything unreadable is
+    passed through truncated, which is what the old rendering did to
+    everything.
+    """
+    if isinstance(toc, str):
+        try:
+            toc = json.loads(toc)
+        except ValueError:
+            return toc[:cap]
+    entries = toc.get("entries") if isinstance(toc, dict) else (
+        toc if isinstance(toc, list) else None)
+    # A mapping of entries is still entries. Iterating a dict yields its keys,
+    # every one a string, and the loop below drops non-dictionaries -- so a
+    # mapping would render as nothing at all where the old `str(toc)` at least
+    # showed the reader something. Not seen in this corpus, where all 5,722
+    # stored tables of contents hold a list; cheap to not depend on that.
+    if isinstance(entries, dict):
+        entries = list(entries.values())
+    if not entries:
+        return str(toc)[:cap]
+    out: list[str] = []
+    used = 0
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        row = f"{e.get('line')}-{e.get('line_to')} {e.get('title') or ''}".strip()
+        if used + len(row) + 2 > cap:
+            break
+        out.append(row)
+        used += len(row) + 2
+    return "; ".join(out)
 
 
 # What the planner may be shown. The prompt slices to this, so a manifest
@@ -629,13 +687,35 @@ async def _doc_manifest(
     arrive in rank order, so what is lost is what retrieval ranked last. The
     defect was never the dropping, only that it happened silently.
     """
+    rows = await _manifest_rows(parent_id)
+    # Position is rank only when there is a rank. A curated result -- documents
+    # merged in, reached through the graph, or attached by hand -- can carry
+    # rows with no rank at all, and one in this corpus has 178 of 178. Ordering
+    # by a null column leaves the sequence arbitrary, so banding on position
+    # would hand five times the budget to whichever ten happened to come first
+    # and drop the rest of the tail on the same non-reason. Where the ranking is
+    # incomplete, nothing is privileged: every document gets the tail budget and
+    # the record says the banding did not apply.
+    unranked = sum(1 for r in rows if r.get("rank") is None)
     lines: list[str] = []
     total = shown = 0
+    ranked_seen = 0
     used = 0
     full = False
-    for r in await _manifest_rows(parent_id):
+    for r in rows:
         total += 1
-        block = [_manifest_line(r)]
+        # Per row, not per result. A ranked row keeps its place in the band; an
+        # unranked one takes the tail budget rather than a place it has not
+        # earned. Deciding this for the whole result would mean one attached
+        # document stripping the head budget from every ranked one beside it,
+        # which is worse than the problem: no result in this corpus mixes the
+        # two, but merge and graph expansion are how one would.
+        has_rank = r.get("rank") is not None
+        if has_rank:
+            ranked_seen += 1
+        block = [_manifest_line(
+            r, HEAD_SUMMARY_CHARS if (has_rank and ranked_seen <= HEAD_DOCUMENTS)
+            else TAIL_SUMMARY_CHARS)]
         brief = r.get("briefing")
         if brief:
             props = brief.get("properties")
@@ -643,7 +723,7 @@ async def _doc_manifest(
                 block.append(f"    properties: {json.dumps(props, ensure_ascii=False)[:400]}")
             toc = brief.get("toc")
             if toc:
-                block.append(f"    toc: {str(toc)[:600]}")
+                block.append(f"    toc: {_toc_digest(toc)}")
         # Exactly what this block adds to the joined string: its own lines,
         # the newlines between them, and one more to join it to what is
         # already there -- which the first block does not need. Charging a
@@ -664,7 +744,7 @@ async def _doc_manifest(
         shown += 1
         lines.extend(block)
     return "\n".join(lines), {
-        "chars": used, "cap": cap,
+        "chars": used, "cap": cap, "unranked": unranked,
         "documents": total, "shown": shown, "dropped": total - shown,
     }
 

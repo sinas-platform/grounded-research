@@ -2731,8 +2731,26 @@ async def _pre_publish_sweep(
     # so at most one sweep per run reaches them. They also share the prefix
     # without being cycles, which is exactly what `_is_numbered` is for.
     cycle = await _next_cycle_key(run_id, "validate", "final_sweep")
+    # `judged` and `errors` say whether the sweep looked; `failed` and
+    # `overreaching` say what it found. Only the second pair was recorded, and
+    # the two readings are the same numbers.
+    #
+    # `validate_answer_evidence` returns errors beside failures, and an errored
+    # span is skipped before any verdict is written: it is not in `failed`, not
+    # in `overreaching`, and its row keeps whatever it had. So a sweep where
+    # every span errored recorded `failed: 0, overreaching: 0` and returned
+    # True, which is character for character what a sweep that judged all forty
+    # and objected to nothing records.
+    #
+    # Recorded, not acted on. The early return below still reads only `failed`
+    # and `overreaching`. Making an error object is a behaviour change on a
+    # path that has not fired once in 231 published runs — no published answer
+    # carries an unjudged or failing span — and it should arrive with evidence
+    # from this record rather than on the strength of the argument for it.
     await _tele(run_id, "validate", final_sweeps=sweeps + 1, **{
         cycle: {
+            "judged": fv["judged"],
+            "errors": len(fv.get("errors") or []),
             "failed": len(fv["failed"]),
             "overreaching": len(f_over),
             "overreaching_claims": _overreach_detail(f_over)}})

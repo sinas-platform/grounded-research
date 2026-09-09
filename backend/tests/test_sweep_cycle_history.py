@@ -37,6 +37,23 @@ FLAT = {
 }
 
 
+
+def _unpack_width(module, function, callee) -> int:
+    """How many names the given function unpacks from a call to `callee`.
+
+    Counted from the source so a stub cannot drift from the thing it stands
+    in for. Returns the count of assignment targets on the line that awaits
+    `callee`.
+    """
+    import inspect
+    import re
+
+    src = inspect.getsource(getattr(module, function))
+    m = re.search(r"^\s*([\w, ]+?)\s*=\s*await\s+" + re.escape(callee) + r"\(", src, re.M)
+    if not m:
+        raise AssertionError(f"no unpack of {callee} found in {function}")
+    return len([t for t in m.group(1).split(",") if t.strip()])
+
 def test_a_flat_key_sharing_the_prefix_is_not_a_cycle():
     """Counting on the prefix alone would open a run's history at
     `final_sweep_4`."""
@@ -84,15 +101,16 @@ def test_the_other_four_prefixes_are_unchanged():
 CID = str(uuid.uuid4())
 
 
-def _verdict(over=(), failed=()):
+def _verdict(over=(), failed=(), judged=1, errors=0):
     return {
-        "judged": 1, "passed": 0,
+        "judged": judged, "passed": 0,
         "failed": [{"claim_id": CID, "claim_sequence": s, "reason": "r"}
                    for s in failed],
         "overreaching": [{"claim_id": CID, "claim_sequence": s,
                           "claim_text": f"claim {s}", "uncovered": f"u{s}"}
                          for s in over],
-        "errors": [],
+        "errors": [{"evidence_id": str(uuid.uuid4()),
+                    "error": "no extracted content"} for _ in range(errors)],
     }
 
 
@@ -142,8 +160,17 @@ def sweep(monkeypatch):
     async def fake_record_removal(run_id, path, swept):
         dropped.append((path, swept))
 
+    # Width taken from the call site rather than written here. `_gate_answer`
+    # has gained a return value twice, and a stub that pins the old width
+    # fails at runtime with no conflict to warn anyone: the branch adding the
+    # value and the branch carrying the stub are each green alone and break
+    # only once merged. Reading the arity from the source under test means
+    # this stub moves with it instead of against it.
+    _gate_arity = _unpack_width(qr, "_pre_publish_sweep", "_gate_answer")
+
     async def fake_gate(sinas, question, answer_id, run_id):
-        return True, "", [], [], []
+        head = (True, "", [], [], [])
+        return head + ("",) * (_gate_arity - len(head))
 
     async def fake_amend(run_id, **kw):
         return None
@@ -174,6 +201,7 @@ async def test_a_clean_sweep_records_its_own_pass(sweep):
     v = sweep["state"]["validate"]
     assert v["final_sweeps"] == 1
     assert v["final_sweep_1"] == {
+        "judged": 1, "errors": 0,
         "failed": 0, "overreaching": 0, "overreaching_claims": []}
 
 
@@ -216,3 +244,41 @@ async def test_a_failing_span_is_recorded_beside_the_overreach(sweep):
     sweep["verdicts"].append(_verdict(over=[8], failed=[2]))
     await sweep["run"]()
     assert sweep["state"]["validate"]["final_sweep_1"]["failed"] == 1
+
+
+# -- what the sweep examined, not only what it found ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_records_how_many_spans_it_judged(sweep):
+    """`failed` and `overreaching` say what the sweep found. Neither says
+    whether it looked, and the two readings are the same number."""
+    sweep["verdicts"].append(_verdict(judged=12))
+    await sweep["run"]()
+    assert sweep["state"]["validate"]["final_sweep_1"]["judged"] == 12
+
+
+@pytest.mark.asyncio
+async def test_a_sweep_that_judged_nothing_no_longer_reads_as_a_clean_one(sweep):
+    """The defect this record exists for.
+
+    `validate_answer_evidence` returns errors beside failures, and a span that
+    errored is skipped before any verdict is written: it is not in `failed`,
+    not in `overreaching`, and its row keeps whatever it had. A sweep where
+    every span errored therefore returned exactly the numbers a sweep that
+    judged everything and objected to nothing returns.
+    """
+    sweep["verdicts"].append(_verdict(judged=0, errors=9))
+    await sweep["run"]()
+    r = sweep["state"]["validate"]["final_sweep_1"]
+    assert (r["judged"], r["errors"]) == (0, 9)
+    assert (r["failed"], r["overreaching"]) == (0, 0)
+
+
+@pytest.mark.asyncio
+async def test_errors_do_not_object_yet(sweep):
+    """Recorded, not acted on. Making them block publication is a behaviour
+    change on a path that has not fired once in 231 published runs, so it
+    waits for the record to say whether it ever does."""
+    sweep["verdicts"].append(_verdict(judged=0, errors=9))
+    assert await sweep["run"]() is True

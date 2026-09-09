@@ -28,6 +28,8 @@ from pathlib import Path
 
 from sqlalchemy import text
 
+from collections.abc import Sequence
+
 from app.config import get_settings
 
 PLAN_AGENT = "sgr/retrieval-planner-agent"  # tool-less planning lane
@@ -43,11 +45,70 @@ def _domain_prefix() -> str:
     return f"{d} " if d else ""
 
 
+def _playbook_block(
+    entries: "Sequence[tuple[str, str, bool]]",
+) -> tuple[str, list[str]]:
+    """Deployment retrieval guidance as a prompt block, and what was left out.
+
+    Pure. `entries` are (name, content, applies_everywhere).
+
+    Playbooks of kind `synthesis` and `validation` each have a reader; kind
+    `retrieval` had none, so a deployment's retrieval guidance was stored,
+    validated, imported, exported and read by nothing. This is the reader.
+
+    Scope is why the second return value exists. A playbook scoped to a
+    document class is applied by matching that class against the documents in
+    play, and at planning time there are none yet: nothing has been retrieved,
+    so nothing can be matched. Such a playbook cannot be applied here. It is
+    named back to the caller rather than dropped, because a thing that is
+    installed and silently ignored is indistinguishable from a thing that is
+    working, and this codebase has met that shape often enough.
+    """
+    used, skipped = [], []
+    for name, content, everywhere in entries:
+        if not everywhere:
+            skipped.append(name)
+            continue
+        if (content or "").strip():
+            used.append(content.strip())
+    if not used:
+        return "", skipped
+    return ("DEPLOYMENT RETRIEVAL GUIDANCE (how this corpus and this index "
+            "answer a search):\n" + "\n\n".join(used) + "\n", skipped)
+
+
+async def _retrieval_guidance() -> tuple[str, list[str]]:
+    """`_playbook_block` over the installed playbooks of kind `retrieval`."""
+    from app.db import AsyncSessionLocal
+    from app.models import Playbook, PlaybookScope
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Playbook.id, Playbook.name, Playbook.content)
+            .where(Playbook.kind == "retrieval")
+            .order_by(Playbook.name))).all()
+        if not rows:
+            return "", []
+        scoped = (await session.execute(
+            select(PlaybookScope.playbook_id, PlaybookScope.document_class_id)
+            .where(PlaybookScope.playbook_id.in_([r[0] for r in rows]))
+        )).all()
+    # A scope row with a null class is the everywhere-sentinel the importer
+    # writes to own the row; a row naming a class is a real restriction.
+    classes: dict = {}
+    for pb_id, cls_id in scoped:
+        classes.setdefault(pb_id, set()).add(cls_id)
+    return _playbook_block([
+        (name, content, (classes.get(pb_id) or set()) <= {None})
+        for pb_id, name, content in rows
+    ])
+
+
 _ROUND1_PROMPT = """You are planning document retrieval for a {domain}research
 question against a corpus with this schema:
 
 {corpus_map}
-
+{guidance}
 Propose retrieval probes grounded in the schema. Reply ONLY JSON:
 {{"named_entities": ["<entities NAMED in the question>"],
   "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'air transp'>"}}],
@@ -60,7 +121,7 @@ _ROUND2_PROMPT = """Your probes were resolved against the real corpus. Matched
 values (with document counts):
 
 {matches}
-
+{guidance}
 Finalize the retrieval plan. Keep only anchors that serve the question;
 drop noise; add websearch queries for gaps the matches revealed.
 Reply ONLY JSON:
@@ -373,8 +434,10 @@ async def plan_question(
     # both `_run_cost_usd` and the cost cap that reads it.
     sinas = _Sinas(run_id=run_id)
     corpus_map = await build_corpus_map()
+    guidance, guidance_skipped = await _retrieval_guidance()
     r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question, domain=_domain_prefix()),
+        corpus_map=corpus_map, question=question, domain=_domain_prefix(),
+        guidance=guidance),
         _ROUND1_GROUPS, run_id, "round 1")
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
@@ -385,7 +448,7 @@ async def plan_question(
         for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question),
+        matches=match_lines, question=question, guidance=guidance),
         _ROUND2_GROUPS, run_id, "round 2")
     anchors = [a for a in (r2.get("anchor_entity_ids") or [])
                if a in all_matches]
@@ -417,6 +480,8 @@ async def plan_question(
             "anchor_names": {a: all_matches[a]["value"] for a in anchors},
             "queries": queries,
             "class_boost": [str(c) for c in (r2.get("class_boost") or [])],
+            # Named, not dropped: see `_playbook_block`.
+            "guidance_skipped": guidance_skipped,
             "effort": effort}
 
 

@@ -602,19 +602,71 @@ def _manifest_line(r: dict) -> str:
             f"{r['reason'][:120]} | {r['summary'][:200]}")
 
 
-async def _doc_manifest(parent_id: uuid.UUID) -> str:
-    lines = []
+# What the planner may be shown. The prompt slices to this, so a manifest
+# that outgrows it loses its TAIL — the lowest-ranked documents vanish from
+# the planner's view with nothing said. That is worth a number: measured on
+# 99ed1bd0 the manifest is already 50,218 characters, 84% of this, and the
+# margin is one corpus away from being spent.
+MANIFEST_CHAR_CAP = 60000
+
+
+async def _doc_manifest(
+    parent_id: uuid.UUID, cap: int = MANIFEST_CHAR_CAP
+) -> tuple[str, dict]:
+    """The planner's view of the working set, and what the cap cost to build it.
+
+    Returns the text and a record: how many documents the result held, how
+    many survived, and how many the cap dropped.
+
+    Capped per document rather than by slicing the joined string. A slice cuts
+    mid-line, so the last document the planner sees arrives with half a summary
+    and no way to tell that is what happened; and counting what survived would
+    then mean counting "- " prefixes in text that contains a summary with a
+    newline in it (one of the 4,019 summaries in the corpus does). Assembling
+    document by document makes both exact.
+
+    Dropping the tail is the right behaviour when something must go: the rows
+    arrive in rank order, so what is lost is what retrieval ranked last. The
+    defect was never the dropping, only that it happened silently.
+    """
+    lines: list[str] = []
+    total = shown = 0
+    used = 0
+    full = False
     for r in await _manifest_rows(parent_id):
-        lines.append(_manifest_line(r))
+        total += 1
+        block = [_manifest_line(r)]
         brief = r.get("briefing")
         if brief:
             props = brief.get("properties")
             if props:
-                lines.append(f"    properties: {json.dumps(props, ensure_ascii=False)[:400]}")
+                block.append(f"    properties: {json.dumps(props, ensure_ascii=False)[:400]}")
             toc = brief.get("toc")
             if toc:
-                lines.append(f"    toc: {str(toc)[:600]}")
-    return "\n".join(lines)
+                block.append(f"    toc: {str(toc)[:600]}")
+        # Exactly what this block adds to the joined string: its own lines,
+        # the newlines between them, and one more to join it to what is
+        # already there -- which the first block does not need. Charging a
+        # newline per line instead counts one that `"\n".join` never writes,
+        # which put `chars` one above the real length and made the effective
+        # cap 59,999: a last document that fit exactly was refused.
+        cost = (sum(len(x) for x in block) + len(block) - 1
+                + (1 if lines else 0))
+        # Once one document does not fit, nothing after it is taken either.
+        # Letting a later, smaller one through would hand the planner a set
+        # that is not the top of the ranking, which is a quieter defect than
+        # the one this replaces. The loop still runs to the end so `dropped`
+        # counts the whole tail rather than the point it began.
+        if full or used + cost > cap:
+            full = True
+            continue
+        used += cost
+        shown += 1
+        lines.extend(block)
+    return "\n".join(lines), {
+        "chars": used, "cap": cap,
+        "documents": total, "shown": shown, "dropped": total - shown,
+    }
 
 
 _sinas_usage_engine = None
@@ -1780,7 +1832,7 @@ async def _argument_plan(
             "must state the overall conclusion. If the documents cannot "
             "support a part of the question, plan NO claim for it — the gap "
             "will be reported honestly downstream.\n\n"
-            "QUESTION:\n" + question + "\n\nDOCUMENTS:\n" + manifest[:60000],
+            "QUESTION:\n" + question + "\n\nDOCUMENTS:\n" + manifest,
         )
         cleaned = reply.strip().strip("`").removeprefix("json").strip()
         data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
@@ -1859,7 +1911,16 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
         await _mark(run_id, answer_id=answer_id)
     _ = caller  # ownership derives from the parent result above
 
-    manifest = await _doc_manifest(parent_id)
+    manifest, manifest_cap = await _doc_manifest(parent_id)
+    # Recorded whether or not anything was dropped: a run that fits is the
+    # evidence the margin still exists, and only a stored number can say when
+    # it stops existing.
+    await _tele(run_id, "draft", manifest_cap=manifest_cap)
+    if manifest_cap["dropped"]:
+        _log.warning(
+            "manifest cap dropped %s of %s documents for run %s (%s of %s chars)",
+            manifest_cap["dropped"], manifest_cap["documents"], run_id,
+            manifest_cap["chars"], manifest_cap["cap"])
     # The manifest is navigation: it decides which documents are worth
     # reading. Nothing it says may become a claim — summaries, classes and
     # annotations are interpretation produced at ingestion and verified

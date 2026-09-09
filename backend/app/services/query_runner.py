@@ -1945,8 +1945,8 @@ async def _argument_plan(
             # drafter is told to skip a group that establishes nothing usable.
             # Planning against rules the drafter is not held to produces claims
             # that are researched and then correctly declined: on 28 measured
-            # runs, 23% of the planned claims the answer never reached read as
-            # commentary about the literature rather than propositions of law,
+            # runs, 23% of the planned claims the answer never reached fell in
+            # a class the deployment's own rules tell the drafter to decline,
             # against 2% of those it used. Costing four extraction calls to
             # read documents for a claim that cannot be written is the waste
             # this removes, and the rules that decide it are the deployment's.

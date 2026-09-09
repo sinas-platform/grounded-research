@@ -67,17 +67,35 @@ class Action:
 def plan(orphans: list[Orphan]) -> list[Action]:
     """What to do with each orphan. Pure: no I/O, no ordering assumptions.
 
-    Three outcomes and only one of them writes. A target that already holds a
+    Four outcomes and only one of them writes. A target that already holds a
     value is left alone rather than overwritten, because which of the two is
     better is a judgement about the corpus that this script has no way to make
     and no business making.
+
+    The same reasoning covers two orphans competing for one empty target.
+    `target_occupied` is read per row when the orphans are selected, so both
+    see the target empty and both would be reattached, leaving the destination
+    holding two values with nothing recording that they came from a race. The
+    script has no more business picking between two orphans than between an
+    orphan and a value already there, so it picks neither and says so.
+
+    Not reachable in this corpus today: no document holds two orphaned rows for
+    the same property. It becomes reachable as soon as a property is declared
+    `cardinality: many`, which is what makes a second row legitimate.
     """
+    by_target: Counter[tuple[str, str]] = Counter(
+        (o.document_id, o.target_property_id)
+        for o in orphans
+        if o.target_property_id is not None and not o.target_occupied
+    )
     actions: list[Action] = []
     for orphan in orphans:
         if orphan.target_property_id is None:
             actions.append(Action("no_property_on_class", orphan))
         elif orphan.target_occupied:
             actions.append(Action("target_occupied", orphan))
+        elif by_target[(orphan.document_id, orphan.target_property_id)] > 1:
+            actions.append(Action("contested_target", orphan))
         else:
             actions.append(Action("reattach", orphan))
     return actions

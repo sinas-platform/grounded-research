@@ -69,8 +69,48 @@ def test_only_reattachable_actions_carry_a_target():
 
 
 def test_the_summary_counts_every_kind():
+    # The two reattachable ones point at different targets. They used to share
+    # one, which is the state that produced two writes onto a single property
+    # and is now reported as contested rather than counted twice.
     counts = summarise(plan([
-        _orphan(value_id="v1"), _orphan(value_id="v2"),
+        _orphan(value_id="v1", target_property_id="t-1"),
+        _orphan(value_id="v2", target_property_id="t-2"),
         _orphan(value_id="v3", target_property_id=None),
+        _orphan(value_id="v4", target_property_id="t-3"),
+        _orphan(value_id="v5", target_property_id="t-3"),
     ]))
-    assert counts == {"reattach": 2, "no_property_on_class": 1}
+    assert counts == {"reattach": 2, "no_property_on_class": 1,
+                      "contested_target": 2}
+
+
+def test_two_orphans_competing_for_one_empty_target_are_both_refused():
+    """`target_occupied` is read per row when the orphans are selected, so two
+    rows for the same property both see the target empty and both would be
+    re-pointed at it, leaving two values on the destination and nothing saying
+    they came from a race.
+
+    The script already refuses to choose between an orphan and a value already
+    in place. It has no more business choosing between two orphans, so both are
+    reported and neither is written.
+    """
+    pair = [_orphan(value_id="pv-1"), _orphan(value_id="pv-2")]
+    assert [a.kind for a in plan(pair)] == ["contested_target", "contested_target"]
+    assert all(a.target_property_id is None for a in plan(pair)), \
+        "a refused action writes nothing"
+
+
+def test_one_orphan_per_target_is_still_reattached():
+    """The contest check must not catch the ordinary case, which is all of this
+    corpus today: no document holds two orphaned rows for one property."""
+    two_properties = [_orphan(value_id="pv-1", target_property_id="t-1"),
+                      _orphan(value_id="pv-2", target_property_id="t-2")]
+    assert [a.kind for a in plan(two_properties)] == ["reattach", "reattach"]
+
+
+def test_a_contested_target_that_is_already_occupied_is_reported_as_occupied():
+    """Occupancy is the stronger statement and comes first: the value in place
+    is a fact, the contest is only between candidates."""
+    pair = [_orphan(value_id="pv-1", target_occupied=True),
+            _orphan(value_id="pv-2", target_occupied=True)]
+    assert [a.kind for a in plan(pair)] == ["target_occupied", "target_occupied"]
+

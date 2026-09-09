@@ -2065,6 +2065,7 @@ async def _draft_from_extracts(
         data = _claims_json(reply)
     claims = data.get("claims") or []
     written = 0
+    drafted: list[tuple[int, set]] = []
     async with AsyncSessionLocal() as session:
         start_seq = 1
         if append:
@@ -2109,9 +2110,54 @@ async def _draft_from_extracts(
                     span=span, quote=(quote or None) and quote[:2000],
                     validated=False))
             written += 1
+            drafted.append((i, {str(e_.get("filename") or "")
+                                for e_ in (c.get("evidence") or [])}))
         await session.commit()
-    await _tele(run_id, "draft", extract_mode=True, claims=written)
+    await _tele(run_id, "draft", extract_mode=True, claims=written,
+                **({"plan_outcome": _plan_outcome(extracts, drafted)}
+                   if not append else {}))
     return written
+
+
+def _plan_outcome(extracts: list[dict], drafted: list[tuple[int, set]]) -> list[dict]:
+    """What became of each planned claim.
+
+    The plan numbers its claims and the answer numbers its claims, and nothing
+    joined the two. A planned claim could be extracted, shown to the drafter
+    and left out of the answer entirely, and the only way to find out was to
+    read the plan, the extraction record and the citations side by side --
+    which took nine queries to establish for one claim on one run.
+
+    Three outcomes, and only the middle one is a surprise:
+
+      no_passages       the extractor returned nothing for it, so its group
+                        was skipped and the drafter never saw it
+      extracted_unused  passages were extracted and shown, and no drafted
+                        claim cites any of their documents
+      used              at least one drafted claim cites a document it read
+
+    Attribution is by document, not by identity, because nothing carries an
+    identity across the drafting call: passage groups are renumbered after the
+    empty ones are skipped, and the drafter is not asked which group a claim
+    came from. Two planned claims anchored on the same document therefore both
+    read as used when one of them was. That asymmetry is deliberate and worth
+    stating: `used` can be wrong, `extracted_unused` cannot. A planned claim
+    reported unused had none of its documents cited by anything.
+    """
+    out: list[dict] = []
+    for e in extracts:
+        files = {str(p.get("filename") or "") for p in (e.get("passages") or [])}
+        files.discard("")
+        cited = sorted(seq for seq, evf in drafted if files & evf)
+        out.append({
+            "n": e.get("n"),
+            "passages": len(e.get("passages") or []),
+            "documents": sorted(files),
+            "cited_by": cited,
+            "state": ("no_passages" if not files
+                      else "used" if cited else "extracted_unused"),
+        })
+    return out
 
 
 async def _argument_plan(

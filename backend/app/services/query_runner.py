@@ -2035,6 +2035,8 @@ async def _record_gate_cycle(
     system_waived: list[str] | None = None,
     closing: dict | None = None,
     coverage: dict | None = None,
+    naming_mismatches: list[dict] | None = None,
+    checks: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -2094,6 +2096,17 @@ async def _record_gate_cycle(
         # a running total and no dates, so this is the only place the arrival
         # of an obligation is recorded.
         "fed": fed or [], "system_waived": system_waived or [],
+        # Which claims named a case they do not cite. Its own key rather than
+        # a line in `issues`, because this one is on trial: it reports a
+        # different defect from the naming notes it travels with, and whether
+        # it deserves a stronger channel than an issue is a question about its
+        # false-positive rate. Nothing can answer that unless each cycle's
+        # findings are counted where they can be read back per run.
+        "naming_mismatches": naming_mismatches or [],
+        # eligible / judged / flagged per check. Movement, not correctness:
+        # a check judging 200 and flagging 3 every run reads the same whether
+        # those 3 are the right 3 or not.
+        "checks": checks or {},
         # Beside the parts it summarises, not only as a flat key. The parts in
         # this dict already carry the per-part audit, so leaving the summary
         # flat would put a last-write count next to a per-cycle history and
@@ -2680,6 +2693,24 @@ async def _gate_answer(
             "fully answered. Adding a claim that cites one is in scope. "
             "Waiving it with a rationale you can only give after reading its "
             "passages is in scope. Leaving it untouched is not."))
+    # Read before the cycle is recorded, because the record carries the count
+    # and the reviser's feedback is built from the same read. Two reads could
+    # disagree, and a telemetry key that disagrees with the feedback it
+    # describes is worse than no key.
+    mismatched, mismatch_failed = await claim_naming.safe_mismatches_for(answer_id)
+    # A check that cannot run says so where its findings go. An opted-in class
+    # with no declared identifier shape yields no mismatches, and no mismatches
+    # is what a clean answer yields too, so the silence rides `issues` rather
+    # than a telemetry key nobody reads unless already suspicious.
+    unshaped = await claim_naming.unshaped_message()
+    # How far each check got, beside what it found. Recorded every run so a
+    # batch can be compared with the one before it and a check that stopped
+    # reaching anything is visible without anyone deciding to look.
+    reach = await claim_naming.reach_for(answer_id)
+    mismatch_notes = [
+        claim_naming.mismatch_message(m)
+        for m in mismatched[:claim_naming.MAX_FINDINGS]
+    ]
     await _record_gate_cycle(
         run_id, reparse=reparse, unaccounted=unaccounted,
         fed=[{"doc": u["doc"], "feeds": int(u["fed"]) + 1} for u in feed],
@@ -2694,6 +2725,11 @@ async def _gate_answer(
                 "covered_by_unresponsive": x.get("covered_by_unresponsive") or []}
                for x in parts],
         coverage=_coverage_summary(parts),
+        naming_mismatches=[
+            {"claim": m.seq, "names": list(m.named), "cites": list(m.cited)}
+            for m in mismatched
+        ],
+        checks=reach,
         closing=_closing_record(data, claims_by_seq, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
@@ -2701,6 +2737,19 @@ async def _gate_answer(
     # deterministically, and only ever as an issue. The claim is true; it is
     # written so the reader cannot follow it, which is not grounds to hold an
     # answer back.
+    #
+    # The mismatch notes go first. They report the opposite defect and a worse
+    # one: not a source the claim declines to name, but a source it names
+    # wrongly, which sends the reader somewhere rather than nowhere. They are
+    # issues too, for now. One observed true positive against 475 published
+    # claims is not evidence enough to hold answers back on, and moving them
+    # to `correctness` once a sweep has measured the rate is a change to this
+    # line alone.
+    issues += mismatch_notes
+    if unshaped:
+        issues.append(unshaped)
+    if mismatch_failed:
+        issues.append(mismatch_failed)
     issues += await claim_naming.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
     if uncovered:

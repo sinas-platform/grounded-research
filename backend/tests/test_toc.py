@@ -140,7 +140,7 @@ def test_caps_numbered_headings_old_commission_format():
         "1 INTRODUCTION",                                    # 2 — heading
         "1. On 21 September 2007, the Commission received a notification of a "
         "proposed concentration pursuant to Article 4 of Council Regulation "
-        "(EC) No 139/2004 by which Google Inc. acquires control.",  # 3 — paragraph
+        "(EC) No 139/2004 by which Ashgrove Systems acquires control.",  # 3 — paragraph
         "1  OJ L 24, 29.1.2004, p. 1.",                      # 4 — footnote
         "",                                                  # 5
         "3 THE CONCENTRATION",                               # 6 — heading

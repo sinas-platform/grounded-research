@@ -6,18 +6,18 @@ Two set differences over the finished answer, computed once at publish:
   lost_last_mention   a deleted claim named an identifier no surviving claim names
 
 Neither is a coverage check and neither is evidence that anything is missing.
-The reviser's reasons for the three explained drops in the Q41 run were all
-legally sound, and two of them took a source out of the answer anyway. That is
-the thing worth recording: an answer that quietly stops citing a publisher's
-own material still reads as a good answer, and nothing else in the pipeline
-would ever mention it.
+The reviser's reasons for the three explained drops in the run that prompted
+this were all sound, and two of them took a source out of the answer anyway.
+That is the thing worth recording: an answer that quietly stops citing a
+publisher's own material still reads as a good answer, and nothing else in the
+pipeline would ever mention it.
 
-What they cannot see is the case that prompted them. Q41 deleted a claim
-recording that inspectors imaged employees' drives and indexed them overnight,
-because a later judgment superseded the order it came from. T-135/09 and
-62009TJ0135.md both survive in other claims of that same answer, so neither
-check fires. What left was a fact inside a document still cited, and no set
-difference over citations or identifiers reaches it.
+What they cannot see is the case that prompted them. One run deleted a claim
+recording a detail of how an inspection was carried out, because a later
+decision superseded the order it came from. Both the case number and the
+document survive in other claims of that same answer, so neither check fires.
+What left was a fact inside a document still cited, and no set difference over
+citations or identifiers reaches it.
 
 The helpers are pure, so no DB.
 
@@ -124,10 +124,10 @@ def test_two_claims_sharing_an_opening_are_two_deletions():
     as claims are added and dropped. Comparing a prefix instead of the stored
     text made a pair like this read as one record written twice, and the
     second claim's citations never reached either check."""
-    a = ("In Nexans France and Nexans v Commission (T-135/09), the General "
-         "Court recorded that inspectors imaged the drives.")
-    b = ("In Nexans France and Nexans v Commission (T-135/09), the General "
-         "Court recorded that the applicants sought a declaration.")
+    a = ("In the proceedings recorded at T-135/09, the tribunal set out at "
+         "length that the officers imaged the drives.")
+    b = ("In the proceedings recorded at T-135/09, the tribunal set out at "
+         "length that the applicants sought a declaration.")
     assert a[:80] == b[:80]
     v = {"revision_1": {"dropped_detail": [claim(3, a, "one.md")]},
          "revision_2": {"dropped_detail": [claim(3, b, "two.md")]}}
@@ -194,14 +194,14 @@ def test_no_telemetry_at_all():
 
 
 def test_a_document_no_surviving_claim_cites_is_reported():
-    d = [claim(10, "Advocate General Kokott took the view", "93706-kokott.md")]
-    assert _last_citation_losses(d, {"62018CJ0606.md"}) == [
-        {"document": "93706-kokott.md", "sequences": [10]}]
+    d = [claim(10, "the opinion took the view", "an-opinion.md")]
+    assert _last_citation_losses(d, {"another.md"}) == [
+        {"document": "an-opinion.md", "sequences": [10]}]
 
 
 def test_a_document_another_claim_still_cites_is_not():
-    d = [claim(3, "the T-135/09 order records", "62009TJ0135.md")]
-    assert _last_citation_losses(d, {"62009TJ0135.md", "x.md"}) == []
+    d = [claim(3, "the T-135/09 order records", "a-judgment.md")]
+    assert _last_citation_losses(d, {"a-judgment.md", "x.md"}) == []
 
 
 def test_one_document_lost_by_two_deletions_is_one_entry():
@@ -223,8 +223,8 @@ def test_entries_come_out_in_document_order():
 
 
 def test_an_identifier_no_surviving_claim_names_is_reported():
-    d = [claim(11, "the Commission must observe a reasonable time limit under "
-                   "Article 41(1) of the Charter", "62014TJ0449.md")]
+    d = [claim(11, "the authority must observe a reasonable time limit under "
+                   "Article 41(1) of the instrument", "a-later-judgment.md")]
     assert _last_mention_losses(d, {"C-606/18"}) == [
         {"identifier": "41(1)", "sequences": [11]}]
 
@@ -238,22 +238,21 @@ def test_the_two_checks_do_not_imply_each_other():
     """A deletion can take a document's last citation while the case number
     survives in a claim citing something else, and the reverse. Reporting one
     of them as the other would be a claim about coverage, which neither is."""
-    d = [claim(3, "the order in T-135/09 recorded the imaging", "62009TJ0135.md")]
+    d = [claim(3, "the order in T-135/09 recorded the imaging", "a-judgment.md")]
     assert _last_citation_losses(d, set()) != []
     assert _last_mention_losses(d, {"T-135/09"}) == []
 
 
-def test_the_q41_deletion_that_prompted_this_fires_neither():
+def test_the_deletion_that_prompted_this_fires_neither():
     """The reason to build both and the reason neither is a coverage check.
-    T-449/14 was held to supersede the T-135/09 order, so the claim went; the
-    method it recorded — imaging employees' drives, indexing them overnight —
-    went with it. Both the document and the case number survive in other
-    claims of the same answer, so no set difference reaches the loss."""
-    d = [claim(3, "In Nexans France v Commission (T-135/09), the General Court "
-                  "recorded that inspectors took copy-images of employees' hard "
-                  "drives and used indexing software overnight to enable a "
-                  "keyword search.", "62009TJ0135.md")]
-    surviving_docs = {"62009TJ0135.md", "62014TJ0449.md"}
+    T-449/14 was held to supersede the T-135/09 order, so the claim went, and
+    the procedural detail it recorded went with it. Both the document and the
+    case number survive in other claims of the same answer, so no set
+    difference reaches the loss."""
+    d = [claim(3, "In the proceedings recorded at T-135/09, the tribunal set "
+                  "out how the material was copied and later searched.",
+                  "a-judgment.md")]
+    surviving_docs = {"a-judgment.md", "a-later-judgment.md"}
     surviving_ids = {"T-135/09", "T-449/14"}
     assert _last_citation_losses(d, surviving_docs) == []
     assert _last_mention_losses(d, surviving_ids) == []

@@ -23,8 +23,8 @@ from app.services.grounding_gate import (
 )
 
 CONTENT = (
-    "JUDGMENT OF THE COURT. Dow Benelux NV contests the inspection ordered "
-    "by the Commission of the European Communities under Regulation 17."
+    "DECISION OF THE TRIBUNAL. The applicant contests the inspection ordered "
+    "by the supervising authority under the founding regulation."
 )
 
 
@@ -93,15 +93,15 @@ def _verdict_reply(*verdicts):
 
 
 def test_is_verbatim_exact_and_case_insensitive():
-    assert is_verbatim("Dow Benelux NV", CONTENT)
-    assert is_verbatim("dow benelux nv", CONTENT)
+    assert is_verbatim("the applicant", CONTENT)
+    assert is_verbatim("THE APPLICANT", CONTENT)
     assert not is_verbatim("European Commission", CONTENT)
     assert not is_verbatim("", CONTENT)
 
 
 @pytest.mark.asyncio
 async def test_verbatim_passes_free_without_llm():
-    mentions = [_mention("Dow Benelux NV"), _mention("regulation 17")]
+    mentions = [_mention("the applicant"), _mention("the founding regulation")]
     session = _FakeSession(mentions)
     sinas = _FakeSinas()
     report = await ground_document(session, sinas, uuid.uuid4())
@@ -114,7 +114,7 @@ async def test_verbatim_passes_free_without_llm():
 
 @pytest.mark.asyncio
 async def test_ungrounded_rejected_softly_with_evidence():
-    m = _mention("Deutsche Bahn AG")
+    m = _mention("An Unmentioned Party")
     session = _FakeSession([m])
     sinas = _FakeSinas(_verdict_reply(
         {"grounded": False, "confidence": 0.9, "reason": "never referenced"}))
@@ -216,7 +216,7 @@ async def test_legacy_mention_falls_back_to_canonical_form():
         status=STATUS_ACTIVE, link_method=None, link_evidence=None,
         entity_id=eid,
     )
-    session = _FakeSession([m], canonicals={eid: "Dow Benelux NV"})
+    session = _FakeSession([m], canonicals={eid: "the applicant"})
     sinas = _FakeSinas()
     report = await ground_document(session, sinas, uuid.uuid4())
     assert report["verbatim"] == 1

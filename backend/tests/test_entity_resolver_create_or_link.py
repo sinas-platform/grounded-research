@@ -1,7 +1,7 @@
 """T4 create-or-link: twin citations must not collide on natural_key.
 
 A document citing the same case in two surface forms ("Case C-110/04" and
-"Strintzis Lines Shipping v. Commission, Case C-110/04") sends both
+"Ashgrove Systems v Authority, Case C-110/04") sends both
 mentions to the creation step with the same derived key. The first insert
 must create; the second must LINK to it instead of violating
 ix_entity_natural_key and rolling back the document's resolution. A
@@ -96,7 +96,7 @@ def _open_type(type_id):
 async def test_twin_citations_create_then_link_not_collide():
     tid = uuid.uuid4()
     m1 = _mention("Case C-110/04", tid)
-    m2 = _mention("Strintzis Lines Shipping v. Commission, Case C-110/04", tid)
+    m2 = _mention("Ashgrove Systems v Authority, Case C-110/04", tid)
     session = _FakeSession([m1, m2])
     index = _EntityIndex([])
     report = await resolve_document(

@@ -337,7 +337,7 @@ async def _t4_create(session, index, types, document_id, needs_creation,
                 nk = natural_key(m.surface_form or "")
                 # create-or-link. The partition above ran before any
                 # creation, so an in-document twin ("Case C-110/04" and
-                # "Strintzis Lines ... Case C-110/04") lands here twice
+                # "Ashgrove Systems ... Case C-110/04") lands here twice
                 # with the same derived key; inserting both violates
                 # ix_entity_natural_key and rolls back the whole
                 # document's resolution. The index is updated on every

@@ -87,8 +87,9 @@ def test_no_comment_names_a_run_by_its_identifier():
 
 
 def test_no_comment_names_a_deployments_benchmark_question():
-    """`Q41` names an entry in one deployment's benchmark. `Qnn` as a format
-    template is fine and is why this matches digits rather than the letter."""
+    """A tag with digits in it names an entry in some deployment's benchmark.
+    `Qnn` as a format template is fine, and that difference is why this
+    matches the digits rather than the letter."""
     offenders = _offenders(_QUESTION_TAG)
     assert not offenders, (
         "source text names a deployment's benchmark question; a template "
@@ -99,8 +100,10 @@ def test_the_check_can_see_an_offender():
     """The failure mode this whole file exists to prevent is a check that
     matches nothing and cannot be told from a clean tree, so the patterns are
     exercised against text that must trip them."""
-    assert _UUID.search("# measured on run 3d7f39d3, which burned $23.81")
-    assert _UUID.search("# see 6d7b9989-1c2f-4a3b-8e91-0d5f7a2b4c6e for the trace")
-    assert _QUESTION_TAG.search("# Q46 swept twice and its first finding is gone")
+    # Fabricated, and deliberately so. A guard against naming a real record
+    # that names one to prove it works would be the joke version of itself.
+    assert _UUID.search("# measured on run deadbeef, which burned $23.81")
+    assert _UUID.search("# see abcdef01-2345-6789-abcd-ef0123456789 for the trace")
+    assert _QUESTION_TAG.search("# Q99 swept twice and its first finding is gone")
     assert not _QUESTION_TAG.search('# titled "Qnn — Topic — sub-topic"')
     assert not _UUID.search("revision = '0036'")

@@ -26,7 +26,8 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
-from sqlalchemy import text
+from sqlalchemy import String, bindparam, text
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from app.config import get_settings
 
@@ -585,22 +586,28 @@ async def build_briefing(ranked: list[dict], effort: str) -> list[dict]:
 
 
 async def store_result(question: str, ranked: list[dict],
-                       briefing: list[dict], plan: dict | None = None) -> str:
+                       briefing: list[dict], plan: dict | None = None, *,
+                       owner_id: uuid.UUID,
+                       roles: list[str] | None = None) -> str:
     """Persist as a SGR result with per-doc rank + reason; briefing kept on
-    the result's filter payload so synthesis/UI can read it."""
+    the result's filter payload so synthesis/UI can read it.
+
+    The result belongs to `owner_id` and is shared with `roles`, which must
+    be the run's own: the answer synthesised over it inherits both, and a
+    caller who does not own their answer is refused its evidence with a 404.
+    """
     from app.db import AsyncSessionLocal
 
     rid = str(uuid.uuid4())
     async with AsyncSessionLocal() as s:
-        owner = (await s.execute(text(
-            "SELECT owner_id FROM result WHERE owner_id IS NOT NULL "
-            "ORDER BY created_at DESC LIMIT 1"))).scalar()
         await s.execute(text("""
             INSERT INTO result (id, query, status, owner_id, roles, filter,
                                 created_at, updated_at, published_at)
             VALUES (CAST(:id AS uuid), :q, 'published', CAST(:o AS uuid),
-                    '{}', CAST(:f AS jsonb), now(), now(), now())"""),
-            {"id": rid, "q": question, "o": str(owner),
+                    :roles, CAST(:f AS jsonb), now(), now(), now())"""
+            ).bindparams(bindparam("roles", type_=ARRAY(String))),
+            {"id": rid, "q": question, "o": str(owner_id),
+             "roles": list(roles or []),
              "f": json.dumps({"retrieval_first": True, "briefing": briefing,
                               "plan": {k: v for k, v in (plan or {}).items()}})})
         for i, r in enumerate(ranked, start=1):
@@ -726,6 +733,8 @@ async def main() -> None:
     ap.add_argument("--effort", default="medium")
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--store", action="store_true")
+    ap.add_argument("--owner", help="uuid of the user the stored result belongs "
+                    "to; required with --store")
     args = ap.parse_args()
     if args.regress:
         await regress(top_n=args.top, effort=args.effort)
@@ -738,8 +747,11 @@ async def main() -> None:
             print(f"  {r['score']:8.2f}  {r['filename']:44}  "
                   f"{r['reason'][:70]}")
         if args.store:
+            if not args.owner:
+                ap.error("--store needs --owner: a result belongs to someone")
             briefing = await build_briefing(ranked, args.effort)
-            rid = await store_result(args.question, ranked, briefing, plan)
+            rid = await store_result(args.question, ranked, briefing, plan,
+                                     owner_id=uuid.UUID(args.owner))
             print(f"stored result {rid}")
     else:
         print("need --regress or --question", file=sys.stderr)

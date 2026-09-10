@@ -2197,6 +2197,7 @@ async def _record_gate_cycle(
     coverage: dict | None = None,
     naming_mismatches: list[dict] | None = None,
     checks: dict | None = None,
+    reread: dict | None = None,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -2267,6 +2268,10 @@ async def _record_gate_cycle(
         # a check judging 200 and flagging 3 every run reads the same whether
         # those 3 are the right 3 or not.
         "checks": checks or {},
+        # Always written, even as zeros. A key a cycle does not set is
+        # read as belonging to the next one, which is the defect this
+        # function exists to stop.
+        "reread": reread or {"looked": 0, "found": 0},
         # Beside the parts it summarises, not only as a flat key. The parts in
         # this dict already carry the per-part audit, so leaving the summary
         # flat would put a last-write count next to a per-cycle history and
@@ -2494,6 +2499,71 @@ def _audit_coverage(named: list[int], claim_seqs: set, with_evidence: set,
         "covered_by_unresponsive": [n for n in present if n in unresponsive],
     }
 
+
+
+async def _reread_cited_for_parts(
+    sinas: _Sinas, answer_id: uuid.UUID, parts: list[dict]
+) -> tuple[list[dict], int, int]:
+    """Re-read every cited source, whole, for each part the gate called
+    uncovered. Returns the parts, how many were answered by the re-read, and
+    how many were looked for.
+
+    Best-effort in the same sense as the naming checks: this can only ever
+    turn an uncovered part into a covered one on verbatim evidence, so a
+    failure costs a finding rather than inventing one, and the run must not
+    fail because a second look could not be taken.
+    """
+    from app.services.reread import (
+        Cited, apply_reread, needs_reread, reread_prompt)
+
+    want = [i for i, p in enumerate(parts) if not p.get("covered")]
+    if not want:
+        return parts, 0, 0
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(Document.filename, DocumentVersion.content_md)
+                .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
+                .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+                .join(DocumentVersion,
+                      DocumentVersion.id == Document.current_version_id)
+                .where(AnswerClaim.answer_id == answer_id)
+                .distinct())).all()
+        sources = [Cited(filename=str(f), text=str(c or "")) for f, c in rows]
+        if not needs_reread(parts, sources):
+            return parts, 0, 0
+
+        found: dict[int, dict | None] = {}
+        for i in want:
+            hit = None
+            for src in sources:
+                if not src.text or len(src.text) < 40:
+                    continue
+                reply = await sinas.invoke(
+                    "sgr/answer-gate-agent", reread_prompt(parts[i], src))
+                try:
+                    cleaned = (reply or "").strip().strip("`")
+                    cleaned = cleaned.removeprefix("json").strip()
+                    a, b = cleaned.find("{"), cleaned.rfind("}")
+                    data = json.loads(cleaned[a:b + 1]) if a >= 0 < b else {}
+                except (ValueError, json.JSONDecodeError):
+                    continue
+                if data.get("found") and str(data.get("quote") or "").strip():
+                    hit = {"filename": src.filename,
+                           "line_from": data.get("line_from"),
+                           "line_to": data.get("line_to"),
+                           "quote": data.get("quote")}
+                    break
+            found[i] = hit
+        parts, hits = apply_reread(parts, found,
+                                   cited={s.filename for s in sources})
+        return parts, hits, len(want)
+    except CancelledOutcome:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.exception("re-read before unanswered failed for answer %s",
+                       answer_id)
+        return parts, 0, 0
 
 async def _gate_answer(
     sinas: _Sinas, run_question: str, answer_id: uuid.UUID, run_id: uuid.UUID
@@ -2726,6 +2796,15 @@ async def _gate_answer(
                                     with_evidence, unresponsive_seqs)}
             for x in (data.get("parts") or []) if isinstance(x, dict)
         ]
+    # Before a part is called unanswered, re-read what the answer already
+    # cites. Extraction reads per planned claim from that claim's anchors, so
+    # a document opened for one passage can hold the material for a part in a
+    # passage nobody read: on one measured question all four of the things a
+    # reviewer asked for sat in documents the answer cited. This runs only for
+    # parts about to be reported as gaps, so an answer that covers everything
+    # pays nothing.
+    parts, reread_found, reread_looked = await _reread_cited_for_parts(
+        sinas, answer_id, parts)
     uncovered = [
         str(x.get("gap") or x.get("asks") or "").strip()
         for x in parts if not x.get("covered")
@@ -2890,6 +2969,11 @@ async def _gate_answer(
             for m in mismatched
         ],
         checks=reach,
+        # Recorded whether or not it found anything. A re-read that found
+        # nothing and a re-read that never ran are the same silence
+        # otherwise, and telling an absent limb from an unchecked one is half
+        # of why this is worth having.
+        reread={"looked": reread_looked, "found": reread_found},
         closing=_closing_record(data, claims_by_seq, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance

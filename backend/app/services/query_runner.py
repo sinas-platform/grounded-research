@@ -4624,6 +4624,9 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         question, effort = run.question, run.effort or "medium"
+        # The stored result, and the answer built over it, belong to whoever
+        # asked — a result owned by anyone else is invisible to them.
+        owner_id, roles = run.owner_id, list(run.roles or [])
         if run.parent_result_id:  # resume: retrieval already stored
             return
     await _mark(run_id, status="retrieving")
@@ -4637,7 +4640,8 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     await _check_cancel(run_id)
     briefing = await rf.build_briefing(ranked, effort)
     await _check_cancel(run_id)
-    rid = await rf.store_result(question, ranked, briefing, plan)
+    rid = await rf.store_result(question, ranked, briefing, plan,
+                                owner_id=owner_id, roles=roles)
     await _mark(run_id, parent_result_id=uuid.UUID(str(rid)))
     await _tele(run_id, "retrieval", completed=_iso(),
                 documents=len(ranked), queries=len(plan.get("queries") or []))

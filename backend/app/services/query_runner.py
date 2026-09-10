@@ -1987,6 +1987,28 @@ def _verified_quote(verified: dict, filename: str, evidence: dict) -> str:
     return overlapping[0] if len(overlapping) == 1 else ""
 
 
+def _no_text_record(sequence: int, claim: dict) -> dict:
+    """What to keep about a claim the drafter sent with no text.
+
+    Enough to tell the two cases apart later. An empty placeholder carries
+    nothing but its sequence, and the gap it leaves in the numbering is the
+    only casualty. A claim whose text failed to arrive while its reasoning and
+    its sources did carries both, and the answer is short a proposition it
+    meant to make. The claim itself is not kept: `carried` names which fields
+    arrived with something in them, which is what separates the two, and the
+    rationale is capped because this sits in telemetry beside everything else.
+    """
+    return {
+        "sequence": sequence,
+        "carried": sorted(k for k in claim
+                          if claim.get(k) not in (None, "", [], {})),
+        "rationale": str(claim.get("rationale") or "")[:400],
+        "evidence": [str(e.get("filename") or "")
+                     for e in (claim.get("evidence") or [])[:4]],
+        "type": str(claim.get("type") or "")[:50],
+    }
+
+
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
     question: str, extracts: list[dict], append: bool = False,
@@ -2065,6 +2087,7 @@ async def _draft_from_extracts(
         data = _claims_json(reply)
     claims = data.get("claims") or []
     written = 0
+    no_text: list[dict] = []
     async with AsyncSessionLocal() as session:
         start_seq = 1
         if append:
@@ -2075,6 +2098,16 @@ async def _draft_from_extracts(
         for i, c in enumerate(claims[:(cap or 14)], start=start_seq):
             text_ = str(c.get("text") or "").strip()
             if not text_:
+                # A claim with no text is dropped and its number goes with it,
+                # which is why published answers jump from 9 to 11. Keep what
+                # the drafter actually sent, because the gap alone cannot say
+                # which of two things happened: an empty placeholder, where the
+                # numbering is the only casualty, or a claim whose text failed
+                # to arrive while its reasoning and its sources did, where the
+                # answer is short a proposition it meant to make. Once the
+                # reply is discarded the two are indistinguishable, and nothing
+                # else records that a claim was dropped at all.
+                no_text.append(_no_text_record(i, c))
                 continue
             row = AnswerClaim(answer_id=answer_id, sequence=i,
                               claim_text=text_,
@@ -2110,7 +2143,17 @@ async def _draft_from_extracts(
                     validated=False))
             written += 1
         await session.commit()
-    await _tele(run_id, "draft", extract_mode=True, claims=written)
+    detail: dict[str, Any] = {"extract_mode": True, "claims": written}
+    if no_text:
+        # Named for the cause, not reusing `dropped_claims`, which is a flat
+        # count under `validate` meaning something else. One prefix per
+        # meaning, as the removal record says.
+        detail["no_text_claims"] = no_text
+        detail["no_text_count"] = len(no_text)
+        _log.warning("run %s: drafter returned %d claim(s) with no text; "
+                     "sequence numbers %s are absent from the answer",
+                     run_id, len(no_text), [d["sequence"] for d in no_text])
+    await _tele(run_id, "draft", **detail)
     return written
 
 

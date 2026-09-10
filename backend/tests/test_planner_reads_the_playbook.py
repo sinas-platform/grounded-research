@@ -7,9 +7,9 @@ and each one costs four extraction calls to read documents for a claim that
 cannot be written.
 
 Measured over 28 runs that record extraction: of the planned claims whose
-anchor documents reached no published claim, 23% read as commentary about the
-literature rather than propositions of law, against 2% of the claims the
-answer used.
+anchor documents reached no published claim, 23% fell in a class the
+deployment's own rules tell the drafter to decline, against 2% of the claims
+the answer used.
 """
 
 from __future__ import annotations

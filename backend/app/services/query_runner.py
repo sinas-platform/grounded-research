@@ -1122,6 +1122,27 @@ _DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015)}
 _SOFT_HYPHEN = {0x00AD: None}
 _RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
 
+# What a passage should be, in characters rather than lines.
+#
+# It used to be asked for in lines, "2-25 lines", which is not a unit: two
+# lines is 90 characters in a practitioner chapter and over 2,000 in a
+# EUR-Lex judgment, so the same instruction asked for a sentence in one
+# document and a page in another. Measured on the first run to store its
+# quotes, a passage ran 2 to 2.7 times the length of the claim it supported.
+#
+# 200 because that is where a quote becomes wholly checked. The verifier and
+# the locator compare only the first 200 canonical characters, so on a
+# 460-character quote more than half the text is never compared against the
+# source at all: see _quote_whole, which exists to notice that a quote ran
+# past what was verified. Shorter is better verified, not worse.
+#
+# The floor is the real constraint and it is not arithmetic. A sentence can
+# mean something else without the one before it, and "that requirement does
+# not apply here" is verbatim, locatable and useless. Hence a floor with an
+# anchor rule beside it rather than a floor alone.
+_QUOTE_TARGET_CHARS = 200
+_QUOTE_FLOOR_CHARS = 80
+
 
 def _canonical(text: str) -> str:
     """Text reduced to what a verbatim quote has to preserve.
@@ -1148,6 +1169,44 @@ def _numbered_pairs(numbered: str) -> list[tuple[int, str]]:
         except ValueError:
             continue
     return out
+
+
+def _quote_lengths(out: list[dict]) -> dict:
+    """What the extractor actually returned, in characters.
+
+    Counted and not enforced. The instruction moved from lines to characters
+    and nothing rejects a passage for its length, because the floor is a
+    judgement about whether a quote can be read on its own and no character
+    count decides that. What this is for is seeing the distribution move, or
+    fail to, before anything is made binding on it.
+
+    Reported against the target rather than as a bare average: an average
+    hides the shape, and the shape is the question. A run whose quotes cluster
+    at the target is the instruction working; one that keeps a long tail is
+    the model quoting the paragraph whatever it was asked.
+    """
+    lens = sorted(len(p.get("text") or "")
+                  for r in out for p in (r.get("passages") or []))
+    if not lens:
+        return {"passages": 0}
+    mid = lens[len(lens) // 2]
+    return {
+        "passages": len(lens),
+        "median_chars": mid,
+        "mean_chars": round(sum(lens) / len(lens)),
+        "longest_chars": lens[-1],
+        # The two bands that matter, for opposite reasons: past the target a
+        # quote stops being wholly verified, and under the floor it may not be
+        # readable on its own.
+        "over_target": sum(1 for n in lens if n > _QUOTE_TARGET_CHARS),
+        "over_target_pct": round(
+            100.0 * sum(1 for n in lens if n > _QUOTE_TARGET_CHARS) / len(lens)),
+        "under_floor": sum(1 for n in lens if n < _QUOTE_FLOOR_CHARS),
+        # How much text is carried past the point the verifier stops looking.
+        # This is the finding the target answers, stated as a number per run.
+        "chars_beyond_verified": sum(
+            max(0, n - _QUOTE_TARGET_CHARS) for n in lens),
+    }
 
 
 def _quote_whole(numbered: str, line_from: int, line_to: int, quoted: str,
@@ -1552,8 +1611,15 @@ async def _extract_passages(
                         'quote>"}]'
                         + (', "owed_has_nothing": true|false'
                            if owed and owed in shown else "")
-                        + '} — max 4 passages, each 2-25 lines, text EXACTLY '
-                        "as printed (without the line-number prefixes).\n\n"
+                        + "} — max 4 passages, text EXACTLY as printed "
+                        "(without the line-number prefixes).\n"
+                        + f"Quote the sentence that states the point, not the "
+                        f"paragraph around it: about {_QUOTE_TARGET_CHARS} "
+                        f"characters, and not less than {_QUOTE_FLOOR_CHARS}. "
+                        "Where a sentence needs the one before it to mean what "
+                        "it says, take both: a fragment that cannot be read on "
+                        "its own is worse than a long quote, and the length is "
+                        "the target rather than the rule.\n\n"
                         + doc_blob,
                     )
                     cleaned = reply.strip().strip("`").removeprefix("json").strip()
@@ -1708,6 +1774,7 @@ async def _extract_passages(
                 "passages_proposed": sum(r.get("proposed", 0) for r in out),
                 "passages_verified": sum(
                     len(r.get("passages") or []) for r in out),
+                "quote_lengths": _quote_lengths(out),
                 # What the owed documents did. `owed_declared_empty` is
                 # the extractor using the refusal rather than straining, and
                 # is the only signal that separates "the document does not

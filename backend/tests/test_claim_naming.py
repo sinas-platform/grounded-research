@@ -77,15 +77,15 @@ def test_an_identifier_punctuated_differently_still_matches():
     identity, and not on the separators between them, is what makes those the
     same thing."""
     assert carries_identifier(
-        "In Commission Decision COMP/39.796 (Suez Environnement), the "
-        "Commission found a broken seal", ("AT.39796",))
+        "In Decision COMP/39.796 (Ashgrove), the authority found a broken "
+        "seal", ("AT.39796",))
 
 
 def test_two_identifiers_written_side_by_side_both_match():
     """`Nos. 85-4053, 85-4068` is two identifiers touching. Removing the
     separators from the claim would run them into one number and hide both."""
     assert carries_identifier(
-        "In In re Antitrust Grand Jury, Nos. 85-4053, 85-4068, the appellate "
+        "In the consolidated matter, Nos. 85-4053, 85-4068, the appellate "
         "court held", ("85-4053, 85-4068",))
 
 
@@ -449,7 +449,7 @@ def test_a_claim_naming_no_case_is_not_reported():
 
 
 def test_a_suffix_difference_is_not_a_mismatch():
-    found = _mismatches([(1, "In Case C-601/18 the Court held")], {1: [APPEAL_B]})
+    found = _mismatches([(1, "In Case C-601/18 the tribunal held")], {1: [APPEAL_B]})
     assert found == []
 
 
@@ -693,10 +693,10 @@ def test_naming_in_prose_clears_a_finding_that_the_identifier_alone_would_raise(
     """The behaviour change, end to end: same claim, same source, and the only
     difference is that the class declares where the name lives."""
     src_named = Source(key="d-1", identifiers=("X-999/99",), label="a.md",
-                       pattern=SHAPE, name="Ferriere Nord v Commission")
+                       pattern=SHAPE, name="Bellhaven v Authority")
     src_bare = Source(key="d-1", identifiers=("X-999/99",), label="a.md",
                       pattern=SHAPE, name="")
-    claim = [Claim(1, "In Ferriere Nord the Court held that the seal was broken")]
+    claim = [Claim(1, "In Bellhaven the tribunal held that the seal was broken")]
     assert review(claim, {1: [src_bare]}), "no name: reported as unnamed"
     assert review(claim, {1: [src_named]}) == [], "named in prose: clean"
 

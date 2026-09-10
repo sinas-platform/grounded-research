@@ -92,3 +92,38 @@ def test_an_ambiguous_overlap_is_refused():
 def test_another_document_is_never_borrowed_from():
     verified = {("b.md", 10, 12): "text from another file"}
     assert _verified_quote(verified, "a.md", {"line_from": 10, "line_to": 12}) == ""
+
+
+def test_the_reviewer_is_shown_the_sentence_when_the_row_has_offsets():
+    """The whole point: the verdict should be given against the quote."""
+    from app.review_export import _passage
+
+    span = {"line_from": 5, "line_to": 5, "char_from": 24, "char_to": 47}
+    got = _passage(DOC, span)
+    assert got == DOC[24:47].strip()
+    assert len(got) < 60
+
+
+def test_the_reviewer_still_sees_the_lines_on_an_older_row():
+    """Rows written before the offsets existed must not show nothing."""
+    from app.review_export import _passage
+
+    line = DOC.split("\n").index(PARA) + 1
+    got = _passage(DOC, {"line_from": line, "line_to": line})
+    assert got == PARA
+
+
+def test_the_stored_quote_is_used_when_offsets_could_not_be_placed():
+    from app.review_export import _passage
+
+    got = _passage(DOC, {"line_from": None}, quote="the passage as verified")
+    assert got == "the passage as verified"
+
+
+def test_offsets_outside_the_document_fall_back_rather_than_slice():
+    from app.review_export import _passage
+
+    line = DOC.split("\n").index(PARA) + 1
+    got = _passage(DOC, {"line_from": line, "line_to": line,
+                         "char_from": 10, "char_to": 99999})
+    assert got == PARA

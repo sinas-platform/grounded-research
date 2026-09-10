@@ -2018,7 +2018,8 @@ async def _draft_from_extracts(
                 session.add(ClaimEvidence(
                     claim_id=row.id, document_id=doc.id,
                     document_version_id=doc.current_version_id,
-                    span=span, validated=False))
+                    span=span, quote=(quote or None) and quote[:2000],
+                    validated=False))
             written += 1
         await session.commit()
     await _tele(run_id, "draft", extract_mode=True, claims=written)

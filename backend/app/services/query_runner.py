@@ -1185,14 +1185,25 @@ def _quote_lengths(out: list[dict]) -> dict:
     at the target is the instruction working; one that keeps a long tail is
     the model quoting the paragraph whatever it was asked.
     """
-    lens = sorted(len(p.get("text") or "")
+    # Canonical length, not raw. The 200-character boundary this reports
+    # against is applied after canonicalization, which folds rendering
+    # variants, drops soft hyphens and collapses whitespace runs. Measuring
+    # the raw string counts characters verification never sees, so a passage
+    # with ragged spacing would be called over target while being wholly
+    # checked.
+    lens = sorted(len(_canonical(p.get("text") or ""))
                   for r in out for p in (r.get("passages") or []))
     if not lens:
         return {"passages": 0}
-    mid = lens[len(lens) // 2]
+    # The middle of an even sample is between two values, not at the higher
+    # of them. lens[n // 2] is the upper of the pair, which reports a longer
+    # typical quote than the run produced and biases the number this exists
+    # to watch.
+    n = len(lens)
+    mid = lens[n // 2] if n % 2 else (lens[n // 2 - 1] + lens[n // 2]) / 2
     return {
         "passages": len(lens),
-        "median_chars": mid,
+        "median_chars": round(mid, 1),
         "mean_chars": round(sum(lens) / len(lens)),
         "longest_chars": lens[-1],
         # The two bands that matter, for opposite reasons: past the target a

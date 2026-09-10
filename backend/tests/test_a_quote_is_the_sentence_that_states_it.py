@@ -70,3 +70,23 @@ def test_counting_does_not_reject_anything():
     """Soft on purpose: a passage of any length still comes back."""
     runs = _r(5, 5000)
     assert _quote_lengths(runs)["passages"] == 2
+
+
+def test_the_median_of_an_even_sample_is_between_the_middle_pair():
+    """lens[n // 2] is the upper of the pair, which reports a longer typical
+    quote than the run produced."""
+    got = _quote_lengths(_r(100, 200, 300, 400))
+    assert got["median_chars"] == 250
+
+    odd = _quote_lengths(_r(100, 200, 300))
+    assert odd["median_chars"] == 200
+
+
+def test_length_is_measured_after_canonicalisation():
+    """The 200-character boundary is applied to canonical text, so counting
+    raw characters would call a raggedly spaced passage over target while it
+    was wholly verified."""
+    ragged = "word   " * 40          # 280 raw characters
+    got = _quote_lengths([{"passages": [{"text": ragged}]}])
+    assert got["median_chars"] < len(ragged)
+    assert got["over_target"] == 0

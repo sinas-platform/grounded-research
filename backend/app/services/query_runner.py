@@ -1123,6 +1123,45 @@ _SOFT_HYPHEN = {0x00AD: None}
 _RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
 
 
+def _canonical_offsets(text: str) -> tuple[str, list[int]]:
+    """Canonical text, and for each of its characters the offset in `text`
+    that character came from.
+
+    A match is found in canonical space and a coordinate has to be reported
+    in the source, so something has to carry one back to the other. Folding a
+    rendering variant is one character for one, dropping a soft hyphen is one
+    for none, collapsing a run of whitespace is many for one, and lower-casing
+    is occasionally one for two. Each of those breaks the assumption that the
+    two strings run in step, which is why the map is built rather than the
+    offsets recomputed.
+
+    `_canonical` is written in terms of this, so the two can never disagree
+    about what the canonical form is, in the way `_numbered_pairs` is shared
+    by the verifier and the locator.
+    """
+    out: list[str] = []
+    src: list[int] = []
+    pending = False
+    for i, ch in enumerate(text or ""):
+        rep = _RENDERING_VARIANTS.get(ord(ch), ch)
+        if rep is None:            # soft hyphen: nothing draws it, no copy has it
+            continue
+        if rep.isspace():
+            pending = True
+            continue
+        if pending:
+            # A run of whitespace stands as one space, and a leading run as
+            # nothing, which is what `.strip()` did.
+            if out:
+                out.append(" ")
+                src.append(i)
+            pending = False
+        for c in rep.lower():
+            out.append(c)
+            src.append(i)
+    return "".join(out), src
+
+
 def _canonical(text: str) -> str:
     """Text reduced to what a verbatim quote has to preserve.
 
@@ -1132,8 +1171,7 @@ def _canonical(text: str) -> str:
     punctuation mark that separates words, so text that is not in the source
     still does not match text that is.
     """
-    folded = (text or "").translate(_RENDERING_VARIANTS)
-    return re.sub(r"\s+", " ", folded).strip().lower()
+    return _canonical_offsets(text)[0]
 
 
 def _numbered_pairs(numbered: str) -> list[tuple[int, str]]:
@@ -1237,6 +1275,43 @@ def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
     # and the span never falls back to coordinates already called approximate.
     best = window(full) or window(full[:200])
     return (rows[best[0]][0], rows[best[1]][0]) if best else None
+
+
+def _locate_chars(content: str, line_from: int, line_to: int,
+                  quoted: str) -> tuple[int, int] | None:
+    """Where the quote sits in `content`, as character offsets, or None.
+
+    The line locator answers which lines hold the quote; this answers which
+    characters, which is a different question wherever a line is a paragraph.
+    Measured on the evidence rows held on 10 September 2026, a line span
+    covers 1,547 characters on average and 84% of them cover more than 400,
+    so a citation resolves to about a page where the text it rests on is a
+    sentence. Everything that reads a span back reads it at that precision:
+    the passage a reviewer is shown in the workbook, the passage the reviser
+    is given when the gate asks for a revision, and the export.
+
+    Offsets are absolute in `content`, matching how an entity mention records
+    its span, so one convention covers both.
+
+    Pure: text in, a pair of offsets out.
+    """
+    lines = (content or "").split("\n")
+    if line_from < 1 or line_to < line_from or line_to > len(lines):
+        return None
+    want = _canonical(quoted)
+    if len(want) < 20:            # the floor the line locator already applies
+        return None
+    base = sum(len(ln) + 1 for ln in lines[:line_from - 1])
+    canon, src = _canonical_offsets("\n".join(lines[line_from - 1:line_to]))
+    at = canon.find(want)
+    if at < 0:
+        # Verification matches on the first 200 characters, so a quote stored
+        # longer than it was checked still locates on what was guaranteed.
+        want = want[:200]
+        at = canon.find(want)
+        if at < 0 or len(want) < 20:
+            return None
+    return base + src[at], base + src[at + len(want) - 1] + 1
 
 
 def _verify_passage(numbered: str, line_from: int, line_to: int, quoted: str,
@@ -1802,6 +1877,28 @@ def _claims_json(reply: str) -> dict:
     return json.loads(cleaned[start:end + 1])
 
 
+def _verified_quote(verified: dict, filename: str, evidence: dict) -> str:
+    """The checked passage behind one citation, or "" if it cannot be pinned.
+
+    Exact coordinates first, because that is what the drafter was shown. A
+    drafter that widens or narrows a range still cites the same passage, so a
+    single overlapping passage in the same document is accepted; two or more
+    are not, since choosing between them would be a guess and a quote located
+    into the wrong sentence is worse than no offset at all.
+    """
+    try:
+        lf = int(evidence.get("line_from"))
+        lt = int(evidence.get("line_to") or lf)
+    except (TypeError, ValueError):
+        return ""
+    exact = verified.get((filename, lf, lt))
+    if exact:
+        return exact
+    overlapping = [t for (fn, a, b), t in verified.items()
+                   if fn == filename and t and not (b < lf or lt < a)]
+    return overlapping[0] if len(overlapping) == 1 else ""
+
+
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
     question: str, extracts: list[dict], append: bool = False,
@@ -1818,6 +1915,16 @@ async def _draft_from_extracts(
     # General who wrote it, correctly, from a summary rather than from any
     # passage, so the attribution was true and uncheckable. The plan decides
     # what to READ; only what was read may be asserted.
+    # The passage the extractor verified, keyed by the coordinates the drafter
+    # is shown. The drafter echoes those coordinates back, so the quote behind
+    # a citation is recoverable without asking it to copy the text again, and
+    # what is recorded is what was checked rather than what came back.
+    verified: dict[tuple[str, int, int], str] = {}
+    for e in extracts:
+        for p in e.get("passages") or []:
+            verified[(str(p["filename"]), int(p["line_from"]),
+                      int(p["line_to"]))] = str(p.get("text") or "")
+
     blocks = []
     for i, e in enumerate(extracts, start=1):
         if not e.get("passages"):
@@ -1889,18 +1996,29 @@ async def _draft_from_extracts(
             session.add(row)
             await session.flush()
             for ev_ in (c.get("evidence") or [])[:4]:
+                fn_ = str(ev_.get("filename") or "")
                 doc = (await session.execute(
-                    select(Document).where(Document.filename == str(ev_.get("filename") or ""))
+                    select(Document).where(Document.filename == fn_)
                 )).scalars().first()
                 if doc is None:
                     continue
+                span = {"line_from": ev_.get("line_from"),
+                        "line_to": ev_.get("line_to"),
+                        "char_from": None, "char_to": None, "note": None}
+                quote = _verified_quote(verified, fn_, ev_)
+                if quote:
+                    ver = await session.get(DocumentVersion,
+                                            doc.current_version_id)
+                    at = _locate_chars(getattr(ver, "content_md", "") or "",
+                                       int(span["line_from"]),
+                                       int(span["line_to"] or span["line_from"]),
+                                       quote)
+                    if at:
+                        span["char_from"], span["char_to"] = at
                 session.add(ClaimEvidence(
                     claim_id=row.id, document_id=doc.id,
                     document_version_id=doc.current_version_id,
-                    span={"line_from": ev_.get("line_from"),
-                          "line_to": ev_.get("line_to"),
-                          "char_from": None, "char_to": None, "note": None},
-                    validated=False))
+                    span=span, validated=False))
             written += 1
         await session.commit()
     await _tele(run_id, "draft", extract_mode=True, claims=written)

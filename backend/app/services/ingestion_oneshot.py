@@ -259,6 +259,24 @@ reference, extract that reference exactly as written — never expand it
 to a fuller name the text does not contain. When both a full name and
 short references to the same entity appear, the fullest form suffices.
 Do not invent names; do not stop early; no duplicates.
+
+A NAME, NOT A WORD. Exhaustive means every named thing, not every
+capitalised one. A common noun is not an entity: "decision", "court",
+"authority", "jurisdiction", "case", "agreement", "services",
+"distribution", "control" and their equivalents in any language name a
+kind of thing, not a thing, and belong in no list here. Neither does a
+word that is only capitalised because it begins a sentence: "Only",
+"Thus", "Will", "Even", "First", "This" are ordinary words wherever
+they appear, and a capital at the start of a sentence says nothing
+about what they are. The test is whether the word would still be
+capitalised in the middle of a sentence. "European Commission" and
+"France" would; "the decision" and "thus" would not.
+
+A bare category with no name attached is not an entity either: "the
+Court" is a court, "the Decision" is a decision, "the Parties" are
+parties. Take the named form where the text gives one and take nothing
+where it does not.
+
 Skip entities from this already-recorded list: {known}
 
 CHUNK {i}/{n} OF DOCUMENT {filename}:

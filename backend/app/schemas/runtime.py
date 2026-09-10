@@ -26,6 +26,7 @@ class DocumentOut(OwnedOut):
     classification_confidence: float | None = None
     collection_file_id: str | None = None
     staged: bool = False
+    visibility: str = "shared"
 
 
 class DocumentPatch(BaseModel):
@@ -33,6 +34,7 @@ class DocumentPatch(BaseModel):
     toc: dict[str, Any] | None = None
     document_class_id: uuid.UUID | None = None
     classification_confidence: float | None = None
+    visibility: Literal["shared", "private"] | None = None
 
 
 class DocumentVersionOut(TimestampedOut):

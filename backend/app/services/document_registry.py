@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Document, DocumentVersion
+from app.models.runtime import DOCUMENT_VISIBILITIES
 from app.services.toc import normalize_line_density
 
 
@@ -44,9 +45,17 @@ async def register_document(
     external_ref: str | None = None,
     staged: bool = False,
     document_class_id: uuid.UUID | None = None,
+    visibility: str = "shared",
 ) -> Registration:
     """Register one document. Does not commit; the caller owns the
-    transaction and the decision to spawn processing."""
+    transaction and the decision to spawn processing.
+
+    `visibility` applies on create only: `shared` for corpus every user may
+    read, `private` for an upload that is the uploader's own. A re-upload of
+    an existing document keeps the visibility it has.
+    """
+    if visibility not in DOCUMENT_VISIBILITIES:
+        raise ValueError(f"visibility must be one of {DOCUMENT_VISIBILITIES}")
     content = content.replace("\x00", "").replace("\\u0000", "")
     content = normalize_line_density(content)
     content_hash = hashlib.sha256(content.encode()).hexdigest()
@@ -92,6 +101,7 @@ async def register_document(
                        external_ref=external_ref if source else None,
                        owner_id=owner_id,
                        roles=roles or [], staged=staged,
+                       visibility=visibility,
                        document_class_id=document_class_id,
                        classification_confidence=(
                            1.0 if document_class_id else None))

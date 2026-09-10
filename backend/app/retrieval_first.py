@@ -421,11 +421,37 @@ async def plan_question(
             "effort": effort}
 
 
-async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
+# Retrieval ranks only what the asker could open: the shared corpus, their
+# own documents, and documents shared with a role they hold. Every channel
+# that selects from `document d` carries this clause and its two binds.
+VISIBLE_TO_ASKER = ("(d.visibility = 'shared' OR d.owner_id = CAST(:owner AS uuid)"
+                    " OR d.roles && :roles)")
+
+
+def _asker_binds(owner_id: uuid.UUID | None, roles: list[str] | None) -> dict:
+    """Bind values for VISIBLE_TO_ASKER; no asker means the corpus only."""
+    return {"owner": str(owner_id) if owner_id else None,
+            "roles": list(roles or [])}
+
+
+def _visible_query(sql: str):
+    """A text query using VISIBLE_TO_ASKER, with its array bind typed."""
+    return text(sql).bindparams(bindparam("roles", type_=ARRAY(String)))
+
+
+async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP, *,
+                            owner_id: uuid.UUID | None = None,
+                            roles: list[str] | None = None) -> list[dict]:
     """Channels: anchor mentions, graph traversal to depth k (effort),
-    websearch text. Every doc accumulates provenance reasons."""
+    websearch text. Every doc accumulates provenance reasons.
+
+    `owner_id` and `roles` are the asker's: a document they could not open
+    is never ranked, so it can neither be cited nor leak through a citation.
+    Without an asker only the shared corpus is searched.
+    """
     from app.db import AsyncSessionLocal
 
+    asker = _asker_binds(owner_id, roles)
     depth = EFFORT_DEPTH.get(plan.get("effort", "medium"), 2)
     scores: dict[str, float] = defaultdict(float)
     reasons: dict[str, list[str]] = defaultdict(list)
@@ -459,13 +485,14 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 break
             w_mention = 3.0 / (hop + 1) ** 2
             w_graph = 2.0 / (hop + 1) ** 2
-            rows = (await s.execute(text("""
+            rows = (await s.execute(_visible_query(f"""
                 SELECT m.document_id, d.filename, m.entity_id, count(*)
                 FROM entity_mention m JOIN document d ON d.id = m.document_id
                 WHERE m.entity_id = ANY(CAST(:eids AS uuid[]))
                   AND m.status = 'active' AND d.staged IS NOT TRUE
+                  AND {VISIBLE_TO_ASKER}
                 GROUP BY 1, 2, 3"""),
-                {"eids": list(frontier)})).all()
+                {"eids": list(frontier), **asker})).all()
             for did, fn, eid, hits in rows:
                 did = str(did)
                 w = idf.get(str(eid), 1.0)
@@ -475,14 +502,15 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 reasons[did].append(
                     f"mentions {label} x{hits}" if hop == 0 else
                     f"mentions {label} ({hop}-hop) x{hits}")
-            rows = (await s.execute(text("""
+            rows = (await s.execute(_visible_query(f"""
                 SELECT r.evidence_document_id, d.filename, count(*)
                 FROM relationship r
                 JOIN document d ON d.id = r.evidence_document_id
                 WHERE (r.source_id = ANY(CAST(:eids AS uuid[]))
                    OR r.target_id = ANY(CAST(:eids AS uuid[])))
                   AND d.staged IS NOT TRUE
-                GROUP BY 1, 2"""), {"eids": list(frontier)})).all()
+                  AND {VISIBLE_TO_ASKER}
+                GROUP BY 1, 2"""), {"eids": list(frontier), **asker})).all()
             for did, fn, hits in rows:
                 did = str(did)
                 scores[did] += w_graph * min(hits, 5)
@@ -504,7 +532,7 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
         for q in plan["queries"]:
             if len(q.strip()) < 3:
                 continue
-            rows = (await s.execute(text("""
+            rows = (await s.execute(_visible_query(f"""
                 SELECT d.id, d.filename,
                        ts_rank(dv.content_tsvector,
                                websearch_to_tsquery('simple', :q)) AS r
@@ -512,7 +540,8 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 JOIN document_version dv ON dv.id = d.current_version_id
                 WHERE dv.content_tsvector @@ websearch_to_tsquery('simple', :q)
                   AND d.staged IS NOT TRUE
-                ORDER BY r DESC LIMIT 60"""), {"q": q})).all()
+                  AND {VISIBLE_TO_ASKER}
+                ORDER BY r DESC LIMIT 60"""), {"q": q, **asker})).all()
             for did, fn, r in rows:
                 did = str(did)
                 scores[did] += 8.0 * float(r) + 0.5
@@ -528,11 +557,12 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
             if len(toks) < 2:
                 continue
             pat = "%" + "%".join(toks[:3]) + "%"
-            rows = (await s.execute(text("""
-                SELECT id, filename FROM document
-                WHERE filename ILIKE :pat AND staged IS NOT TRUE
+            rows = (await s.execute(_visible_query(f"""
+                SELECT d.id, d.filename FROM document d
+                WHERE d.filename ILIKE :pat AND d.staged IS NOT TRUE
+                  AND {VISIBLE_TO_ASKER}
                 LIMIT 10"""),
-                {"pat": pat})).all()
+                {"pat": pat, **asker})).all()
             for did, fn in rows:
                 did = str(did)
                 scores[did] += 12.0
@@ -739,10 +769,11 @@ async def main() -> None:
     if args.regress:
         await regress(top_n=args.top, effort=args.effort)
     elif args.question:
+        owner = uuid.UUID(args.owner) if args.owner else None
         plan = await plan_question(args.question, effort=args.effort)
         print(json.dumps({k: v for k, v in plan.items()
                           if k != "anchor_names"}, indent=1)[:1200])
-        ranked = await retrieve_and_rank(plan)
+        ranked = await retrieve_and_rank(plan, owner_id=owner)
         for r in ranked[:args.top]:
             print(f"  {r['score']:8.2f}  {r['filename']:44}  "
                   f"{r['reason'][:70]}")
@@ -751,7 +782,7 @@ async def main() -> None:
                 ap.error("--store needs --owner: a result belongs to someone")
             briefing = await build_briefing(ranked, args.effort)
             rid = await store_result(args.question, ranked, briefing, plan,
-                                     owner_id=uuid.UUID(args.owner))
+                                     owner_id=owner)
             print(f"stored result {rid}")
     else:
         print("need --regress or --question", file=sys.stderr)

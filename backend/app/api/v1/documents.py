@@ -20,6 +20,8 @@ from app.models import (
     EntityMention,
     EntityType,
     PropertyValue,
+    Result,
+    ResultDocument,
 )
 from app.schemas.runtime import (
     DocumentOut,
@@ -47,7 +49,22 @@ async def _document_visibility(model, caller: CallerIdentity):
         .join(Dossier, Dossier.id == DossierDocument.dossier_id)
         .where(visible_clause(Dossier, caller, read_all=False))
     )
-    return or_(base, model.id.in_(dossier_subq))
+    # Documents a visible result cites (cascading access): the answer a
+    # reader is shown is only as good as the sources they can open, and
+    # corpus documents belong to whoever ingested them, never to the asker.
+    result_subq = (
+        select(ResultDocument.document_id)
+        .join(Result, Result.id == ResultDocument.result_id)
+        .where(visible_clause(Result, caller, read_all=False))
+    )
+    # The corpus is shared: every authenticated user reads it. Ownership
+    # and the two cascades only decide who reads a private upload.
+    return or_(
+        model.visibility == "shared",
+        base,
+        model.id.in_(dossier_subq),
+        model.id.in_(result_subq),
+    )
 
 
 @router.get("", response_model=list[DocumentOut])

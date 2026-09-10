@@ -4636,7 +4636,7 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     # where it can still stop the next one from being made.
     plan = await rf.plan_question(question, effort=effort, run_id=run_id)
     await _check_cancel(run_id)
-    ranked = await rf.retrieve_and_rank(plan)
+    ranked = await rf.retrieve_and_rank(plan, owner_id=owner_id, roles=roles)
     await _check_cancel(run_id)
     briefing = await rf.build_briefing(ranked, effort)
     await _check_cancel(run_id)

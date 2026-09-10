@@ -20,6 +20,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
+from typing import Literal
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
@@ -91,6 +92,12 @@ async def upload_zip(file: UploadFile,
                          description="Hold the documents back from the live "
                                      "corpus (schema still being designed). "
                                      "Nothing unstages them automatically."),
+                     visibility: Literal["shared", "private"] = Query(
+                         default="shared",
+                         description="Who may read them: 'shared' (every "
+                                     "user, the corpus default) or 'private' "
+                                     "(the uploader, their roles, and readers "
+                                     "of a result citing them)."),
                      session: AsyncSession = Depends(get_session),
                      caller: CallerIdentity = Depends(get_caller)):
     """Zip of .md files in -> registered, pipeline spawned.
@@ -118,7 +125,7 @@ async def upload_zip(file: UploadFile,
         reg = await register_document(
             session, filename=base, content=content,
             owner_id=caller.user_id, roles=caller.roles,
-            source=source, staged=staged)
+            source=source, staged=staged, visibility=visibility)
         if reg.outcome == "unchanged":
             unchanged += 1
         elif reg.outcome == "duplicate":

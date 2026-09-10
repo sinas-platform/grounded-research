@@ -24,6 +24,9 @@ from app.models._common import OwnedMixin, TimestampMixin, uuid_pk
 # ─────────────────────────────────────────────────────────────
 # Documents and versions
 # ─────────────────────────────────────────────────────────────
+DOCUMENT_VISIBILITIES = ("shared", "private")
+
+
 class Document(Base, TimestampMixin, OwnedMixin):
     __tablename__ = "document"
 
@@ -50,6 +53,12 @@ class Document(Base, TimestampMixin, OwnedMixin):
     # don't fire on upload). Discovery and front-matter scans still see them;
     # retrieval does not. Flips false when a manual IngestionRun completes.
     staged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    # Who may read it. `shared` is the corpus: every authenticated user.
+    # `private` is someone's own upload: its owner, its roles, and whoever
+    # can see a result that cites it. Retrieval ranks only what the asker
+    # could open, so a private document never reaches a stranger's answer.
+    visibility: Mapped[str] = mapped_column(
+        String(10), nullable=False, default="shared", server_default="shared")
 
     versions: Mapped[list["DocumentVersion"]] = relationship(
         back_populates="document",

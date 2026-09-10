@@ -7,6 +7,7 @@ bypassed content-hash dedup. SGR-native now, same write path as bulk."""
 from __future__ import annotations
 
 import uuid
+from typing import Literal
 
 from fastapi import (APIRouter, Depends, File, Form, HTTPException,
                      UploadFile, status)
@@ -35,6 +36,11 @@ async def upload_document(
         default=False,
         description="If true, document is parked and the auto-pipeline "
                     "doesn't fire. Used for the discovery upload flow."),
+    visibility: Literal["shared", "private"] = Form(
+        default="private",
+        description="Who may read it: 'private' (the uploader, their roles, "
+                    "and readers of a result citing it) or 'shared' (every "
+                    "user, as the corpus is). Applies on create only."),
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
@@ -61,7 +67,7 @@ async def upload_document(
     reg = await register_document(
         session, filename=file.filename or "upload.md", content=content,
         owner_id=caller.user_id, roles=caller.roles,
-        source=source, staged=staged,
+        source=source, staged=staged, visibility=visibility,
         document_class_id=declared_class_id)
     await session.commit()
 

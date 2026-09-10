@@ -153,7 +153,7 @@ async def test_low_confidence_rejection_is_kept():
 
 @pytest.mark.asyncio
 async def test_unparseable_reply_never_hides_mentions():
-    mentions = [_mention("European Commission"), _mention("Akzo Nobel")]
+    mentions = [_mention("the supervising authority"), _mention("Bellhaven")]
     session = _FakeSession(mentions)
     sinas = _FakeSinas("I could not decide, sorry.")
     report = await ground_document(session, sinas, uuid.uuid4())

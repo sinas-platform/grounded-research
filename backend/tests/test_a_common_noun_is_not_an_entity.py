@@ -125,3 +125,61 @@ def test_the_strict_test_is_a_subset_of_the_wider_one():
         ev = case_evidence(word, "some text about services and national things")
         assert written_as_a_word(word)
         assert is_generic(word, MIN_DOCUMENTS, ev)
+
+
+def test_a_type_whose_names_are_common_nouns_is_excluded_as_a_rule():
+    """A relevant market is named by a common noun phrase because that is what
+    a market is. The case test cannot tell a correctly recorded market from a
+    mistakenly recorded one, so it is not asked to."""
+    from app.services.generic_entities import EXCLUDED_TYPES, written_as_a_word
+
+    assert "Relevant Market" in EXCLUDED_TYPES
+    # the test would otherwise fire on all of these, and should not
+    for market in ("retail market", "upstream market", "resale price maintenance"):
+        assert written_as_a_word(market), market
+
+
+def test_the_exclusion_is_by_type_not_by_name():
+    """A rule, not a list of entities: 229 individual judgements would be the
+    thing a mark exists to avoid."""
+    from app.services.generic_entities import EXCLUDED_TYPES
+
+    assert all(isinstance(t, str) for t in EXCLUDED_TYPES)
+    assert "Company / Undertaking" not in EXCLUDED_TYPES
+    assert "Competition Authority" not in EXCLUDED_TYPES
+
+
+# Patterns as a deployment declares them, read from document_class at run time.
+FR = r"n°\s?\d{2}-\d{3,4}"
+EU = r"\b(?:Regulation|Directive)\s+(?:\(EU\)\s+)?No\s+\d+/\d+"
+
+
+def test_a_french_instrument_is_spared_although_it_is_lower_case():
+    """Case separates names from words in English and nothing in French."""
+    from app.services.generic_entities import carries_an_identifier, written_as_a_word
+
+    name = "ordonnance n° 86-1243 du 1er décembre 1986"
+    assert written_as_a_word(name), "lower case, so the case test would mark it"
+    assert carries_an_identifier(name, [FR, EU]), "and the identifier saves it"
+
+
+def test_junk_carries_no_identifier_in_any_language():
+    from app.services.generic_entities import carries_an_identifier
+
+    for junk in ("paragraph 49", "décision attaquée", "record", "world",
+                 "federal district court", "firms"):
+        assert not carries_an_identifier(junk, [FR, EU]), junk
+
+
+def test_no_declared_pattern_spares_nothing():
+    """A deployment that declares no identifier cannot use this to spare."""
+    from app.services.generic_entities import carries_an_identifier
+
+    assert not carries_an_identifier("ordonnance n° 86-1243", [])
+    assert not carries_an_identifier("ordonnance n° 86-1243", None)
+
+
+def test_an_uncompilable_pattern_does_not_spare_and_does_not_raise():
+    from app.services.generic_entities import carries_an_identifier
+
+    assert not carries_an_identifier("ordonnance n° 86-1243", ["(unclosed"])

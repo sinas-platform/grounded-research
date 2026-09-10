@@ -56,6 +56,17 @@ log = logging.getLogger("sgr.generic_entities")
 #: marks; narrowing after a deletion is not a change at all.
 LOWERCASE_SHARE = 0.60
 
+#: Types the test cannot read, excluded as a rule rather than one entity at a
+#: time. A relevant market is named by a common noun phrase because that is
+#: what a market is: "retail market", "upstream market", "resale price
+#: maintenance" are lower-case for the same reason "services" is, and the test
+#: cannot tell a correctly recorded market from a mistakenly recorded one. On
+#: this corpus 229 of the 274 entities the strict test selects are of this
+#: type, so applying it here would be 229 individual judgements wearing the
+#: clothes of a rule. If Relevant Market carries junk, and it may, it needs a
+#: test that knows what a market is. This one does not.
+EXCLUDED_TYPES = frozenset({"Relevant Market"})
+
 #: Below this many documents an entity is too rare to be worth judging, and
 #: the case evidence too thin to judge on. The junk that matters is common by
 #: construction: it was created from a word, so it matches everywhere.
@@ -79,6 +90,33 @@ def case_evidence(name: str, text: str) -> dict:
     total = exact + lower
     return {"as_written": exact, "lowercase": lower,
             "lowercase_share": (lower / total) if total else None}
+
+
+def carries_an_identifier(name: str, patterns: list[str]) -> bool:
+    """Whether the name carries a reference its deployment declares.
+
+    Case alone does not separate a name from a word on a corpus that is partly
+    French. In English a proper noun is capitalised wherever it falls, so
+    lower case is evidence; in French legal nomenclature lower case is the
+    convention, and `ordonnance n° 86-1243 du 1er décembre 1986` is as
+    specific as `Regulation No 1/2003` and as correctly written. It appears in
+    1,411 documents and is not a word.
+
+    An identifier is the signal that survives the language. The patterns come
+    from `document_class.identifier_pattern`, declared by the deployment for
+    its own classes, so this asks nothing about French or English and nothing
+    about competition law. `paragraph 49` and `décision attaquée` carry no
+    identifier in any language and stay marked.
+    """
+    if not name:
+        return False
+    for pattern in patterns or ():
+        try:
+            if re.search(pattern, name):
+                return True
+        except re.error:
+            log.warning("class identifier_pattern does not compile: %r", pattern)
+    return False
 
 
 def written_as_a_word(name: str) -> bool:
@@ -132,10 +170,11 @@ def mark(name: str, documents: int, evidence: dict, when: str) -> dict:
 
 
 _CANDIDATES = text("""
-    SELECT e.id, e.canonical_form, e.metadata,
+    SELECT e.id, e.canonical_form, e.metadata, et.name AS entity_type,
            (SELECT count(DISTINCT em.document_id)
               FROM entity_mention em WHERE em.entity_id = e.id) AS documents
     FROM entity e
+    JOIN entity_type et ON et.id = e.entity_type_id
     WHERE e.merged_into_id IS NULL
       AND e.canonical_form = lower(e.canonical_form)
       AND e.canonical_form ~ '^[a-z]'
@@ -154,13 +193,23 @@ async def mark_generic(session, when: str, dry_run: bool = True) -> dict:
     this exists to avoid is a judgement applied at scale before anyone has
     read what it selected.
     """
+    patterns = [p for (p,) in (await session.execute(text(
+        "SELECT identifier_pattern FROM document_class "
+        "WHERE identifier_pattern IS NOT NULL AND identifier_pattern <> ''"
+    ))).all()]
     rows = (await session.execute(_CANDIDATES)).mappings().all()
-    marked = skipped = already = 0
+    marked = skipped = already = excluded = identified = 0
     examples: list[str] = []
     for row in rows:
         name, docs = row["canonical_form"], int(row["documents"] or 0)
+        if row["entity_type"] in EXCLUDED_TYPES:
+            excluded += 1
+            continue
         if not (written_as_a_word(name) and docs >= MIN_DOCUMENTS):
             skipped += 1
+            continue
+        if carries_an_identifier(name, patterns):
+            identified += 1
             continue
         meta = dict(row["metadata"] or {})
         if "generic_term" in meta:
@@ -179,4 +228,7 @@ async def mark_generic(session, when: str, dry_run: bool = True) -> dict:
     if not dry_run:
         await session.commit()
     return {"candidates": len(rows), "marked": marked, "already_marked": already,
-            "below_threshold": skipped, "dry_run": dry_run, "examples": examples}
+            "below_threshold": skipped, "excluded_by_type": excluded,
+            "spared_carries_identifier": identified,
+            "patterns_declared": len(patterns),
+            "dry_run": dry_run, "examples": examples}

@@ -122,7 +122,8 @@ class Entity(Base, TimestampMixin):
     # unique per type among live (unmerged) entities
     natural_key: Mapped[str | None] = mapped_column(String(300))
     # Name identity: entity_resolver.normalize(canonical_form). Unique per
-    # type among live entities, so a second "CMA" cannot be created at all —
+    # type among live entities, so a second "Northmoor Authority" cannot be
+    # created at all —
     # 98.9% of entities carry no natural_key, which left name-identified
     # entities with no constraint whatsoever and made duplicates a matter of
     # timing rather than correctness.

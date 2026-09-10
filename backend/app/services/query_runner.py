@@ -2102,8 +2102,8 @@ def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
 
     It cannot be derived from `covered_by`. Measured on those eleven, the union
     of every part's `covered_by` names 11 of 11, 13 of 14, 14 of 14 claims —
-    nearly all of them, trailing case notes included, because a note about
-    Deutsche Bahn genuinely does bear on a part about judicial review.
+    nearly all of them, trailing source notes included, because a note about
+    a source genuinely does bear on the part that source speaks to.
     Membership says a claim relates to the question; it says nothing about
     which claim discharges it. Hence a separate reading.
 
@@ -2116,9 +2116,8 @@ def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
     asked whether the gate considered the question at all. It has fired in 35
     runs from before gate-cycle telemetry existed and in none of the 39 since,
     while at least three of the eleven read by hand end with no conclusion
-    anywhere — 6d7b9989 among them, whose two sibling runs on the same question
-    both close with "The Commission may therefore lawfully take a forensic
-    copy" and which simply has no such claim.
+    anywhere. One of those three has two sibling runs on the same question that
+    both close on a claim stating the answer, and it simply has none.
 
     So both are recorded: the gate's own boolean, and the sequence it puts the
     conclusion at. Where they disagree is the measurement worth having.

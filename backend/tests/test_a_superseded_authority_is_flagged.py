@@ -74,3 +74,37 @@ def test_the_message_says_what_it_is_and_is_not():
     assert "62020TJ0451.md" in m
     assert "Case C-123/45 Later" in m
     assert "not a judgement" in m
+
+
+def test_every_relationship_read_is_filtered_to_active_edges():
+    """A rejected or withdrawn assertion keeps its row. `relationship_state`
+    carries `counts_as_active`, and reading an edge without it tells a reader
+    an authority is superseded on the strength of an assertion the graph has
+    already refused.
+
+    Counted rather than spot-checked, so a third relationship read added later
+    fails here instead of shipping unguarded. It defends the width of the
+    query, not its meaning: see the NULL convention asserted below.
+    """
+    import re
+
+    from app.services.supersession import _CITED_SUPERSEDED
+
+    sql = str(_CITED_SUPERSEDED)
+    reads = len(re.findall(r"(?:FROM|JOIN)\s+relationship\s", sql))
+    guards = sql.count("counts_as_active")
+    assert reads == 2, f"expected two relationship reads, found {reads}"
+    assert guards == reads, (
+        f"{reads} relationship reads but {guards} active-state guards"
+    )
+
+
+def test_an_edge_with_no_state_counts_as_active():
+    """The convention is the annotation walker's, in three places there, and
+    is not re-decided here: a NULL `current_state_id` is active. Dropping
+    those would silence the whole check, because no edge in the corpus
+    carries a state at all."""
+    from app.services.supersession import _CITED_SUPERSEDED
+
+    sql = str(_CITED_SUPERSEDED)
+    assert sql.count("current_state_id IS NULL") == 2

@@ -40,12 +40,20 @@ log = logging.getLogger("sgr.supersession")
 #: problem, not to inventory it.
 MAX_FINDINGS = 5
 
+# Both joins read only edges that count as active. `relationship_state`
+# carries `counts_as_active`, and a rejected or withdrawn assertion keeps its
+# row: reading the edge without the state tells a reader an authority is
+# superseded on the strength of an assertion the graph has already refused. A
+# NULL `current_state_id` is active, which is the convention the annotation
+# walker uses in three places and is not re-decided here.
 _CITED_SUPERSEDED = text("""
     WITH ft AS (
         SELECT r.source_id AS doc_id, r.target_id AS ent_id
         FROM relationship r
         JOIN relationship_definition rd ON rd.id = r.relationship_definition_id
+        LEFT JOIN relationship_state rs ON rs.id = r.current_state_id
         WHERE rd.name IN ('is_full_text_of', 'is_full_text_of_court')
+          AND (r.current_state_id IS NULL OR rs.counts_as_active IS TRUE)
     )
     SELECT DISTINCT d.filename, te.canonical_form AS superseded,
            se.canonical_form AS superseding, dc.identifier_pattern
@@ -59,7 +67,9 @@ _CITED_SUPERSEDED = text("""
                                    AND rd.name = 'supersedes'
     JOIN entity te ON te.id = r.target_id
     JOIN entity se ON se.id = r.source_id
+    LEFT JOIN relationship_state srs ON srs.id = r.current_state_id
     WHERE ac.answer_id = :a
+      AND (r.current_state_id IS NULL OR srs.counts_as_active IS TRUE)
 """)
 
 

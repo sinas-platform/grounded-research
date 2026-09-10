@@ -811,3 +811,51 @@ def test_the_verdict_is_returned_from_outside_any_broad_try():
             "the gate's verdict is returned from inside a try/except Exception; "
             "a code fault there becomes a passing verdict"
         )
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_no_claims_is_never_publishable(monkeypatch):
+    """Deletion runs to completion, and neither publish site counts claims.
+    All that stands between an empty answer and publication is the
+    missing-conclusion finding happening to fire, which is a model's opinion
+    about an empty list and not a guard, so the gate has to refuse on its
+    own."""
+    tele: dict = {}
+
+    class _Empty:
+        async def get(self, _model, _ident):
+            return SimpleNamespace(telemetry={"validate": {}})
+
+        async def execute(self, *_a, **_k):
+            return SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: []),
+                scalar_one_or_none=lambda: None,
+                all=lambda: [],
+            )
+
+    @asynccontextmanager
+    async def _session_local():
+        yield _Empty()
+
+    async def _tele(run_id, stage, **detail):
+        tele.setdefault(stage, {}).update(detail)
+
+    monkeypatch.setattr(qr, "AsyncSessionLocal", _session_local)
+    monkeypatch.setattr(qr, "_tele", _tele)
+
+    sinas = _FakeSinas(json.dumps({"publishable": True, "coverage": [
+        {"part": "whether it applies", "covered": True},
+        {"part": "whether it is mandatory", "covered": True},
+    ]}))
+    ok, missing, issues, correctness, _points, cause = await qr._gate_answer(
+        sinas, "Q?", uuid.uuid4(), uuid.uuid4())
+
+    assert ok is False, "an answer with no claims cannot publish"
+    assert correctness, "the reviser must be told there is nothing there"
+    assert issues, "and the finding must reach the remediation message"
+    assert cause == "coverage"
+    assert "no claims" in missing
+    assert sinas.calls == [], (
+        "the verdict is structural: no model call is spent asking whether an "
+        "empty list of claims answers the question"
+    )

@@ -2533,6 +2533,29 @@ async def _gate_answer(
                 .order_by(AnswerClaim.sequence)
             )
         ).all()
+        if not rows:
+            # Ahead of the judge, because there is nothing to judge. Deletion
+            # runs to completion: validation, the final sweep and the
+            # exhausted-round cleanup can each take the last surviving claim,
+            # and what is left asserts nothing. `publishable` means the
+            # surviving claims still answer the question, and no claims never
+            # do, so this is neither a verdict worth a model call nor one a
+            # model should be able to overrule after being shown an empty
+            # list.
+            #
+            # Nothing else stops an empty answer from publishing. Neither
+            # publish site counts claims and neither does `_publish_answer`.
+            # What stands there today is the missing-conclusion finding
+            # happening to fire, which is a model's opinion about an empty
+            # list of claims and not a guard.
+            note = (
+                "The answer has no claims at all: every claim was removed "
+                "during validation. Write the claims that answer the "
+                "question, each citing passages from the working set, "
+                "beginning with one that states the answer directly."
+            )
+            return (False, "the answer has no claims left",
+                    [note], [note], [], "coverage")
         cited = set(
             (
                 await session.execute(

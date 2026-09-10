@@ -2150,6 +2150,24 @@ def _plan_outcome(extracts: list[dict], drafted: list[tuple[int, set]]) -> list[
     read as used when one of them was. That asymmetry is deliberate and worth
     stating: `used` can be wrong, `extracted_unused` cannot. A planned claim
     reported unused had none of its documents cited by anything.
+
+    THE SECOND WAY `used` CAN BE WRONG, AND WHY IT IS NOT REPAIRED HERE. This
+    is written at drafting, under the `draft` stage, and drafting is not the
+    end of the run. Validation, coverage repair and the final sweep can remove
+    the claim that carried the citation, or rebind its evidence, after which a
+    planned claim recorded `used` has its document in no published claim.
+    Measured over the runs stored on 10 September 2026: of 240 published runs,
+    5 lost a document's last citation somewhere after drafting, so the record
+    overstates `used` in about 2% of them. It is not repaired here because the
+    plan is out of scope by the time the answer publishes, and because "did
+    the plan reach the draft" and "did the plan reach the published answer"
+    are two questions, not one bad answer to a single question.
+
+    `cited_by_draft_sequence` is named for the numbering it holds. Sequences
+    are compacted at publish, so a run that dropped any claim renumbers the
+    survivors and these numbers no longer address the published answer: 45 of
+    those 240 runs dropped at least one claim. The plain name `cited_by` read
+    as an index into the answer a reader was holding, which it is not.
     """
     out: list[dict] = []
     for e in extracts:
@@ -2160,7 +2178,7 @@ def _plan_outcome(extracts: list[dict], drafted: list[tuple[int, set]]) -> list[
             "n": e.get("n"),
             "passages": len(e.get("passages") or []),
             "documents": sorted(files),
-            "cited_by": cited,
+            "cited_by_draft_sequence": cited,
             "state": ("no_passages" if not files
                       else "used" if cited else "extracted_unused"),
         })

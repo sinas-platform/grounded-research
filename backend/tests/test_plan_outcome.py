@@ -15,7 +15,7 @@ def test_a_planned_claim_the_extractor_found_nothing_for():
     """Its group is skipped before the drafter sees it, so it cannot be
     'unused' -- nothing was ever shown."""
     out = _plan_outcome([{"n": 4, "passages": []}], drafted=[])
-    assert out == [{"n": 4, "passages": 0, "documents": [], "cited_by": [],
+    assert out == [{"n": 4, "passages": 0, "documents": [], "cited_by_draft_sequence": [],
                     "state": "no_passages"}]
 
 
@@ -28,7 +28,7 @@ def test_a_planned_claim_shown_and_left_out():
     assert out[0]["state"] == "extracted_unused"
     assert out[0]["passages"] == 2
     assert out[0]["documents"] == ["a.md"]
-    assert out[0]["cited_by"] == []
+    assert out[0]["cited_by_draft_sequence"] == []
 
 
 def test_a_planned_claim_the_answer_used():
@@ -36,7 +36,7 @@ def test_a_planned_claim_the_answer_used():
     out = _plan_outcome(extracts, drafted=[(3, {"a.md"}),
                                            (5, {"other.md"})])
     assert out[0]["state"] == "used"
-    assert out[0]["cited_by"] == [3]
+    assert out[0]["cited_by_draft_sequence"] == [3]
 
 
 def test_unused_is_the_claim_that_cannot_be_wrong():
@@ -87,3 +87,20 @@ def test_drafted_carries_what_was_persisted_not_what_was_offered():
     assert "[:4]" in body, "the set must be built inside the capped loop"
     assert body.index("if doc is None") < body.index("cited_here.add"), (
         "a filename that resolves to no document must not be added")
+
+
+def test_the_sequence_field_is_named_for_the_numbering_it_holds():
+    """Sequences are compacted at publish, so a run that dropped any claim
+    renumbers the survivors and these numbers no longer address the published
+    answer: 45 of 240 stored published runs dropped at least one claim. The
+    plain name `cited_by` read as an index into the answer a reader was
+    holding, which it is not."""
+    out = _plan_outcome(
+        [{"n": 1, "passages": [{"filename": "a.md"}]}],
+        [(3, {"a.md"})],
+    )
+    assert out[0]["cited_by_draft_sequence"] == [3]
+    assert "cited_by" not in out[0], (
+        "the unqualified name is the one that misleads; it must not survive "
+        "beside the qualified one"
+    )

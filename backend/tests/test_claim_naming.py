@@ -309,7 +309,7 @@ def test_identity_of_an_identifier_that_names_no_case_is_none():
 
 
 def test_an_identifier_in_parentheses_is_found():
-    got = identifiers_named("Nexans v Commission (C-606/18 P), paragraph 87", SHAPE)
+    got = identifiers_named("Ashgrove v Authority (C-606/18 P), paragraph 87", SHAPE)
     assert set(got.values()) == {"C-606/18"}
 
 
@@ -382,14 +382,14 @@ def test_a_pattern_that_captures_nothing_keys_on_the_whole_match():
     assert identifier_key("INV-1234", whole) != identifier_key("INV-5678", whole)
 
 
-NEXANS = Source(key="d-606", identifiers=("C-606/18 P",),
-                label="62018CJ0606.md", pattern=SHAPE)
-PRYSMIAN = Source(key="d-601", identifiers=("C-601/18 P",),
-                  label="62018CJ0601.md", pattern=SHAPE)
-CASINO_GC = Source(key="d-249", identifiers=("T-249/17",),
-                   label="62017TJ0249.md", pattern=SHAPE)
-CASINO_CJ = Source(key="d-690", identifiers=("C-690/20 P",),
-                   label="62020CJ0690.md", pattern=SHAPE)
+APPEAL_A = Source(key="d-606", identifiers=("C-606/18 P",),
+                  label="judgment-a.md", pattern=SHAPE)
+APPEAL_B = Source(key="d-601", identifiers=("C-601/18 P",),
+                  label="judgment-b.md", pattern=SHAPE)
+FIRST_INSTANCE = Source(key="d-249", identifiers=("T-249/17",),
+                        label="judgment-c.md", pattern=SHAPE)
+ON_APPEAL = Source(key="d-690", identifiers=("C-690/20 P",),
+                   label="judgment-d.md", pattern=SHAPE)
 
 
 def _mismatches(claims, sources):
@@ -401,9 +401,9 @@ def test_a_claim_naming_only_a_case_it_does_not_cite_is_reported():
     evidence is another."""
     found = _mismatches(
         [(7, "Continuing the examination is permissible, per paragraph 87 of "
-             "Nexans France and Nexans v Commission (C-606/18 P), only where "
-             "the Commission can legitimately consider it justified.")],
-        {7: [PRYSMIAN]},
+             "Ashgrove Systems and Ashgrove v Authority (C-606/18 P), only "
+             "where the authority can legitimately consider it justified.")],
+        {7: [APPEAL_B]},
     )
     # `cited` shows what the source calls itself, not the key it reduced to:
     # a reader is told the identifier, not the comparison.
@@ -416,14 +416,14 @@ def test_no_cue_word_is_needed():
     """A written case number is itself the attribution. The cue vocabulary
     governs the naming check and has no say here, which is what lets this
     reach a claim that attributes with `per paragraph 87 of`."""
-    found = _mismatches([(1, "per paragraph 87 of (C-606/18 P)")], {1: [PRYSMIAN]})
+    found = _mismatches([(1, "per paragraph 87 of (C-606/18 P)")], {1: [APPEAL_B]})
     assert len(found) == 1
 
 
 def test_a_claim_that_names_the_case_it_cites_is_clean():
     found = _mismatches(
         [(1, "In Case T-249/17 the General Court annulled the decision")],
-        {1: [CASINO_GC]},
+        {1: [FIRST_INSTANCE]},
     )
     assert found == []
 
@@ -432,9 +432,9 @@ def test_naming_a_second_case_beside_the_cited_one_is_clean():
     """Ordinary legal writing: an appeal relation, a case the cited judgment
     itself cites, a case being distinguished. The reader has the thread."""
     found = _mismatches(
-        [(1, "On appeal in Casino v Commission (C-690/20 P), the Court of "
-             "Justice set aside the judgment in Case T-249/17.")],
-        {1: [CASINO_CJ]},
+        [(1, "On appeal in Dunmore v Authority (C-690/20 P), the higher "
+             "court set aside the judgment in Case T-249/17.")],
+        {1: [ON_APPEAL]},
     )
     assert found == []
 
@@ -443,25 +443,25 @@ def test_a_claim_naming_no_case_is_not_reported():
     """Silence is the naming check's business, not this one's."""
     found = _mismatches(
         [(1, "An Advocate General's Opinion states the principle")],
-        {1: [PRYSMIAN]},
+        {1: [APPEAL_B]},
     )
     assert found == []
 
 
 def test_a_suffix_difference_is_not_a_mismatch():
-    found = _mismatches([(1, "In Case C-601/18 the Court held")], {1: [PRYSMIAN]})
+    found = _mismatches([(1, "In Case C-601/18 the Court held")], {1: [APPEAL_B]})
     assert found == []
 
 
 def test_joined_cases_stored_on_one_document_need_only_one_named():
-    ceske = Source(
+    joined = Source(
         key="d-538",
         identifiers=("C-538/18 P", "C-539/18 P"),
-        label="62018CJ0538.md",
+        label="judgment-e.md",
         pattern=SHAPE,
     )
     found = _mismatches(
-        [(1, "The Court dismissed the appeal in Case C-538/18 P")], {1: [ceske]}
+        [(1, "The Court dismissed the appeal in Case C-538/18 P")], {1: [joined]}
     )
     assert found == []
 
@@ -470,9 +470,9 @@ def test_the_rule_is_per_claim_not_per_source():
     """A claim resting on a judgment and its appeal names one of them. Judged
     per source the unnamed one would fire, and that is ordinary writing."""
     found = _mismatches(
-        [(1, "On appeal in Casino v Commission (C-690/20 P) the Court set "
-             "aside the General Court's judgment")],
-        {1: [CASINO_CJ, CASINO_GC]},
+        [(1, "On appeal in Dunmore v Authority (C-690/20 P) the higher "
+             "court set aside the judgment below")],
+        {1: [ON_APPEAL, FIRST_INSTANCE]},
     )
     assert found == []
 
@@ -496,7 +496,7 @@ def test_a_claim_citing_nothing_has_no_case_to_be_judged_against():
 def test_each_offending_claim_is_reported_once():
     found = _mismatches(
         [(1, "per (C-606/18 P)"), (2, "and per (C-606/18 P) again")],
-        {1: [PRYSMIAN], 2: [PRYSMIAN]},
+        {1: [APPEAL_B], 2: [APPEAL_B]},
     )
     assert [m.seq for m in found] == [1, 2]
 
@@ -509,11 +509,11 @@ def test_mismatch_message_names_both_the_written_case_and_the_cited_one():
     change, so both halves are given and both repairs are offered."""
     text = mismatch_message(
         Mismatch(seq=7, named=("C-606/18",), cited=("C-601/18",),
-                 labels=("62018CJ0601.md",))
+                 labels=("judgment-b.md",))
     )
     assert "C-606/18" in text
     assert "C-601/18" in text
-    assert "62018CJ0601.md" in text
+    assert "judgment-b.md" in text
     assert "7" in text
 
 
@@ -652,25 +652,25 @@ def test_the_distinguishing_words_are_measured_not_listed():
     from app.services.claim_naming import distinctive_words
 
     names = [
-        "T-141/08 E.ON Energie v Commission",
-        "C-89/11 P E.ON Energie v Commission",
-        "Judgment of the Court, Nexans France v Commission",
-        "Judgment of the Court, Prysmian v Commission",
-        "Judgment of the Court, Orange v Commission",
+        "T-141/08 Kestrel v Authority",
+        "C-89/11 P Kestrel v Authority",
+        "Decision of the Tribunal, Ashgrove Systems v Authority",
+        "Decision of the Tribunal, Bellhaven v Authority",
+        "Decision of the Tribunal, Carwood v Authority",
     ]
     d = distinctive_words(names)
-    assert "commission" not in d and "judgment" not in d and "court" not in d
-    assert {"nexans", "prysmian", "orange"} <= d
+    assert "authority" not in d and "decision" not in d and "tribunal" not in d
+    assert {"ashgrove", "bellhaven", "carwood"} <= d
 
 
 def test_a_claim_writing_a_party_name_has_named_the_source():
     from app.services.claim_naming import carries_name, distinctive_words
 
-    names = ["Nexans France v Commission", "Prysmian v Commission",
-             "Orange v Commission", "Casino v Commission"]
+    names = ["Ashgrove Systems v Authority", "Bellhaven v Authority",
+             "Carwood v Authority", "Dunmore v Authority"]
     d = distinctive_words(names)
-    assert carries_name("In Nexans France the Court held", names[0], d)
-    assert not carries_name("The Commission held", names[0], d)
+    assert carries_name("In Ashgrove Systems the Tribunal held", names[0], d)
+    assert not carries_name("The Authority held", names[0], d)
 
 
 def test_a_claim_writing_only_the_common_part_has_not():
@@ -678,9 +678,9 @@ def test_a_claim_writing_only_the_common_part_has_not():
     name here contains Commission, so writing it names nothing."""
     from app.services.claim_naming import carries_name, distinctive_words
 
-    names = ["Nexans v Commission", "Prysmian v Commission", "Orange v Commission"]
+    names = ["Ashgrove v Authority", "Bellhaven v Authority", "Carwood v Authority"]
     d = distinctive_words(names)
-    assert not carries_name("the Commission decided", names[0], d)
+    assert not carries_name("the Authority decided", names[0], d)
 
 
 def test_a_document_with_no_name_is_judged_on_its_identifier_alone():

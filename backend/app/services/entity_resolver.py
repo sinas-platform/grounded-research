@@ -79,7 +79,7 @@ def normalize(s: str) -> str:
 
 
 def party_set(s: str) -> frozenset[str] | None:
-    """Case styles: 'Facebook / WhatsApp' == 'WhatsApp v Facebook'."""
+    """Case styles: 'Bellhaven / Ashgrove' == 'Ashgrove v Bellhaven'."""
     parts = re.split(r"\s+v\.?\s+|\s+vs\.?\s+|\s*/\s*", s)
     parts = [normalize(p) for p in parts if normalize(p)]
     return frozenset(parts) if len(parts) >= 2 else None

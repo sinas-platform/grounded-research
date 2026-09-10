@@ -164,7 +164,11 @@ def _passage(content: str | None, span: dict | None,
     offsets existed keep the old behaviour rather than showing nothing.
     """
     if not content or not span:
-        return ""
+        # The stored quote first, not after. This returned "" here, so the one
+        # case the quote column exists for, evidence retained while the
+        # document version behind it is unavailable, was the case it did not
+        # cover: the reviewer saw an empty passage beside a claim that had one.
+        return quote.strip()[:1500] if quote else ""
     cf, ct = span.get("char_from"), span.get("char_to")
     if cf is not None and ct is not None and 0 <= int(cf) < int(ct) <= len(content):
         return content[int(cf):int(ct)].strip()[:1500]

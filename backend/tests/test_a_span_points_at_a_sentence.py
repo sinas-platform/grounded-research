@@ -127,3 +127,20 @@ def test_offsets_outside_the_document_fall_back_rather_than_slice():
     got = _passage(DOC, {"line_from": line, "line_to": line,
                          "char_from": 10, "char_to": 99999})
     assert got == PARA
+
+
+def test_the_quote_is_shown_when_the_document_content_is_gone():
+    """The case the column exists for: evidence retained, content unavailable."""
+    from app.review_export import _passage
+
+    for missing in (None, ""):
+        got = _passage(missing, {"line_from": 5, "line_to": 5},
+                       quote="the passage as the extractor verified it")
+        assert got == "the passage as the extractor verified it", repr(missing)
+
+
+def test_no_content_and_no_quote_is_still_empty():
+    from app.review_export import _passage
+
+    assert _passage(None, {"line_from": 5}) == ""
+    assert _passage("text", None) == ""

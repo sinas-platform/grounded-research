@@ -36,9 +36,13 @@ APP = Path(__file__).resolve().parent.parent / "app"
 
 # A full UUID, or the eight-hex short form a run is referred to by. Bounded by
 # non-hex so a longer hash is not clipped into a false positive.
+# Case-insensitive in the body, not only in the boundaries. The classes were
+# lower-case while the look-arounds already allowed either case, so an
+# upper-case or mixed-case identifier passed the guard that exists to catch it,
+# and a guard that misses the shape it is named for is worse than none.
 _UUID = re.compile(
-    r"\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b"
-    r"|(?<![0-9a-fA-F-])[0-9a-f]{8}(?![0-9a-fA-F-])"
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+    r"|(?<![0-9a-fA-F-])[0-9a-fA-F]{8}(?![0-9a-fA-F-])"
 )
 _QUESTION_TAG = re.compile(r"\bQ\d{1,3}\b")
 
@@ -107,3 +111,11 @@ def test_the_check_can_see_an_offender():
     assert _QUESTION_TAG.search("# Q99 swept twice and its first finding is gone")
     assert not _QUESTION_TAG.search('# titled "Qnn — Topic — sub-topic"')
     assert not _UUID.search("revision = '0036'")
+
+
+def test_an_upper_case_identifier_is_caught_too():
+    """The classes were lower-case while the boundaries allowed either case,
+    so the one shape the guard is named for slipped past it."""
+    for ident in ("A1B2C3D4-E5F6-7890-ABCD-EF1234567890",
+                  "A1B2C3D4", "a1B2c3D4"):
+        assert _UUID.search(ident), ident

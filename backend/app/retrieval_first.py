@@ -432,14 +432,13 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
     names: dict[str, str] = {}
 
     async with AsyncSessionLocal() as s:
-        # How common is each anchor? A mention of "Regulation (EU) 2018/1725"
-        # says almost nothing: every EU regulation carries a data-protection
-        # recital citing it, so an anchor on it pulls in the statute book —
-        # expert review found the AI Act, the Digital Markets Act, the Health
-        # Data Space, wine geographical indications and Ecodesign ranked into
-        # an answer about inspections, each on a single boilerplate mention.
-        # A mention of "E.ON Energie" says a great deal. Weight by inverse
-        # document frequency so aboutness beats boilerplate.
+        # How common is each anchor? A mention of a widely cited instrument
+        # says almost nothing: a boilerplate reference can sit in most of a
+        # corpus, so an anchor on it pulls in the whole shelf. Review of one
+        # deployment's answers found five instruments on unrelated subjects
+        # ranked into a single answer, each on one boilerplate mention. A
+        # mention of a rarely named entity says a great deal. Weight by
+        # inverse document frequency so aboutness beats boilerplate.
         total_docs = (await s.execute(
             text("SELECT count(*) FROM document"))).scalar() or 1
         df_rows = (await s.execute(text("""

@@ -161,6 +161,22 @@ def test_a_moderately_long_line_is_left_alone():
     assert normalize_line_density(content) == content
 
 
+def test_rewrapping_is_idempotent():
+    """Applying the wrap to its own output must return that output.
+
+    pysbd finds different boundaries in a long line than in a short one taken
+    out of it, so a single pass can leave a line a second pass would split.
+    A backfill that re-runs must not keep writing new versions.
+    """
+    from app.services.toc import normalize_line_density
+
+    wall = ("The first point is settled. " * 40
+            + "See Fed.R.Civ.P. 12(b)(6) and 77 Cong., 1st Sess., at 14. " * 20).strip()
+    once = normalize_line_density(wall)
+    assert once != wall
+    assert normalize_line_density(once) == once
+
+
 def test_md_structure_wins_over_numbered_heuristics():
     content = "\n".join([
         "# Decision",              # 1 — explicit structure

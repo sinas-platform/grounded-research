@@ -272,6 +272,39 @@ def derive_toc(content: str) -> list[dict]:
 # whole-line span is still a usable passage. The cost is grip, not density.
 _DENSITY_THRESHOLD = 200  # chars per line
 
+# A document can be well structured on average and still carry one paragraph
+# nothing can grip. Measured on the same corpus, by citation rate among
+# documents actually retrieved for a question: dense-average documents are
+# cited at 3.9%, and documents whose average is fine but whose longest line
+# runs past 2,000 chars at 3.7%, which is the same injury. Between 200 and
+# 2,000 there is none: that group is cited at 9.8%, the healthiest of all,
+# so re-wrapping it would be churn. Hence a second, much higher bar for the
+# single-long-line case rather than reusing the one above.
+_LONG_LINE_THRESHOLD = 2000  # chars in any one line
+
+# Segmentation is context-dependent: the boundaries pysbd finds inside a
+# 5,000-character line are not the ones it finds in a 500-character line taken
+# out of it, so one pass can leave behind a line a second pass would split
+# again. The wrap therefore runs to a fixed point, which is what lets the
+# function be applied to its own output, and lets the backfill be re-run
+# without writing a fresh version every time. Measured over 200 dense
+# documents: 33 need no pass, 159 settle after one, 8 need two, none needs
+# three. The bound is a guard against a document that oscillates, not a
+# budget: reaching it means the content is pathological and worth leaving.
+_MAX_WRAP_PASSES = 4
+
+# A segment that cannot be the start of a sentence is not one: the segmenter
+# broke inside an abbreviation or a citation. Two shapes, both common in
+# reference-dense text: "77 Cong., 1st Sess.," splits after "Cong." and leaves
+# a line opening on a comma, and "Fed.R.Civ.P. 12(b)(6)" splits after the
+# final period and leaves one opening on a digit. Opening punctuation, a
+# digit, a bracket or a lower-case letter all mean the same thing, and none
+# of them needs a list of known abbreviations to recognise, which would be
+# both language-specific and subject-specific. Merge such a segment back into
+# the one before.
+_CONTINUATION = re.compile(
+    r"^\s*(?:[,;:.\u2026\u00bb\u201d')\]]|[0-9(\[]|[a-z\u00df-\u00ff])")
+
 # Cheap deterministic language sniff for pysbd — stopword hits over the
 # document head. A wrong guess degrades gracefully: segmentation stays
 # punctuation-driven either way.
@@ -294,19 +327,10 @@ def _guess_language(content: str) -> str:
     return best
 
 
-def normalize_line_density(content: str) -> str:
-    """Re-wrap pathologically dense text into sentence-per-line form.
+def _rewrap_once(content: str) -> str:
+    """One pass of the re-wrap. Returns content unchanged when nothing in it
+    is dense enough to touch, which is what ends the loop above."""
 
-    Applied at UPLOAD time, before any extraction, so character spans and
-    line numbers recorded later are consistent with the stored content.
-    Normal documents (density under the threshold) pass through unchanged
-    — this never touches content that already has line structure.
-
-    Sentence boundaries come from pysbd (rule-based, multilingual, no
-    models); the language is sniffed deterministically from the document
-    head, defaulting to English rules, which stay punctuation-driven and
-    degrade gracefully on a wrong guess.
-    """
     if not content:
         return content
     lines = content.split("\n")
@@ -341,3 +365,27 @@ def normalize_line_density(content: str) -> str:
                 merged.append(piece)
         out.extend(piece.rstrip() for piece in merged if piece.strip())
     return "\n".join(out)
+
+
+def normalize_line_density(content: str) -> str:
+    """Re-wrap pathologically dense text into sentence-per-line form.
+
+    Applied at UPLOAD time, before any extraction, so character spans and
+    line numbers recorded later are consistent with the stored content.
+    Normal documents (density under the threshold) pass through unchanged:
+    this never touches content that already has line structure.
+
+    Sentence boundaries come from pysbd (rule-based, multilingual, no
+    models); the language is sniffed deterministically from the document
+    head, defaulting to English rules, which stay punctuation-driven and
+    degrade gracefully on a wrong guess.
+
+    Idempotent: run to a fixed point, so applying it to its own output
+    returns that output. See _MAX_WRAP_PASSES for why one pass is not enough.
+    """
+    for _ in range(_MAX_WRAP_PASSES):
+        out = _rewrap_once(content)
+        if out == content:
+            return content
+        content = out
+    return content

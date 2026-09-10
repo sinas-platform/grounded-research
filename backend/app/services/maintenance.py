@@ -25,17 +25,29 @@ import logging
 import uuid
 from typing import Any
 
-from sqlalchemy import select, text
+from sqlalchemy import bindparam, select, text
 
 from app.db import AsyncSessionLocal
 
 log = logging.getLogger("sgr.maintenance")
 
+# How many documents to hold in memory at once while re-wrapping. Measured on
+# a 35,407-document corpus: the 11,243 candidates are 457 MB of markdown, and
+# fetching them in one statement put the worker at 1.9 GB before it had
+# written anything. The work is per document and nothing is shared between
+# them, so the batch size only trades memory against round trips.
+_NORMALIZE_BATCH = 200
 
-async def _normalize_new_walls(session) -> int:
+
+async def _normalize_new_walls(session, batch: int = _NORMALIZE_BATCH) -> int:
     """Normalize current versions that predate (or slipped past) the
     upload-time line-density normalization. New version, repointed head;
-    published evidence keeps its own pinned version."""
+    published evidence keeps its own pinned version.
+
+    Committed per batch rather than once at the end, so an interrupted run
+    keeps the work it has done. Re-running finishes the job: a document that
+    has already been re-wrapped comes back unchanged from the normalizer and
+    is skipped without writing a version, so the pass is idempotent."""
     # The selection mirrors normalize_line_density's own test rather than
     # standing in for it, so the two cannot drift. It used to select on size
     # and line count, over 20,000 characters in under 30 lines, which on a
@@ -43,30 +55,43 @@ async def _normalize_new_walls(session) -> int:
     from app.services.toc import (_DENSITY_THRESHOLD, _LONG_LINE_THRESHOLD,
                                   normalize_line_density)
 
-    rows = (await session.execute(text("""
-        SELECT d.id, dv.version, dv.content_md
+    # Identify first, then fetch content a batch at a time. The predicate scans
+    # every current version, so it is worth running once; the markdown it
+    # matches is worth never holding all of at once.
+    ids = (await session.execute(text("""
+        SELECT d.id
         FROM document d JOIN document_version dv ON dv.id = d.current_version_id
         WHERE length(dv.content_md)::numeric
               / greatest((length(dv.content_md)
                           - length(replace(dv.content_md, E'\n', ''))) + 1, 1) > :density
            OR (SELECT max(length(x))
                  FROM unnest(string_to_array(dv.content_md, E'\n')) x) > :longest
-    """), {"density": _DENSITY_THRESHOLD, "longest": _LONG_LINE_THRESHOLD})).all()
+    """), {"density": _DENSITY_THRESHOLD, "longest": _LONG_LINE_THRESHOLD})).scalars().all()
+    log.info("line-density normalization: %d candidates", len(ids))
+
+    fetch = text("""
+        SELECT d.id, dv.version, dv.content_md
+        FROM document d JOIN document_version dv ON dv.id = d.current_version_id
+        WHERE d.id IN :ids
+    """).bindparams(bindparam("ids", expanding=True))
+
     changed = 0
-    for doc_id, version, content in rows:
-        fixed = normalize_line_density(content)
-        if fixed == content:
-            continue
-        await session.execute(text("""
-            INSERT INTO document_version (document_id, version, content_md, content_tsvector)
-            VALUES (:d, :v, :c, to_tsvector('simple', :c))"""),
-            {"d": doc_id, "v": version + 1, "c": fixed})
-        await session.execute(text("""
-            UPDATE document SET current_version_id =
-              (SELECT id FROM document_version WHERE document_id = :d AND version = :v)
-            WHERE id = :d"""), {"d": doc_id, "v": version + 1})
-        changed += 1
-    await session.commit()
+    for start in range(0, len(ids), batch):
+        rows = (await session.execute(fetch, {"ids": ids[start:start + batch]})).all()
+        for doc_id, version, content in rows:
+            fixed = normalize_line_density(content)
+            if fixed == content:
+                continue
+            await session.execute(text("""
+                INSERT INTO document_version (document_id, version, content_md, content_tsvector)
+                VALUES (:d, :v, :c, to_tsvector('simple', :c))"""),
+                {"d": doc_id, "v": version + 1, "c": fixed})
+            await session.execute(text("""
+                UPDATE document SET current_version_id =
+                  (SELECT id FROM document_version WHERE document_id = :d AND version = :v)
+                WHERE id = :d"""), {"d": doc_id, "v": version + 1})
+            changed += 1
+        await session.commit()
     return changed
 
 

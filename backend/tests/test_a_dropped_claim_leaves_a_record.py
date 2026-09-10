@@ -60,3 +60,48 @@ def test_a_missing_text_key_is_treated_as_no_text():
     rec = _no_text_record(1, {"rationale": "Something."})
     assert rec["carried"] == ["rationale"]
     assert rec["sequence"] == 1
+
+
+def test_a_bare_string_evidence_entry_does_not_abort_the_draft():
+    """The drafter's reply is unvalidated at this point. `["a.md"]` instead of
+    `[{"filename": "a.md"}]` raised AttributeError out of the drafting
+    transaction, which rolled the draft back and failed the whole run over one
+    malformed field in one claim."""
+    rec = _no_text_record(4, {
+        "rationale": "Why.",
+        "evidence": ["a.md", {"filename": "b.md"}, None],
+    })
+    assert rec["evidence"] == ["b.md"]
+    assert rec["evidence_unreadable"] == 2
+    assert "evidence" in rec["carried"], (
+        "the field did arrive; what is unreadable is what was in it"
+    )
+
+
+def test_evidence_that_is_not_a_list_reads_as_none_of_it():
+    """`"evidence": "a.md"` is the other shape. It used to be sliced as a
+    string and iterated character by character."""
+    rec = _no_text_record(5, {"rationale": "Why.", "evidence": "a.md"})
+    assert rec["evidence"] == []
+    assert rec["evidence_unreadable"] == 0
+
+
+def test_a_readable_record_still_counts_nothing_unreadable():
+    rec = _no_text_record(6, {
+        "rationale": "Why.",
+        "evidence": [{"filename": "a.md"}, {"filename": "b.md"}],
+    })
+    assert rec["evidence"] == ["a.md", "b.md"]
+    assert rec["evidence_unreadable"] == 0
+
+
+def test_the_slice_is_taken_before_the_filter():
+    """At most four entries are considered. A claim that sends six does not
+    get more of them read by sending two bad ones."""
+    rec = _no_text_record(7, {
+        "rationale": "Why.",
+        "evidence": ["x", "y", {"filename": "c.md"}, {"filename": "d.md"},
+                     {"filename": "e.md"}, {"filename": "f.md"}],
+    })
+    assert rec["evidence"] == ["c.md", "d.md"]
+    assert rec["evidence_unreadable"] == 2

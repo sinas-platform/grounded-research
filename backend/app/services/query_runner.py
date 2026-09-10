@@ -1987,6 +1987,28 @@ def _verified_quote(verified: dict, filename: str, evidence: dict) -> str:
     return overlapping[0] if len(overlapping) == 1 else ""
 
 
+def _evidence_entries(claim: dict, limit: int = 4) -> list[dict]:
+    """The evidence entries that are objects, which is all a caller can read a
+    filename off.
+
+    The drafter's reply is unvalidated here, and two malformed shapes arrive
+    from a model often enough to matter: `"evidence": ["a.md"]`, where the
+    entry is a bare string with no `.get`, and `"evidence": "a.md"`, where
+    slicing the value yields characters. Both raised AttributeError out of the
+    drafting transaction, which rolled the draft back and failed the whole run
+    over one malformed field in one claim. Losing the run is a worse outcome
+    than losing the claim.
+
+    Sliced before filtering, so "at most `limit` entries are considered" keeps
+    the meaning it had: a claim that sends six entries does not get more of
+    them read by sending two bad ones.
+    """
+    entries = claim.get("evidence")
+    if not isinstance(entries, (list, tuple)):
+        return []
+    return [e for e in entries[:limit] if isinstance(e, dict)]
+
+
 def _no_text_record(sequence: int, claim: dict) -> dict:
     """What to keep about a claim the drafter sent with no text.
 
@@ -2004,7 +2026,16 @@ def _no_text_record(sequence: int, claim: dict) -> dict:
                           if claim.get(k) not in (None, "", [], {})),
         "rationale": str(claim.get("rationale") or "")[:400],
         "evidence": [str(e.get("filename") or "")
-                     for e in (claim.get("evidence") or [])[:4]],
+                     for e in _evidence_entries(claim)],
+        # Written every time, zero included. `carried` says the field arrived
+        # with something in it and `evidence` says what could be read off it,
+        # so without this a claim whose evidence was all malformed and one
+        # whose evidence was absent read the same in the record, and the
+        # record exists to tell cases apart.
+        "evidence_unreadable": sum(
+            1 for e in (claim.get("evidence") or [])[:4]
+            if not isinstance(e, dict)
+        ) if isinstance(claim.get("evidence"), (list, tuple)) else 0,
         "type": str(claim.get("type") or "")[:50],
     }
 
@@ -2116,7 +2147,9 @@ async def _draft_from_extracts(
                               claim_type=str(c.get("type") or "legal_principle")[:50])
             session.add(row)
             await session.flush()
-            for ev_ in (c.get("evidence") or [])[:4]:
+            # Same guard as the no-text record above: a malformed entry here
+            # crashed the transaction for a claim that was otherwise fine.
+            for ev_ in _evidence_entries(c):
                 fn_ = str(ev_.get("filename") or "")
                 doc = (await session.execute(
                     select(Document).where(Document.filename == fn_)

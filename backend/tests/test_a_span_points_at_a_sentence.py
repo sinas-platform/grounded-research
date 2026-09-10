@@ -17,11 +17,11 @@ from __future__ import annotations
 from app.services.query_runner import (_canonical, _canonical_offsets,
                                        _locate_chars, _verified_quote)
 
-PARA = ("The Commission may copy data during an inspection. "
-        "Those documents found to be relevant are placed in the file and the "
-        "remainder of the copied data is deleted. "
-        "The undertaking is informed of the outcome in due course.")
-DOC = "---\ntitle: A judgment\n---\n\n" + PARA + "\nA following line.\n"
+PARA = ("The instrument records ambient pressure once every four seconds. "
+        "Readings that fall outside the calibrated range are flagged for "
+        "review and the remainder of the series is retained unchanged. "
+        "The operator is notified of the outcome at the end of each run.")
+DOC = "---\ntitle: A field report\n---\n\n" + PARA + "\nA following line.\n"
 
 
 def test_the_offset_map_agrees_with_the_canonical_form():
@@ -35,8 +35,8 @@ def test_the_offset_map_agrees_with_the_canonical_form():
 
 
 def test_a_quote_resolves_to_its_own_characters():
-    quote = ("those documents found to be relevant are placed in the file "
-             "and the remainder of the copied data is deleted")
+    quote = ("readings that fall outside the calibrated range are flagged "
+             "for review and the remainder of the series is retained")
     line = DOC.split("\n").index(PARA) + 1
     at = _locate_chars(DOC, line, line, quote)
     assert at is not None
@@ -48,8 +48,8 @@ def test_a_quote_resolves_to_its_own_characters():
 
 def test_offsets_survive_rendering_differences():
     """The quote as copied is not byte-identical to the source."""
-    doc = "Line one.\nThe Court held “that the data — all of it — is deleted” here.\n"
-    quote = 'that the data - all of it - is deleted'
+    doc = "Line one.\nThe log noted “that the series — all of it — is retained” here.\n"
+    quote = 'that the series - all of it - is retained'
     at = _locate_chars(doc, 2, 2, quote)
     assert at is not None
     lo, hi = at
@@ -62,7 +62,7 @@ def test_a_quote_that_is_not_there_returns_nothing():
 
 def test_a_quote_under_the_floor_returns_nothing():
     """Same floor the line locator applies: too short to place safely."""
-    assert _locate_chars(DOC, 5, 5, "is deleted") is None
+    assert _locate_chars(DOC, 5, 5, "is retained") is None
 
 
 def test_out_of_range_lines_return_nothing():

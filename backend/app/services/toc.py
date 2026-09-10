@@ -255,11 +255,22 @@ def derive_toc(content: str) -> list[dict]:
 
 # ── content normalization (upload-time) ────────────────────────────────────
 
-# A document is "wall-of-text" when its lines are this dense on average —
-# seen with plain-text exports that carry a whole document on one line, 53K
+# A document is "wall-of-text" when its lines are this dense on average.
+# Seen with plain-text exports that carry a whole document on one line, 53K
 # characters of it in the worst observed case. Line-based navigation (this
-# module, and read_document_content's line_from/line_to) is meaningless there.
-_DENSITY_THRESHOLD = 1000  # chars per line
+# module, and read_document_content's line_from/line_to) is meaningless
+# there: a span selects the whole document, so a passage cannot be taken out
+# of one.
+#
+# 200 and not a rounder number. Measured over a 35,407-document corpus: at
+# 1000 the rule fires on 46 documents, at 200 on 8,891, and the difference is
+# where the damage is. Of documents actually retrieved to answer a question,
+# those above 200 chars per line are cited by a claim at 3.9% against 8.1%
+# for the rest, and that gap holds inside every rank band and inside every
+# document class but one. The exception is instructive: short documents whose
+# whole body is one line are cited at the normal rate, because there a
+# whole-line span is still a usable passage. The cost is grip, not density.
+_DENSITY_THRESHOLD = 200  # chars per line
 
 # Cheap deterministic language sniff for pysbd — stopword hits over the
 # document head. A wrong guess degrades gracefully: segmentation stays
@@ -300,7 +311,11 @@ def normalize_line_density(content: str) -> str:
         return content
     lines = content.split("\n")
     density = len(content) / max(1, len(lines))
-    if density <= _DENSITY_THRESHOLD:
+    longest = max((len(line) for line in lines), default=0)
+    # Average catches the wall of text; longest catches the otherwise
+    # structured document carrying one unbreakable paragraph. Both are the
+    # same defect for anything that addresses content by line.
+    if density <= _DENSITY_THRESHOLD and longest <= _LONG_LINE_THRESHOLD:
         return content
 
     import pysbd  # local import: only wall-of-text uploads pay for it
@@ -311,5 +326,18 @@ def normalize_line_density(content: str) -> str:
         if len(line) <= _DENSITY_THRESHOLD:
             out.append(line)
             continue
-        out.extend(s.rstrip() for s in seg.segment(line) if s.strip())
+        # Segments are merged as returned, not stripped and rejoined, so the
+        # characters of the line survive the round trip exactly.
+        merged: list[str] = []
+        for piece in seg.segment(line):
+            # The merge is capped at the same threshold it exists to enforce.
+            # Without that, a document the segmenter reads badly, one whose
+            # sentences mostly open lower-case, merges back into the single
+            # line this function was called to break up.
+            if (merged and _CONTINUATION.match(piece)
+                    and len(merged[-1]) + len(piece) <= _DENSITY_THRESHOLD):
+                merged[-1] += piece
+            else:
+                merged.append(piece)
+        out.extend(piece.rstrip() for piece in merged if piece.strip())
     return "\n".join(out)

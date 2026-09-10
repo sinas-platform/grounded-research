@@ -109,6 +109,58 @@ def test_wall_of_text_is_rewrapped_but_normal_content_untouched():
     assert wrapped.split() == wall.split()
 
 
+def test_a_segment_that_cannot_start_a_sentence_is_merged_back():
+    """The segmenter breaks inside abbreviations. Those breaks are put back."""
+    from app.services.toc import normalize_line_density
+
+    line = ("The report was filed under Fed.R.Civ.P. 12(b)(6) in every district. "
+            "It was reprinted at 77 Cong., 1st Sess., page 14, and discussed there. "
+            ) * 4
+    out = normalize_line_density(line.strip())
+    produced = [ln for ln in out.split("\n") if ln.strip()]
+    assert len(produced) > 1, "a dense line should still be broken up"
+    # no produced line opens on a comma or a bare rule number
+    assert not [ln for ln in produced if ln.lstrip()[:1] in ",;:"]
+    assert not [ln for ln in produced if ln.lstrip().startswith("12(b)")]
+
+
+def test_merging_never_rebuilds_the_line_it_broke_up():
+    """A document the segmenter reads badly must not merge back into one line."""
+    from app.services.toc import normalize_line_density, _DENSITY_THRESHOLD
+
+    # every sentence opens lower-case, so every segment looks like a
+    # continuation of the one before it
+    wall = ("and then the parties agreed to the terms as set out above. " * 80).strip()
+    out = normalize_line_density(wall)
+    assert max(len(ln) for ln in out.split("\n")) <= _DENSITY_THRESHOLD
+
+
+def test_one_long_line_is_rewrapped_even_when_the_average_is_low():
+    """Average density hides a single unbreakable paragraph; longest catches it."""
+    from app.services.toc import (normalize_line_density, _DENSITY_THRESHOLD,
+                                  _LONG_LINE_THRESHOLD)
+
+    short = "\n".join(["A short line."] * 400)
+    wall = ("One long sentence about the matter at hand. " * 60).strip()
+    assert len(wall) > _LONG_LINE_THRESHOLD
+    buried = short + "\n" + wall
+    assert len(buried) / len(buried.split("\n")) < _DENSITY_THRESHOLD
+    out = normalize_line_density(buried)
+    assert out != buried
+    assert max(len(ln) for ln in out.split("\n")) <= _DENSITY_THRESHOLD
+
+
+def test_a_moderately_long_line_is_left_alone():
+    """Between the two thresholds the document is healthy; do not churn it."""
+    from app.services.toc import normalize_line_density, _DENSITY_THRESHOLD
+
+    short = "\n".join(["A short line."] * 400)
+    para = ("A sentence of some length about the matter at hand. " * 12).strip()
+    assert _DENSITY_THRESHOLD < len(para) < 2000
+    content = short + "\n" + para
+    assert normalize_line_density(content) == content
+
+
 def test_md_structure_wins_over_numbered_heuristics():
     content = "\n".join([
         "# Decision",              # 1 — explicit structure

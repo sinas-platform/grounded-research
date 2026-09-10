@@ -31,24 +31,27 @@ from app.db import AsyncSessionLocal
 
 log = logging.getLogger("sgr.maintenance")
 
-# Wall-of-text thresholds mirror the upload-time normalizer's intent: a
-# document this large with this few lines cannot be quoted by line spans.
-_WALL_MIN_CHARS = 20_000
-_WALL_MAX_LINES = 30
-
 
 async def _normalize_new_walls(session) -> int:
     """Normalize current versions that predate (or slipped past) the
     upload-time line-density normalization. New version, repointed head;
     published evidence keeps its own pinned version."""
-    from app.services.toc import normalize_line_density
+    # The selection mirrors normalize_line_density's own test rather than
+    # standing in for it, so the two cannot drift. It used to select on size
+    # and line count, over 20,000 characters in under 30 lines, which on a
+    # 35,407-document corpus reached 72 of the 11,243 documents that need it.
+    from app.services.toc import (_DENSITY_THRESHOLD, _LONG_LINE_THRESHOLD,
+                                  normalize_line_density)
 
     rows = (await session.execute(text("""
         SELECT d.id, dv.version, dv.content_md
         FROM document d JOIN document_version dv ON dv.id = d.current_version_id
-        WHERE length(dv.content_md) > :chars
-          AND (length(dv.content_md) - length(replace(dv.content_md, E'\n', ''))) + 1 < :lines
-    """), {"chars": _WALL_MIN_CHARS, "lines": _WALL_MAX_LINES})).all()
+        WHERE length(dv.content_md)::numeric
+              / greatest((length(dv.content_md)
+                          - length(replace(dv.content_md, E'\n', ''))) + 1, 1) > :density
+           OR (SELECT max(length(x))
+                 FROM unnest(string_to_array(dv.content_md, E'\n')) x) > :longest
+    """), {"density": _DENSITY_THRESHOLD, "longest": _LONG_LINE_THRESHOLD})).all()
     changed = 0
     for doc_id, version, content in rows:
         fixed = normalize_line_density(content)

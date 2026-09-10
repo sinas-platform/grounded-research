@@ -344,7 +344,7 @@ def test_a_paragraph_or_article_number_is_not_an_identifier():
 
 
 def test_a_value_that_does_not_match_the_shape_has_no_key():
-    assert identifier_key("inspections-eu-law-2nd.md", SHAPE) is None
+    assert identifier_key("a-book-chapter.md", SHAPE) is None
     assert identifier_key("COMP/M.11936", SHAPE) is None
 
 

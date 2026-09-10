@@ -1,9 +1,9 @@
 """A passage should be the sentence that states the point, not the page.
 
 The extractor was asked for "2-25 lines", which is not a unit: two lines is
-about 90 characters in a practitioner chapter and over 2,000 in a EUR-Lex
-judgment, so one instruction asked for a sentence in one document and a page
-in another. Measured on the first run to store its quotes, a passage ran 2 to
+about 90 characters in a short-lined document and over 2,000 in a long-lined
+one, so one instruction asked for a sentence in one document and a page in
+another. Measured on the first run to store its quotes, a passage ran 2 to
 2.7 times the length of the claim it supported, and a citation therefore
 resolved to a paragraph however precisely its coordinates were recorded.
 

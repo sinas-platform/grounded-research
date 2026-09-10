@@ -1125,8 +1125,8 @@ _RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
 # What a passage should be, in characters rather than lines.
 #
 # It used to be asked for in lines, "2-25 lines", which is not a unit: two
-# lines is 90 characters in a practitioner chapter and over 2,000 in a
-# EUR-Lex judgment, so the same instruction asked for a sentence in one
+# lines is 90 characters in a short-lined document and over 2,000 in a
+# long-lined one, so the same instruction asked for a sentence in one
 # document and a page in another. Measured on the first run to store its
 # quotes, a passage ran 2 to 2.7 times the length of the claim it supported.
 #

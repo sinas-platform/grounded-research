@@ -5,7 +5,7 @@ neither is readable. A review platform showing a list of runs had nothing to
 put in front of a person except the question text, which is a paragraph.
 
 The title is the benchmark's own name for the question — its number, its
-topic and its sub-topic, as "Q41 — Dawn raids — electronic data". It is not
+topic and its sub-topic, as "Qnn — Topic — sub-topic". It is not
 derived from `reference` or from the question text, because the number and
 the topic live in the benchmark question set and nowhere in this system;
 deriving either would invent it.

@@ -844,7 +844,7 @@ async def oneshot_ingest(
     sem = asyncio.Semaphore(concurrency)
     # Results must line up with document_ids positionally: batch callers zip
     # them back against the input list, and completion order is arbitrary
-    # under concurrency (scrambled every failure report of run d93b68af).
+    # under concurrency (scrambled every failure report of one observed run).
     results: list[dict[str, Any]] = [{} for _ in document_ids]
 
     async def one(idx: int, doc_id: uuid.UUID) -> None:

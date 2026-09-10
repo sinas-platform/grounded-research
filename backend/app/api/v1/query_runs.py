@@ -49,7 +49,7 @@ class QueryRunIn(BaseModel):
     # may pass its own request id.
     reference: str | None = Field(default=None, max_length=200)
     # The benchmark's name for the question, e.g.
-    # "Q16 — Dawn raids — personal data". Free text: the number and the topic
+    # "Qnn — Topic — sub-topic". Free text: the number and the topic
     # live in the benchmark question set, so nothing here can derive it.
     title: str | None = Field(default=None, max_length=300)
     # What differs in THIS version, e.g. "Round 3 — citation and coverage

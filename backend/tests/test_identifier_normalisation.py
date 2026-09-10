@@ -1,9 +1,14 @@
 """A stored identifier is read past its citation prefix, and one value may
 hold several.
 
-Both are shapes the deployment cannot express in `identifier_pattern`, because
-the pattern describes what an identifier looks like and these are about how a
-value is written around one. Measured against the live corpus: 1,203 stored
+One of the two is a shape the deployment cannot express in
+`identifier_pattern`: a value holding several identifiers, because the pattern
+describes what one identifier looks like and says nothing about how many a
+value may carry. The prefix is different, and the docstring said otherwise
+until 10 September. `identifier_key` leaves prefixes to the deployment's own
+pattern, so a deployment that wants "Case C-606/18 P" read past its prefix can
+write that into its pattern. What these tests cover is the reading, not the
+declaring, and none of them exercises a prefix expressed in a pattern. Measured against the live corpus: 1,203 stored
 values carry a citation prefix and 963 hold more than one identifier, and no
 pattern reads any of them today.
 """

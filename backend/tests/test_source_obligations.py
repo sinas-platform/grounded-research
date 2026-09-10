@@ -17,11 +17,11 @@ SRC = Path(obligations.__file__).with_name("query_runner.py").read_text()
 def test_a_waive_with_a_rationale_parses():
     patch = _parse_patch(
         '{"revise": [], "add": [], "drop": [], "keep": [],'
-        ' "waive": [{"doc": "62020TJ0451.md", "rationale": '
-        '"its paragraphs concern access requests, not on-site sealing"}]}')
+        ' "waive": [{"doc": "a-judgment.md", "rationale": '
+        '"its paragraphs concern a different stage of the procedure"}]}')
     assert patch["waive"] == [{
-        "doc": "62020TJ0451.md",
-        "rationale": "its paragraphs concern access requests, not on-site sealing"}]
+        "doc": "a-judgment.md",
+        "rationale": "its paragraphs concern a different stage of the procedure"}]
 
 
 def test_a_waive_without_a_real_rationale_is_ignored():

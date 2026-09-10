@@ -1835,8 +1835,18 @@ async def _draft_from_extracts(
         "— these passages are the ONLY thing you know. Every claim must be "
         "supported entirely by the passages you cite for it. Do not name a "
         "court, an Advocate General, a case number or a date that no passage "
-        "shows. Skip a passage group that establishes nothing usable. The "
-        "final claim states the overall conclusion.\n\n"
+        "shows. Skip a passage group that establishes nothing usable.\n"
+        # The instruction used to be that the FINAL claim states the
+        # conclusion, and it was followed: across every answer produced, no
+        # claim typed as a conclusion has ever been first and they sit on
+        # average 84% of the way through. A reader who wants the answer has to
+        # read to the end for it, which is the reviewer's first must-have and
+        # the one the answer has never met. Claim 1 is the only position a
+        # renderer cannot lose and a reader cannot miss.
+        "The FIRST claim states the answer to the question, in one sentence, "
+        "before any reasoning or authority: a reader who stops there has the "
+        "answer. The claims after it give the reasoning, then the detail. Do "
+        "not repeat the conclusion at the end.\n\n"
         "For each claim also give a RATIONALE: ONE short sentence, at most "
         "20 words — which part of the question this answers and why this "
         "source settles it. Never restate the claim; the reader has just "
@@ -1927,8 +1937,9 @@ async def _argument_plan(
             '"hint": "<which part of the anchor documents to read, from their '
             'TOCs>"}]}\n'
             "Rules: 6-12 claims; every claim anchored to at least one listed "
-            "document; never anchor to anything not listed; the final claim "
-            "must state the overall conclusion. If the documents cannot "
+            "document; never anchor to anything not listed; the FIRST claim "
+            "must state the overall conclusion, and no later claim restates "
+            "it. If the documents cannot "
             "support a part of the question, plan NO claim for it — the gap "
             "will be reported honestly downstream.\n\n"
             "QUESTION:\n" + question + "\n\nDOCUMENTS:\n" + manifest,

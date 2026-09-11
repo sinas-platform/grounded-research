@@ -2197,6 +2197,7 @@ async def _record_gate_cycle(
     coverage: dict | None = None,
     naming_mismatches: list[dict] | None = None,
     checks: dict | None = None,
+    no_claims: bool = False,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -2276,6 +2277,11 @@ async def _record_gate_cycle(
         # answer-scoped readings of this cycle, and a flat key would be a
         # last-write sitting next to a history.
         "closing": closing or {},
+        # The cycle that judged nothing because nothing was left to judge.
+        # Written every time, false included: a missing key would say the run
+        # predates the field, and an absent cycle would say the gate never
+        # ran. Both are wrong about a run whose last claim was removed.
+        "no_claims": bool(no_claims),
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
@@ -2554,6 +2560,15 @@ async def _gate_answer(
                 "question, each citing passages from the working set, "
                 "beginning with one that states the answer directly."
             )
+            # Recorded before returning, because this is an exit path and
+            # `_amend_gate_cycle` amends the highest-numbered cycle rather
+            # than one it is handed. Its contract is that every path into the
+            # caller has been through here first, so a path that returns
+            # without recording leaves the caller's amend with no cycle open
+            # and drops the rejection out of the numbered history entirely.
+            # That is the third time this file has lost a fact to an exit
+            # path that wrote a different subset of keys from its siblings.
+            await _record_gate_cycle(run_id, parts=[], no_claims=True)
             return (False, "the answer has no claims left",
                     [note], [note], [], "coverage")
         cited = set(

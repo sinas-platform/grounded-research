@@ -158,6 +158,13 @@ def _iso() -> str:
 # that survives twenty seconds is not going to yield to a third.
 INVOKE_RETRY_WAITS = (5.0, 15.0)
 
+#: Wall-clock ceiling for the uncovered-theme observation, which is
+#: best-effort and sits on the path to required work. Under the general invoke
+#: policy its two calls have a worst case near an hour; the median published
+#: run is 559s. A first cut: `uncovered_themes_seconds` records what it
+#: actually costs so this can be set from measurement.
+_OBSERVATION_BUDGET_S = 120.0
+
 
 def _is_transient(exc: Exception) -> bool:
     """Whether this invoke failure is worth waiting out.
@@ -2032,13 +2039,35 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # and what retrieval returned, before anything is drafted. Failures are
     # swallowed except a cancel, which is control flow and must reach the
     # runner.
+    # Bounded, because it is optional and the general policy is not. Two
+    # invokes at three attempts each, a 600s client timeout and the 5s and 15s
+    # retry waits, is a worst case near an hour, against a median published
+    # run of 559s and a p90 of 1103s over the 200 stored on 10 September 2026.
+    # Optional work that can outlast the run it observes is not optional.
+    #
+    # The split is the first of the two calls and the gate needs it later
+    # anyway, so a timeout here costs the cache, not the split: the gate
+    # recomputes it at the point where it is required rather than best-effort.
+    #
+    # The budget is a first cut. `uncovered_themes_seconds` is written on
+    # every run so the next reading of it comes from measurement rather than
+    # from this comment.
+    observed_from = time.monotonic()
     try:
-        parts_now = await _question_parts(sinas, run_id, question)
-        await _uncovered_themes(sinas, run_id, question, parts_now, manifest)
+        async with asyncio.timeout(_OBSERVATION_BUDGET_S):
+            parts_now = await _question_parts(sinas, run_id, question)
+            await _uncovered_themes(sinas, run_id, question, parts_now, manifest)
     except CancelledOutcome:
         raise
+    except TimeoutError:
+        _log.warning("uncovered-theme observation exceeded %.0fs for run %s",
+                     _OBSERVATION_BUDGET_S, run_id)
+        await _tele(run_id, "validate", uncovered_themes_not_observed="over budget")
     except Exception:  # noqa: BLE001
         _log.warning("uncovered-theme observation failed for run %s", run_id)
+        await _tele(run_id, "validate", uncovered_themes_not_observed="failed")
+    await _tele(run_id, "validate",
+                uncovered_themes_seconds=round(time.monotonic() - observed_from, 1))
 
     _plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
     if not plan_claims:
@@ -2497,6 +2526,15 @@ async def _uncovered_themes(
     if isinstance(stored, list):
         return [str(x) for x in stored]
     if not parts or not working_set:
+        # Recorded, not just returned. This runs once, before drafting, and
+        # is not retried at the gate: the observation is about the question
+        # and what retrieval returned, and after drafting it would be a
+        # different observation. So when the split was unavailable here, the
+        # key never appears at all, and absent reads the same as "this run
+        # predates the field" and as "the observation ran and found nothing".
+        # Three different facts. The reason says which.
+        await _tele(run_id, "validate", uncovered_themes_not_observed=(
+            "no question parts" if not parts else "no working set"))
         return []
     reply = await sinas.invoke(
         "sgr/answer-gate-agent",

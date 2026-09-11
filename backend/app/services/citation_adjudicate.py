@@ -2,8 +2,9 @@
 
 The deterministic ladder (natural key, alias, containment) has already
 taken everything it can. What is left are citations whose key names an
-entity ambiguously or in words: "the 2018 Nexans judgment", "Regulation
-1/2003 as amended". A cheap model call, given the citing quote and a short
+entity ambiguously or in words: "the 2018 judgment in that appeal", "the
+founding regulation as amended". A cheap model call, given the citing quote
+and a short
 list of plausible candidates, settles most of them.
 
 Scope is deliberately narrow: the model only ever picks among EXISTING

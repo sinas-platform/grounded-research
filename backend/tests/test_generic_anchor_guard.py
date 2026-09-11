@@ -111,3 +111,35 @@ def test_tier2_marks_through_the_same_judgement_as_tier1():
     src = inspect.getsource(ge.mark_generic_by_case)
     assert "is_generic(name, docs, evidence)" in src
     assert "mark(name, docs, evidence, when)" in src
+
+
+# -- the primary signal: link probability --------------------------------------
+
+
+def test_the_measured_poles_sit_far_from_the_floor():
+    """THUS: 2 recognised of 14,704 matched. A real undertaking: nearly all.
+    The floor must reject the first and never threaten the second."""
+    assert ge.improbable_link(14704, 2) is True
+    assert ge.improbable_link(300, 290) is False
+
+
+def test_a_small_population_is_never_judged():
+    """2 recognised of 40 matched is a rare entity, not a word — the ratio
+    means nothing below MIN_DOCUMENTS."""
+    assert ge.improbable_link(40, 0) is False
+
+
+def test_the_floor_is_two_percent():
+    """Pinned so moving it is a decision, not an accident."""
+    assert ge.LINK_PROBABILITY_FLOOR == 0.02
+    assert ge.improbable_link(1000, 19) is True
+    assert ge.improbable_link(1000, 21) is False
+
+
+def test_link_probability_needs_no_orthography():
+    """The reason this is the primary signal: German capitalises every noun
+    and French legal names are lower-case — the case tiers are blind in one
+    and carve exceptions in the other. This function reads two counts."""
+    import inspect
+    src = inspect.getsource(ge.improbable_link)
+    assert ".lower(" not in src and ".upper(" not in src and "re." not in src

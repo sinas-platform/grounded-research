@@ -333,3 +333,88 @@ async def mark_generic_by_case(
             "spared_carries_identifier": identified, "unmeasured": unmeasured,
             "patterns_declared": len(patterns), "dry_run": dry_run,
             "examples": examples}
+
+
+# Below this share of context-validated mentions, a widely-matched name is
+# functioning as a word: the extractor that reads documents almost never
+# recognises the thing the string matcher keeps finding. Measured poles on
+# the working corpus: "Thus" 2/14,704 (0.01%), real undertakings near 100%.
+# The floor sits far from both.
+LINK_PROBABILITY_FLOOR = 0.02
+
+_MENTION_TIERS = text("""
+    SELECT e.id, e.canonical_form, e.metadata, et.name AS entity_type,
+           count(DISTINCT em.document_id) AS documents,
+           count(DISTINCT em.document_id)
+               FILTER (WHERE em.link_method = ANY(:validated)) AS validated
+    FROM entity e
+    JOIN entity_type et ON et.id = e.entity_type_id
+    JOIN entity_mention em ON em.entity_id = e.id AND em.status = 'active'
+    WHERE e.merged_into_id IS NULL
+    GROUP BY e.id, e.canonical_form, e.metadata, et.name
+    HAVING count(DISTINCT em.document_id) >= :min_documents
+""")
+
+
+def improbable_link(documents: int, validated: int) -> bool:
+    """Whether the mention population says word, not name.
+
+    Language-free and orthography-free, which the capitalisation tiers are
+    not: German capitalises every noun, French legal nomenclature is
+    lower-case, and neither convention moves this ratio. It needs a large
+    mention population to mean anything, which MIN_DOCUMENTS provides.
+    """
+    if documents < MIN_DOCUMENTS:
+        return False
+    return (validated / documents) < LINK_PROBABILITY_FLOOR
+
+
+async def mark_generic_by_link_probability(
+    session, when: str, dry_run: bool = True,
+    validated_methods: tuple[str, ...] = ("created", "adjudicated"),
+) -> dict:
+    """Mark entities the corpus matches everywhere and recognises nowhere.
+
+    The primary signal, of which the capitalisation tiers are corroborators:
+    of all the documents a name was string-matched in, in what share did an
+    extractor that actually read the document recognise the entity? A name
+    carries its own evidence trail here — no corpus sample, no orthography.
+
+    Same contract as the other passes: dry by default, marks merge into
+    ``entity.metadata``, the first mark keeps its date, nothing is deleted.
+    """
+    rows = (await session.execute(_MENTION_TIERS, {
+        "validated": list(validated_methods),
+        "min_documents": MIN_DOCUMENTS})).mappings().all()
+    marked = skipped = already = excluded = 0
+    examples: list[str] = []
+    for row in rows:
+        docs, validated = int(row["documents"]), int(row["validated"] or 0)
+        if row["entity_type"] in EXCLUDED_TYPES:
+            excluded += 1
+            continue
+        meta = dict(row["metadata"] or {})
+        if "generic_term" in meta:
+            already += 1
+            continue
+        if not improbable_link(docs, validated):
+            skipped += 1
+            continue
+        evidence = {"documents": docs, "validated_documents": validated,
+                    "link_probability": round(validated / docs, 5)}
+        marked += 1
+        if len(examples) < 10:
+            examples.append(f"{row['canonical_form']} "
+                            f"({validated}/{docs} recognised)")
+        if dry_run:
+            continue
+        meta.update(mark(row["canonical_form"], docs, evidence, when))
+        await session.execute(
+            text("UPDATE entity SET metadata = :m WHERE id = :i"),
+            {"m": json.dumps(meta), "i": row["id"]},
+        )
+    if not dry_run:
+        await session.commit()
+    return {"candidates": len(rows), "marked": marked, "already_marked": already,
+            "below_floor_or_spared": skipped, "excluded_by_type": excluded,
+            "dry_run": dry_run, "examples": examples}

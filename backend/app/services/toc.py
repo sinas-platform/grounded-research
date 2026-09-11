@@ -26,6 +26,7 @@ toc entry straight to the section window.
 
 from __future__ import annotations
 
+import logging
 import re
 
 _MAX_TITLE = 120
@@ -270,6 +271,8 @@ def derive_toc(content: str) -> list[dict]:
 # document class but one. The exception is instructive: short documents whose
 # whole body is one line are cited at the normal rate, because there a
 # whole-line span is still a usable passage. The cost is grip, not density.
+log = logging.getLogger("sgr.toc")
+
 _DENSITY_THRESHOLD = 200  # chars per line
 
 # A document can be well structured on average and still carry one paragraph
@@ -346,8 +349,19 @@ def _rewrap_once(content: str) -> str:
 
     seg = pysbd.Segmenter(language=_guess_language(content), clean=False)
     out: list[str] = []
+    fenced = False
     for line in lines:
-        if len(line) <= _DENSITY_THRESHOLD:
+        # A fenced block is not prose and its line breaks carry meaning. The
+        # long-line bar admits a document whose average is fine, so a single
+        # long line inside a fence now reaches the segmenter, which would put
+        # newlines wherever a string literal happens to look like a sentence
+        # and change what the source says. Nothing here can be improved by
+        # sentence boundaries, so the fence is copied through untouched.
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+            out.append(line)
+            continue
+        if fenced or len(line) <= _DENSITY_THRESHOLD:
             out.append(line)
             continue
         # Segments are merged as returned, not stripped and rejoined, so the
@@ -380,12 +394,32 @@ def normalize_line_density(content: str) -> str:
     head, defaulting to English rules, which stay punctuation-driven and
     degrade gracefully on a wrong guess.
 
-    Idempotent: run to a fixed point, so applying it to its own output
-    returns that output. See _MAX_WRAP_PASSES for why one pass is not enough.
+    Idempotent, and unconditionally: what comes back is either a fixed point
+    or the input unchanged. Returning the last pass of an unsettled document
+    would break that, because the next maintenance run would transform it
+    again and write another version, and the run after that another, so a
+    document the loop cannot settle would churn a new version forever. A
+    document that cannot be settled inside the cap is left exactly as it
+    arrived and said so in the log. See _MAX_WRAP_PASSES for why one pass is
+    not enough.
+
+    Settling is not the same as succeeding. The loop ends when a pass changes
+    nothing, which happens both when the text is properly broken up and when
+    the segmenter can find no boundary to break it on, and the second case
+    returns a document still above the threshold. That is a real and separate
+    defect, it is not what this guard is about, and this function does not
+    currently report it.
     """
+    original = content
     for _ in range(_MAX_WRAP_PASSES):
         out = _rewrap_once(content)
         if out == content:
             return content
         content = out
+    if _rewrap_once(content) != content:
+        log.warning(
+            "line-density re-wrap did not settle within %d passes; leaving the "
+            "document unchanged rather than writing an unstable version",
+            _MAX_WRAP_PASSES)
+        return original
     return content

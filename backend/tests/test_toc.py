@@ -266,3 +266,80 @@ async def test_first_read_opens_with_the_toc():
 
     ranged = await read_document_content(parent.id, 1, line_from=2, line_to=3, numbered=False, max_lines=None, session=_S(), caller=_Caller())
     assert "toc" not in ranged
+
+
+# ── The re-wrap returns a fixed point, or it returns its input ─────────────
+
+def test_a_document_that_cannot_settle_is_returned_unchanged(monkeypatch):
+    """Returning the last pass of an unsettled document would churn: the next
+    maintenance run transforms it again and writes another version, and the
+    run after that another, forever. Either the result is stable or nothing
+    is written."""
+    from app.services import toc
+
+    calls = {"n": 0}
+
+    def never_settles(content: str) -> str:
+        calls["n"] += 1
+        return content + "x"
+
+    monkeypatch.setattr(toc, "_rewrap_once", never_settles)
+    original = "some text that never settles"
+    assert toc.normalize_line_density(original) == original
+    assert calls["n"] == toc._MAX_WRAP_PASSES + 1, (
+        "the cap is spent, then one more pass decides whether it settled"
+    )
+
+
+def test_a_document_that_settles_on_the_last_pass_is_kept(monkeypatch):
+    """The guard must not throw away a document that used its whole budget
+    and did settle."""
+    from app.services import toc
+
+    seen = {"n": 0}
+
+    def settles_at_the_cap(content: str) -> str:
+        seen["n"] += 1
+        return content if seen["n"] >= toc._MAX_WRAP_PASSES else content + "x"
+
+    monkeypatch.setattr(toc, "_rewrap_once", settles_at_the_cap)
+    out = toc.normalize_line_density("abc")
+    assert out == "abc" + "x" * (toc._MAX_WRAP_PASSES - 1)
+
+
+def test_normalize_is_idempotent_even_when_it_gives_up(monkeypatch):
+    from app.services import toc
+
+    monkeypatch.setattr(toc, "_rewrap_once", lambda c: c + "x")
+    once = toc.normalize_line_density("text")
+    assert toc.normalize_line_density(once) == once
+
+
+# ── Fenced code is not prose ───────────────────────────────────────────────
+
+def test_a_long_line_inside_a_fence_is_not_segmented():
+    """The long-line bar admits a document whose average is fine, so a single
+    long line inside a fence reaches the segmenter. Sentence boundaries inside
+    a string literal change what the source says."""
+    from app.services.toc import normalize_line_density, _LONG_LINE_THRESHOLD
+
+    code = ('    assert render("One. Two. Three. Four.") == '
+            '"One. Two. Three. Four." and some_other_call(a, b) '
+            * 40)
+    assert len(code) > _LONG_LINE_THRESHOLD
+    doc = "# Title\n\nA short prose line.\n\n```python\n" + code + "\n```\n\nAnother short line.\n"
+    out = normalize_line_density(doc)
+    assert code in out, "the fenced line must survive intact"
+    assert out.count("```") == 2
+
+
+def test_prose_outside_a_fence_is_still_rewrapped():
+    """The fence guard must not switch the whole document off."""
+    from app.services.toc import normalize_line_density, _LONG_LINE_THRESHOLD
+
+    prose = "This is a sentence about dawn raids. " * 80
+    assert len(prose) > _LONG_LINE_THRESHOLD
+    doc = "```\nx = 1\n```\n" + prose + "\n"
+    out = normalize_line_density(doc)
+    assert out.count("\n") > doc.count("\n"), "the prose line should have been broken up"
+    assert "x = 1" in out

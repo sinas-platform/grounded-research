@@ -364,6 +364,12 @@ LINK_PROBABILITY_FLOOR = 0.02
 # count — a real entity the corpus keeps recognising accumulates hundreds
 # of recognised mentions whatever its ratio, while a word accumulates a
 # handful ("Thus": 2). Both conditions must hold to mark.
+#
+# The gray zone is irreducible: an entity with a starved ratio AND a
+# starved count could still, rarely, be real. No threshold can decide
+# that — which is why every marking pass in this module is dry by
+# default, prints what it selected, and writes reversible metadata. The
+# dry-run review is the judgement; these numbers only draw the shortlist.
 RECOGNISED_CEILING = 20
 
 _MENTION_TIERS = text("""

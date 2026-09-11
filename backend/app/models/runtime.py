@@ -494,6 +494,13 @@ class ClaimEvidence(Base, TimestampMixin):
     relevance: Mapped[float | None] = mapped_column(Float)
     validated: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     validation_reasoning: Mapped[str | None] = mapped_column(Text)
+    #: The passage this citation rests on, as the extractor verified it. Kept
+    #: because a coordinate alone is assertable at write time and not
+    #: afterwards: with the quote beside it a span can be re-read and checked,
+    #: and one that has drifted says so instead of slicing the wrong text.
+    #: Null on rows written before it existed, and on the reviser's rows,
+    #: which carry the coordinates a model reports and no quote.
+    quote: Mapped[str | None] = mapped_column(String(2000))
 
 
 # ─────────────────────────────────────────────────────────────

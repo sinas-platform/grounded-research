@@ -185,8 +185,18 @@ def test_the_cycle_records_it_beside_covered():
 
 def test_the_record_is_still_one_write_per_cycle():
     """#106: two writes that have to stay synchronised is how the mirrored
-    defect appeared. Moving the record after the ledger must not split it."""
-    assert SRC.count("await _record_gate_cycle(") == 2  # parsed and unparseable
+    defect appeared. Moving the record after the ledger must not split it.
+
+    One call per way out of the gate, not one call in total. Three ways out
+    now: the parsed verdict, the verdict that could not be read twice, and the
+    refusal when no claim survived to be judged. The count is the guard
+    against a path writing the record in two halves again, so it moves when a
+    genuine fourth exit arrives and not otherwise.
+    """
+    assert SRC.count("await _record_gate_cycle(") == 3
+    # Each in its own exit, none of them twice on one path.
+    assert SRC.count("_record_gate_cycle(run_id, parts=[], no_claims=True)") == 1
+    assert SRC.count("unparseable=str(exc2)[:200]") == 1
 
 
 def test_the_reviser_is_told_the_question_is_not_fully_answered():

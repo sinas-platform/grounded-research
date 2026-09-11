@@ -1987,6 +1987,59 @@ def _verified_quote(verified: dict, filename: str, evidence: dict) -> str:
     return overlapping[0] if len(overlapping) == 1 else ""
 
 
+def _evidence_entries(claim: dict, limit: int = 4) -> list[dict]:
+    """The evidence entries that are objects, which is all a caller can read a
+    filename off.
+
+    The drafter's reply is unvalidated here, and two malformed shapes arrive
+    from a model often enough to matter: `"evidence": ["a.md"]`, where the
+    entry is a bare string with no `.get`, and `"evidence": "a.md"`, where
+    slicing the value yields characters. Both raised AttributeError out of the
+    drafting transaction, which rolled the draft back and failed the whole run
+    over one malformed field in one claim. Losing the run is a worse outcome
+    than losing the claim.
+
+    Sliced before filtering, so "at most `limit` entries are considered" keeps
+    the meaning it had: a claim that sends six entries does not get more of
+    them read by sending two bad ones.
+    """
+    entries = claim.get("evidence")
+    if not isinstance(entries, (list, tuple)):
+        return []
+    return [e for e in entries[:limit] if isinstance(e, dict)]
+
+
+def _no_text_record(sequence: int, claim: dict) -> dict:
+    """What to keep about a claim the drafter sent with no text.
+
+    Enough to tell the two cases apart later. An empty placeholder carries
+    nothing but its sequence, and the gap it leaves in the numbering is the
+    only casualty. A claim whose text failed to arrive while its reasoning and
+    its sources did carries both, and the answer is short a proposition it
+    meant to make. The claim itself is not kept: `carried` names which fields
+    arrived with something in them, which is what separates the two, and the
+    rationale is capped because this sits in telemetry beside everything else.
+    """
+    return {
+        "sequence": sequence,
+        "carried": sorted(k for k in claim
+                          if claim.get(k) not in (None, "", [], {})),
+        "rationale": str(claim.get("rationale") or "")[:400],
+        "evidence": [str(e.get("filename") or "")
+                     for e in _evidence_entries(claim)],
+        # Written every time, zero included. `carried` says the field arrived
+        # with something in it and `evidence` says what could be read off it,
+        # so without this a claim whose evidence was all malformed and one
+        # whose evidence was absent read the same in the record, and the
+        # record exists to tell cases apart.
+        "evidence_unreadable": sum(
+            1 for e in (claim.get("evidence") or [])[:4]
+            if not isinstance(e, dict)
+        ) if isinstance(claim.get("evidence"), (list, tuple)) else 0,
+        "type": str(claim.get("type") or "")[:50],
+    }
+
+
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
     question: str, extracts: list[dict], append: bool = False,
@@ -2063,8 +2116,22 @@ async def _draft_from_extracts(
             'every quotation mark inside a string as \\", and use no line '
             "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
         data = _claims_json(reply)
-    claims = data.get("claims") or []
+    # The drafter's reply is unvalidated at every level, and this guard is
+    # placed once at the boundary rather than a level at a time. Three
+    # findings arrived in three review rounds, each the same defect one level
+    # up: an evidence entry that is not an object, a claim that is not an
+    # object, and a `claims` value that is not a list, where slicing it raised
+    # TypeError before any per-item check could run. Guarding the shape where
+    # the reply enters is what stops the fourth level arriving as a fourth
+    # round.
+    claims = data.get("claims")
+    bad_container = "" if isinstance(claims, list) else (
+        "absent" if claims is None else type(claims).__name__)
+    if not isinstance(claims, list):
+        claims = []
     written = 0
+    no_text: list[dict] = []
+    malformed: list[dict] = []
     async with AsyncSessionLocal() as session:
         start_seq = 1
         if append:
@@ -2073,8 +2140,28 @@ async def _draft_from_extracts(
                 .where(AnswerClaim.answer_id == answer_id)
             )).scalar() or 0) + 1
         for i, c in enumerate(claims[:(cap or 14)], start=start_seq):
+            if not isinstance(c, dict):
+                # The same rule as the evidence entry below, one level up, and
+                # the one this change first missed: the drafter's reply is
+                # unvalidated, so `claims` can carry a bare string or a null
+                # beside perfectly good claims. `c.get` on it raised
+                # AttributeError out of the transaction, which rolled back
+                # every valid claim written before it and failed the run over
+                # one malformed item. A malformed claim costs the claim.
+                malformed.append({"sequence": i, "repr": repr(c)[:200]})
+                continue
             text_ = str(c.get("text") or "").strip()
             if not text_:
+                # A claim with no text is dropped and its number goes with it,
+                # which is why published answers jump from 9 to 11. Keep what
+                # the drafter actually sent, because the gap alone cannot say
+                # which of two things happened: an empty placeholder, where the
+                # numbering is the only casualty, or a claim whose text failed
+                # to arrive while its reasoning and its sources did, where the
+                # answer is short a proposition it meant to make. Once the
+                # reply is discarded the two are indistinguishable, and nothing
+                # else records that a claim was dropped at all.
+                no_text.append(_no_text_record(i, c))
                 continue
             row = AnswerClaim(answer_id=answer_id, sequence=i,
                               claim_text=text_,
@@ -2083,7 +2170,9 @@ async def _draft_from_extracts(
                               claim_type=str(c.get("type") or "legal_principle")[:50])
             session.add(row)
             await session.flush()
-            for ev_ in (c.get("evidence") or [])[:4]:
+            # Same guard as the no-text record above: a malformed entry here
+            # crashed the transaction for a claim that was otherwise fine.
+            for ev_ in _evidence_entries(c):
                 fn_ = str(ev_.get("filename") or "")
                 doc = (await session.execute(
                     select(Document).where(Document.filename == fn_)
@@ -2110,7 +2199,36 @@ async def _draft_from_extracts(
                     validated=False))
             written += 1
         await session.commit()
-    await _tele(run_id, "draft", extract_mode=True, claims=written)
+    detail: dict[str, Any] = {"extract_mode": True, "claims": written}
+    if no_text:
+        # Named for the cause, not reusing `dropped_claims`, which is a flat
+        # count under `validate` meaning something else. One prefix per
+        # meaning, as the removal record says.
+        detail["no_text_claims"] = no_text
+        detail["no_text_count"] = len(no_text)
+        _log.warning("run %s: drafter returned %d claim(s) with no text; "
+                     "sequence numbers %s are absent from the answer",
+                     run_id, len(no_text), [d["sequence"] for d in no_text])
+    if bad_container:
+        # Its own key. An empty answer because the drafter sent no claims and
+        # an empty answer because it sent something that was not a list of
+        # them are different failures, and a run that drafted nothing needs to
+        # say which.
+        detail["claims_not_a_list"] = bad_container
+        _log.warning("run %s: drafter returned `claims` as %s, not a list; "
+                     "no claims were written", run_id, bad_container)
+    if malformed:
+        # Its own key, not folded into no_text_claims. A claim that arrived as
+        # a string and one that arrived as an object with an empty text field
+        # are different failures of the drafter, and the record exists to tell
+        # cases apart.
+        detail["malformed_claims"] = malformed
+        detail["malformed_count"] = len(malformed)
+        _log.warning("run %s: drafter returned %d item(s) in claims that are "
+                     "not objects; sequence numbers %s are absent from the "
+                     "answer", run_id, len(malformed),
+                     [d["sequence"] for d in malformed])
+    await _tele(run_id, "draft", **detail)
     return written
 
 

@@ -21,7 +21,7 @@ constants below.
 
 Manifest shape (a list, or {"questions": [...]}):
 
-    - id: "1"                     # tab is named Q01
+    - id: "1"                     # tab name is the zero-padded id
       title: Market definition    # shown in the index
       scope: EU + UK              # free text, optional
       question: |                 # matched against the runs
@@ -70,7 +70,7 @@ TOP = Alignment(vertical="top")
 
 
 def _tab(qid: str) -> str:
-    """Q01, Q29 — zero-padded so tabs sort the way a reader expects."""
+    """Two digits, zero-padded, so tabs sort the way a reader expects."""
     digits = re.sub(r"\D", "", str(qid)) or "0"
     return f"Q{int(digits):02d}"
 

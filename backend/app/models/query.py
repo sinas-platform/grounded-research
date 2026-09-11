@@ -75,7 +75,7 @@ class QueryRun(Base, TimestampMixin, OwnedMixin):
     # text. External callers may put their own request id here.
     reference: Mapped[str | None] = mapped_column(String(200), index=True)
     # The benchmark's own name for the question — number, topic and sub-topic,
-    # as "Q41 — Dawn raids — electronic data". Stored rather than derived: the
+    # as "Qnn — Topic — sub-topic". Stored rather than derived: the
     # number and the topic live in the benchmark question set and nowhere in
     # this system, so deriving either would invent it.
     title: Mapped[str | None] = mapped_column(String(300))

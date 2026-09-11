@@ -68,7 +68,7 @@ MIN_CLAIMS = 6
 MAX_CLAIMS = 14
 # Hard per-run spend ceiling in USD, summed over the run's synthesis chat
 # (which also carries remediation traffic — empirically where runaway spend
-# lives; run 3d7f39d3 burned $23.81 there hunting unanchorable evidence).
+# lives; one observed run burned $23.81 there hunting unanchorable evidence).
 # Checked on every supervision poll; tripping it fails the run loudly.
 RUN_COST_CAP_USD = get_settings().sgr_run_cost_cap_usd
 
@@ -681,8 +681,8 @@ def _toc_digest(toc, cap: int = TOC_CHARS) -> str:
 
 # What the planner may be shown. The prompt slices to this, so a manifest
 # that outgrows it loses its TAIL — the lowest-ranked documents vanish from
-# the planner's view with nothing said. That is worth a number: measured on
-# 99ed1bd0 the manifest is already 50,218 characters, 84% of this, and the
+# the planner's view with nothing said. That is worth a number: on one
+# measured run the manifest is already 50,218 characters, 84% of this, and the
 # margin is one corpus away from being spent.
 MANIFEST_CHAR_CAP = 60000
 
@@ -2126,7 +2126,7 @@ def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
     machinery meant anything on this run. A question that decomposes to one
     part cannot fail coverage — `parts: 1, covered: 1` is the whole check, and
     every `only_*` counter is computed over covered parts, so all of them are
-    inert. Four of 34 runs decompose that way, Q17 reproducibly across three
+    inert. Four of 34 runs decompose that way, one of them reproducibly across three
     references. On those runs this record is the only whole-answer signal
     there is, which is the argument for keeping it.
 
@@ -2154,7 +2154,7 @@ def _closing_record(data: dict, claims_by_seq: Mapping[int, uuid.UUID],
         # run is still editing: a drop renumbers everything after it, and
         # `_compact_claim_sequences` closes the gaps at publication, so a
         # number recorded mid-run can name a different claim in the answer a
-        # reviewer reads. Measured on run 493712fa: the gate recorded 12, the
+        # reviewer reads. Measured on one run: the gate recorded 12, the
         # claim at 11 was dropped, and the conclusion published as claim 11
         # while 12 became a claim about sealed envelopes. The number is kept
         # because it is the gate's own reading and the disagreement measure
@@ -3030,7 +3030,7 @@ async def _pre_publish_sweep(
     # `revision_N`, `cycle_N` and `gate_N`, and it loses the more interesting
     # half: the first sweep is the one that spends the repair attempt, so what
     # it objected to and whether the repair answered it were both unreadable.
-    # Q46 run 75b569ba swept twice and its first finding is gone.
+    # One measured run swept twice and its first finding is gone.
     #
     # `final_sweeps` stays as it is. It is the control-flow counter this
     # function reads back to decide whether the repair chance is spent, and
@@ -3280,7 +3280,7 @@ def _last_mention_losses(deleted: list[dict], live: set[str]) -> list[dict]:
     and it can take the last mention of a case while the document it cited
     stays cited by a different claim.
 
-    Neither check sees the case that prompted both. Q41 deleted a claim
+    Neither check sees the case that prompted both. One run deleted a claim
     recording that inspectors imaged employees' drives and indexed them
     overnight, on the reasoning that a later judgment superseded it. Both the
     document and the case number survive elsewhere in that answer; what left
@@ -3404,7 +3404,7 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
     # A drop costs a reason, like every other disposition. Revising needs text
     # and spans, adding needs those plus a type, keeping needs a rationale, and
     # waiving needs twenty characters of one. Dropping was a bare integer, and
-    # it is the disposition that removed two claims from Q41 — a reasonable
+    # it is the disposition that removed two claims from one run — a reasonable
     # time limit under Article 41(1), and the legality of copying a medium in
     # its entirety — with nothing recorded about why, and nothing surviving
     # that covers either.
@@ -4091,10 +4091,10 @@ def _still_narrowing(overreach: list[set[int]], pending: list[set[int]]) -> bool
     the evidence, was re-judged anyway, and can only have been re-judged
     because it was rebuilt.
 
-    Q46, run `804a684d`, is the case. Seq 12 was marked overreaching in round
-    3 with the round's `failed` at zero, was rewritten from an assertion of
-    inspection authority into a statement of what bounds the overlap, was
-    marked again in round 4, and was deleted when the budget ran out. Under
+    One measured run is the case. Seq 12 was marked overreaching in round 3
+    with the round's `failed` at zero, was rewritten from a broad assertion
+    into a narrower statement of what bounds it, was marked again in round 4,
+    and was deleted when the budget ran out. Under
     `failed[-1] | failed[-2]` it does not qualify, because the rewrite's own
     span failed.
 
@@ -4185,7 +4185,7 @@ async def _stage_validate_publish(
                 verdict.get("overreaching") or []),
             # The sequences behind the `failed` count above. Without them the
             # exclusion this criterion turns on cannot be checked after the
-            # fact: establishing that Q46 seq 12 was the round-4 failure meant
+            # fact: establishing that one run's seq 12 was the round-4 failure meant
             # matching the rounds-exhausted removal record against the claim
             # text, which is an inference, where `failed` at zero in round 3 is
             # a measurement. Sorted so the key is stable to compare across runs.

@@ -1,7 +1,7 @@
 """Reference and tags on query_run — identity and grouping for runs.
 
 `reference` is a caller-supplied identifier for the logical question a run
-answers. Deliberately NOT unique: every rerun of benchmark question Q16
+answers. Deliberately NOT unique: every rerun of one benchmark question
 carries reference "benchmark-q16", so "the versions of this question over
 time" is a WHERE clause instead of matching on question text — which is how
 runs had to be found until now. An external caller may put its own request

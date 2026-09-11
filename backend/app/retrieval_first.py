@@ -490,12 +490,18 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 reasons[did].append(
                     f"relationship evidence ({hop + 1}-hop via {via})")
             if hop + 1 < depth:
+                # ORDER BY before LIMIT, or the 200 is an arbitrary 200:
+                # a bare LIMIT lets Postgres return whichever rows the plan
+                # reaches first, and that can differ between executions of the
+                # same query. The frontier decides the next hop, so an
+                # arbitrary cut here changes the working set downstream.
                 rows = (await s.execute(text("""
                     SELECT DISTINCT CASE WHEN r.source_id = ANY(CAST(:eids AS uuid[]))
-                                         THEN r.target_id ELSE r.source_id END
+                                         THEN r.target_id ELSE r.source_id END AS eid
                     FROM relationship r
                     WHERE r.source_id = ANY(CAST(:eids AS uuid[]))
                        OR r.target_id = ANY(CAST(:eids AS uuid[]))
+                    ORDER BY eid
                     LIMIT 200"""), {"eids": list(frontier)})).scalars().all()
                 frontier = {str(r) for r in rows} - seen_entities
                 seen_entities |= frontier
@@ -511,7 +517,7 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 JOIN document_version dv ON dv.id = d.current_version_id
                 WHERE dv.content_tsvector @@ websearch_to_tsquery('simple', :q)
                   AND d.staged IS NOT TRUE
-                ORDER BY r DESC LIMIT 60"""), {"q": q})).all()
+                ORDER BY r DESC, d.id LIMIT 60"""), {"q": q})).all()
             for did, fn, r in rows:
                 did = str(did)
                 scores[did] += 8.0 * float(r) + 0.5
@@ -530,6 +536,7 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
             rows = (await s.execute(text("""
                 SELECT id, filename FROM document
                 WHERE filename ILIKE :pat AND staged IS NOT TRUE
+                ORDER BY id
                 LIMIT 10"""),
                 {"pat": pat})).all()
             for did, fn in rows:
@@ -549,7 +556,13 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
             for did in rows:
                 scores[str(did)] *= 1.3
 
-    ranked = sorted(scores.items(), key=lambda kv: -kv[1])[:top_n]
+    # Tie-break on the document id. Python's sort is stable, so equal scores
+    # kept the order they were inserted in -- which is the order rows came back
+    # from the queries above, and those were not ordered either. The cut at
+    # top_n then made that arbitrary order decide membership, not just
+    # position. The id is meaningless as a ranking but it is the same every
+    # time, which is the whole point.
+    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:top_n]
     return [{"document_id": did, "filename": names[did],
              "score": round(sc, 3),
              "reason": "; ".join(dict.fromkeys(reasons[did]))[:480]}

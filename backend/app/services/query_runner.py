@@ -158,6 +158,13 @@ def _iso() -> str:
 # that survives twenty seconds is not going to yield to a third.
 INVOKE_RETRY_WAITS = (5.0, 15.0)
 
+#: Wall-clock ceiling for the uncovered-theme observation, which is
+#: best-effort and sits on the path to required work. Under the general invoke
+#: policy its two calls have a worst case near an hour; the median published
+#: run is 559s. A first cut: `uncovered_themes_seconds` records what it
+#: actually costs so this can be set from measurement.
+_OBSERVATION_BUDGET_S = 120.0
+
 
 def _is_transient(exc: Exception) -> bool:
     """Whether this invoke failure is worth waiting out.
@@ -2025,6 +2032,43 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # annotations are interpretation produced at ingestion and verified
     # against nothing. Only extracted, verbatim-checked passages ground an
     # answer.
+    # Observed here rather than at the gate, and for two reasons. The gate's
+    # verdict path is a split then a judgment, and inserting a third call into
+    # it makes the observation look like part of the verdict, which it is not.
+    # And this is the point the observation is actually about: the question
+    # and what retrieval returned, before anything is drafted. Failures are
+    # swallowed except a cancel, which is control flow and must reach the
+    # runner.
+    # Bounded, because it is optional and the general policy is not. Two
+    # invokes at three attempts each, a 600s client timeout and the 5s and 15s
+    # retry waits, is a worst case near an hour, against a median published
+    # run of 559s and a p90 of 1103s over the 200 stored on 10 September 2026.
+    # Optional work that can outlast the run it observes is not optional.
+    #
+    # The split is the first of the two calls and the gate needs it later
+    # anyway, so a timeout here costs the cache, not the split: the gate
+    # recomputes it at the point where it is required rather than best-effort.
+    #
+    # The budget is a first cut. `uncovered_themes_seconds` is written on
+    # every run so the next reading of it comes from measurement rather than
+    # from this comment.
+    observed_from = time.monotonic()
+    try:
+        async with asyncio.timeout(_OBSERVATION_BUDGET_S):
+            parts_now = await _question_parts(sinas, run_id, question)
+            await _uncovered_themes(sinas, run_id, question, parts_now, manifest)
+    except CancelledOutcome:
+        raise
+    except TimeoutError:
+        _log.warning("uncovered-theme observation exceeded %.0fs for run %s",
+                     _OBSERVATION_BUDGET_S, run_id)
+        await _tele(run_id, "validate", uncovered_themes_not_observed="over budget")
+    except Exception:  # noqa: BLE001
+        _log.warning("uncovered-theme observation failed for run %s", run_id)
+        await _tele(run_id, "validate", uncovered_themes_not_observed="failed")
+    await _tele(run_id, "validate",
+                uncovered_themes_seconds=round(time.monotonic() - observed_from, 1))
+
     _plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
     if not plan_claims:
         # the planner ran and produced nothing usable: that IS a judgment
@@ -2422,6 +2466,96 @@ async def _question_parts(
     if parts:
         await _tele(run_id, "validate", question_parts=parts)
     return parts
+
+
+def _themes_from_reply(reply: str) -> list[str]:
+    """Themes out of the observer's reply. Strings only, at most five.
+
+    Separate and pure so the parsing can be tested without a model, and so a
+    malformed reply produces nothing rather than a theme that is really an
+    error message. Nothing here can return a question part: the caller keeps
+    the two lists apart and only one of them is ever checked.
+    """
+    try:
+        cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start < 0 or end <= start:
+            return []
+        raw = json.loads(cleaned[start:end + 1]).get("themes")
+        if not isinstance(raw, list):
+            return []
+        return [x.strip() for x in raw if isinstance(x, str) and x.strip()][:5]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def _uncovered_themes(
+    sinas: _Sinas, run_id: uuid.UUID, question: str,
+    parts: list[str], working_set: str,
+) -> list[str]:
+    """Themes the retrieved material carries that no part of the question asks.
+
+    An observation, never a part. It is not checked, cannot be marked covered
+    and cannot hold an answer back, and the two lists are kept apart at every
+    point so that nothing downstream can mistake one for the other.
+
+    Why it is not simply a better split. The splitter reads the question alone,
+    which is what makes its output stable across the cycles of a run: before
+    #105 the split moved with the draft, a part stopped being listed and so
+    stopped being checked, and once a fifth part appeared that the question
+    never asked and the draft happened to contain. Reading the working set
+    would recover the limbs a lawyer supplies from knowing the area, on the
+    questions whose wording does not name them, and would put the other
+    questions' correct splits at the mercy of what retrieval returned. On the
+    measured set that is one question helped against thirty-one put at risk,
+    and inventing a part from the material is the exact defect #105 removed.
+
+    So the material is read and the split is not touched. Where a theme is
+    present and unasked, that is worth knowing, for a planner deciding what to
+    cover and for a reader asking what protects them on a question whose limbs
+    are not in its wording. What it does not do is make the answer accountable
+    for it: a limb the system notices is not a limb it is held to.
+
+    Computed once and cached beside the parts, for the same reason: the
+    working set is rebuilt each cycle, and an observation that changed between
+    cycles would be as unreadable as a split that did.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = ((run.telemetry or {}).get("validate") or {}).get("uncovered_themes")
+    if isinstance(stored, list):
+        return [str(x) for x in stored]
+    if not parts or not working_set:
+        # Recorded, not just returned. This runs once, before drafting, and
+        # is not retried at the gate: the observation is about the question
+        # and what retrieval returned, and after drafting it would be a
+        # different observation. So when the split was unavailable here, the
+        # key never appears at all, and absent reads the same as "this run
+        # predates the field" and as "the observation ran and found nothing".
+        # Three different facts. The reason says which.
+        await _tele(run_id, "validate", uncovered_themes_not_observed=(
+            "no question parts" if not parts else "no working set"))
+        return []
+    reply = await sinas.invoke(
+        "sgr/answer-gate-agent",
+        "QUESTION:\n" + question
+        + "\n\nTHE THINGS IT ASKS, as already read:\n"
+        + "\n".join(f"- {p}" for p in parts)
+        + "\n\nRETRIEVED MATERIAL:\n" + working_set[:40000]
+        + "\n\nName any subject the retrieved material covers substantially "
+        "that none of the things above asks about. A lawyer reading this "
+        "question would expect certain routes or doctrines to be in scope "
+        "even where the wording does not name them; if the material shows "
+        "one and the list above does not reach it, name it. Do not restate "
+        "anything already listed, do not name a subject the material only "
+        "mentions in passing, and return an empty list if there is none, "
+        "which is the ordinary case.\n\n"
+        'Reply ONLY JSON: {"themes": ["<subject the material covers and the '
+        'question does not ask>", ...]}'
+    )
+    themes = _themes_from_reply(reply)
+    await _tele(run_id, "validate", uncovered_themes=themes)
+    return themes
 
 
 def _seq_list(raw) -> list[int]:

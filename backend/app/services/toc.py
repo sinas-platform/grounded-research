@@ -256,9 +256,9 @@ def derive_toc(content: str) -> list[dict]:
 # ── content normalization (upload-time) ────────────────────────────────────
 
 # A document is "wall-of-text" when its lines are this dense on average —
-# seen with CourtListener plain_text (53K chars in ~1 line) and some
-# EUR-Lex court documents. Line-based navigation (this module, and
-# read_document_content's line_from/line_to) is meaningless there.
+# seen with plain-text exports that carry a whole document on one line, 53K
+# characters of it in the worst observed case. Line-based navigation (this
+# module, and read_document_content's line_from/line_to) is meaningless there.
 _DENSITY_THRESHOLD = 1000  # chars per line
 
 # Cheap deterministic language sniff for pysbd — stopword hits over the

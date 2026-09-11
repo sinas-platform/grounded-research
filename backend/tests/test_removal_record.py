@@ -53,12 +53,12 @@ def rec(rows):
 @pytest.mark.asyncio
 async def test_a_claim_carries_its_text_and_its_citations():
     out = await rec([
-        ("c1", 3, "The Commission may take a forensic copy.", "62018CJ0606.md"),
-        ("c1", 3, "The Commission may take a forensic copy.", "62018CC0606.md"),
+        ("c1", 3, "The authority may take a working copy.", "judgment-a.md"),
+        ("c1", 3, "The authority may take a working copy.", "opinion-a.md"),
     ])
     assert out == [{"sequence": 3,
-                    "claim": "The Commission may take a forensic copy.",
-                    "cites": ["62018CJ0606.md", "62018CC0606.md"]}]
+                    "claim": "The authority may take a working copy.",
+                    "cites": ["judgment-a.md", "opinion-a.md"]}]
 
 
 @pytest.mark.asyncio

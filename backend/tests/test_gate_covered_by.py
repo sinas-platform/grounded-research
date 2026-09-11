@@ -6,12 +6,12 @@ passages the reviser sees, and `cited` reaches it as a flat set of filenames,
 so it cannot tell a claim that asserts something about a limb from one that
 merely uses the limb's vocabulary.
 
-Q41 is the demonstration. Part 4 asks what rights the company retains over the
-copied data; the answer says nothing about receiving a copy, deletion, return,
-or challenging the sifting. What it does contain is the word "rights" in a
-claim about the rights of defence, "presence" in a description of what happened
-in Nexans, and "deleted" in a description of forensic imaging. The gate returned
-covered: true, gap: "".
+One run is the demonstration. A part of its question asks what rights the
+subject retains over material that was copied; the answer says nothing about
+any of the four things the part asks for. What it does contain is the word
+"rights" in a claim about a different right, "presence" in a description of
+what happened somewhere else, and "deleted" in a description of a procedure.
+The gate returned covered: true, gap: "".
 
 `covered_by` turns that assertion into three questions arithmetic can answer:
 does the named claim exist, does it carry evidence, and did the gate itself

@@ -2116,7 +2116,19 @@ async def _draft_from_extracts(
             'every quotation mark inside a string as \\", and use no line '
             "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
         data = _claims_json(reply)
-    claims = data.get("claims") or []
+    # The drafter's reply is unvalidated at every level, and this guard is
+    # placed once at the boundary rather than a level at a time. Three
+    # findings arrived in three review rounds, each the same defect one level
+    # up: an evidence entry that is not an object, a claim that is not an
+    # object, and a `claims` value that is not a list, where slicing it raised
+    # TypeError before any per-item check could run. Guarding the shape where
+    # the reply enters is what stops the fourth level arriving as a fourth
+    # round.
+    claims = data.get("claims")
+    bad_container = "" if isinstance(claims, list) else (
+        "absent" if claims is None else type(claims).__name__)
+    if not isinstance(claims, list):
+        claims = []
     written = 0
     no_text: list[dict] = []
     malformed: list[dict] = []
@@ -2197,6 +2209,14 @@ async def _draft_from_extracts(
         _log.warning("run %s: drafter returned %d claim(s) with no text; "
                      "sequence numbers %s are absent from the answer",
                      run_id, len(no_text), [d["sequence"] for d in no_text])
+    if bad_container:
+        # Its own key. An empty answer because the drafter sent no claims and
+        # an empty answer because it sent something that was not a list of
+        # them are different failures, and a run that drafted nothing needs to
+        # say which.
+        detail["claims_not_a_list"] = bad_container
+        _log.warning("run %s: drafter returned `claims` as %s, not a list; "
+                     "no claims were written", run_id, bad_container)
     if malformed:
         # Its own key, not folded into no_text_claims. A claim that arrived as
         # a string and one that arrived as an object with an empty text field

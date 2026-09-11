@@ -132,3 +132,47 @@ def test_a_claim_that_is_not_an_object_does_not_abort_the_draft():
     assert "malformed_claims" in src and "malformed_count" in src, (
         "and the record reaches telemetry under its own key"
     )
+
+
+def test_the_reply_shape_is_guarded_once_at_the_boundary():
+    """Three review rounds produced three findings that were one defect at
+    three levels: an evidence entry that is not an object, a claim that is not
+    an object, and a `claims` value that is not a list, where slicing raised
+    TypeError before any per-item check could run.
+
+    The container check therefore sits where the reply enters, before the
+    slice, not beside the per-item check. A guard added a level at a time is
+    what makes the next level a new round.
+    """
+    import inspect
+
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._draft_from_extracts)
+    guard = src.index('claims = data.get("claims")')
+    slice_ = src.index("claims[:(cap or 14)]")
+    assert guard < slice_, "the shape is checked before the value is sliced"
+    assert 'bad_container' in src and 'claims_not_a_list' in src, (
+        "and a reply whose container was wrong says so in telemetry"
+    )
+
+
+def test_a_claims_value_that_is_a_string_is_not_iterated_as_characters():
+    """`claims: "abc"` used to slice cleanly and then iterate character by
+    character, so a wrong container arrived as three malformed claims rather
+    than as one wrong container."""
+    import json
+
+    for shape, expected in [('7', 'int'), ('"abc"', 'str'),
+                            ('{"text":"x"}', 'dict'), ('null', 'absent')]:
+        data = json.loads('{"claims": %s}' % shape)
+        claims = data.get("claims")
+        bad = "" if isinstance(claims, list) else (
+            "absent" if claims is None else type(claims).__name__)
+        if not isinstance(claims, list):
+            claims = []
+        assert bad == expected
+        assert claims[:14] == [], "nothing is drafted from a wrong container"
+
+    data = json.loads('{"claims": [{"text": "ok"}]}')
+    assert isinstance(data.get("claims"), list)

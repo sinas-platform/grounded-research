@@ -2197,6 +2197,7 @@ async def _record_gate_cycle(
     coverage: dict | None = None,
     naming_mismatches: list[dict] | None = None,
     checks: dict | None = None,
+    no_claims: bool = False,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
 
@@ -2276,6 +2277,11 @@ async def _record_gate_cycle(
         # answer-scoped readings of this cycle, and a flat key would be a
         # last-write sitting next to a history.
         "closing": closing or {},
+        # The cycle that judged nothing because nothing was left to judge.
+        # Written every time, false included: a missing key would say the run
+        # predates the field, and an absent cycle would say the gate never
+        # ran. Both are wrong about a run whose last claim was removed.
+        "no_claims": bool(no_claims),
     }})
     await _tele(run_id, "validate", gate_parts=parts,
                 gate_reparse=reparse, gate_unparseable=unparseable,
@@ -2533,6 +2539,38 @@ async def _gate_answer(
                 .order_by(AnswerClaim.sequence)
             )
         ).all()
+        if not rows:
+            # Ahead of the judge, because there is nothing to judge. Deletion
+            # runs to completion: validation, the final sweep and the
+            # exhausted-round cleanup can each take the last surviving claim,
+            # and what is left asserts nothing. `publishable` means the
+            # surviving claims still answer the question, and no claims never
+            # do, so this is neither a verdict worth a model call nor one a
+            # model should be able to overrule after being shown an empty
+            # list.
+            #
+            # Nothing else stops an empty answer from publishing. Neither
+            # publish site counts claims and neither does `_publish_answer`.
+            # What stands there today is the missing-conclusion finding
+            # happening to fire, which is a model's opinion about an empty
+            # list of claims and not a guard.
+            note = (
+                "The answer has no claims at all: every claim was removed "
+                "during validation. Write the claims that answer the "
+                "question, each citing passages from the working set, "
+                "beginning with one that states the answer directly."
+            )
+            # Recorded before returning, because this is an exit path and
+            # `_amend_gate_cycle` amends the highest-numbered cycle rather
+            # than one it is handed. Its contract is that every path into the
+            # caller has been through here first, so a path that returns
+            # without recording leaves the caller's amend with no cycle open
+            # and drops the rejection out of the numbered history entirely.
+            # That is the third time this file has lost a fact to an exit
+            # path that wrote a different subset of keys from its siblings.
+            await _record_gate_cycle(run_id, parts=[], no_claims=True)
+            return (False, "the answer has no claims left",
+                    [note], [note], [], "coverage")
         cited = set(
             (
                 await session.execute(

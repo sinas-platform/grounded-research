@@ -811,3 +811,76 @@ def test_the_verdict_is_returned_from_outside_any_broad_try():
             "the gate's verdict is returned from inside a try/except Exception; "
             "a code fault there becomes a passing verdict"
         )
+
+
+@pytest.mark.asyncio
+async def test_an_answer_with_no_claims_is_never_publishable(monkeypatch):
+    """Deletion runs to completion, and neither publish site counts claims.
+    All that stands between an empty answer and publication is the
+    missing-conclusion finding happening to fire, which is a model's opinion
+    about an empty list and not a guard, so the gate has to refuse on its
+    own."""
+    tele: dict = {}
+
+    class _Empty:
+        async def get(self, _model, _ident):
+            return SimpleNamespace(telemetry={"validate": {}})
+
+        async def execute(self, *_a, **_k):
+            return SimpleNamespace(
+                scalars=lambda: SimpleNamespace(all=lambda: []),
+                scalar_one_or_none=lambda: None,
+                all=lambda: [],
+            )
+
+    @asynccontextmanager
+    async def _session_local():
+        yield _Empty()
+
+    async def _tele(run_id, stage, **detail):
+        tele.setdefault(stage, {}).update(detail)
+
+    monkeypatch.setattr(qr, "AsyncSessionLocal", _session_local)
+    monkeypatch.setattr(qr, "_tele", _tele)
+
+    sinas = _FakeSinas(json.dumps({"publishable": True, "coverage": [
+        {"part": "whether it applies", "covered": True},
+        {"part": "whether it is mandatory", "covered": True},
+    ]}))
+    ok, missing, issues, correctness, _points, cause = await qr._gate_answer(
+        sinas, "Q?", uuid.uuid4(), uuid.uuid4())
+
+    assert ok is False, "an answer with no claims cannot publish"
+    assert correctness, "the reviser must be told there is nothing there"
+    assert issues, "and the finding must reach the remediation message"
+    assert cause == "coverage"
+    assert "no claims" in missing
+    assert sinas.calls == [], (
+        "the verdict is structural: no model call is spent asking whether an "
+        "empty list of claims answers the question"
+    )
+
+    # `_amend_gate_cycle` amends the highest-numbered cycle rather than one it
+    # is handed, so its contract is that every path into the caller has been
+    # through `_record_gate_cycle` first. An exit path that returns without
+    # recording leaves the caller's amend with no cycle open, and the
+    # rejection drops out of the numbered history.
+    cycles = [k for k in (tele.get("validate") or {}) if k.startswith("gate_")]
+    assert cycles, "the refusal must still open a gate cycle"
+    cycle = (tele["validate"])[cycles[0]]
+    assert cycle["no_claims"] is True
+    assert cycle["parts"] == []
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_that_judged_claims_says_no_claims_is_false(gate_env):
+    """Written every time, false included. A missing key would say the run
+    predates the field and an absent cycle would say the gate never ran, and
+    both are wrong about a run whose last claim was removed."""
+    await _gate(json.dumps({"publishable": True, "coverage": [
+        {"part": "whether it applies", "covered": True},
+        {"part": "whether it is mandatory", "covered": True},
+    ]}))
+    cycles = [k for k in (gate_env.get("validate") or {}) if k.startswith("gate_")]
+    assert cycles
+    assert gate_env["validate"][cycles[0]]["no_claims"] is False

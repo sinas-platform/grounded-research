@@ -139,11 +139,21 @@ def test_a_small_population_is_never_judged():
     assert ge.improbable_link(40, 0) is False
 
 
-def test_the_floor_is_two_percent():
-    """Pinned so moving it is a decision, not an accident."""
+def test_the_floor_is_two_percent_and_the_ceiling_twenty():
+    """Pinned so moving either is a decision, not an accident."""
     assert ge.LINK_PROBABILITY_FLOOR == 0.02
+    assert ge.RECOGNISED_CEILING == 20
     assert ge.improbable_link(1000, 19) is True
     assert ge.improbable_link(1000, 21) is False
+
+
+def test_a_gazetteer_heavy_real_entity_is_never_marked():
+    """The gazetteer dilutes everyone's ratio, junk and giants alike. A
+    widely-cited real party sits below the floor by ratio (400/25,000 =
+    1.6%) and is spared by what dilution cannot fake: hundreds of
+    recognised mentions against the word's handful."""
+    assert ge.improbable_link(25000, 400) is False   # famous and real
+    assert ge.improbable_link(14704, 2) is True      # the measured word
 
 
 def test_the_case_denominator_counts_every_casing():

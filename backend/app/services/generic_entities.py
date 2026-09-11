@@ -358,6 +358,14 @@ BLIND_LINK_METHODS = ("gazetteer", "legacy")
 # The floor sits far from both.
 LINK_PROBABILITY_FLOOR = 0.02
 
+# A ratio alone can wrong a famous real entity: the gazetteer pre-links
+# heavily for everything, junk and giants alike, so a widely-cited real
+# party's share is diluted too. What dilution cannot fake is the absolute
+# count — a real entity the corpus keeps recognising accumulates hundreds
+# of recognised mentions whatever its ratio, while a word accumulates a
+# handful ("Thus": 2). Both conditions must hold to mark.
+RECOGNISED_CEILING = 20
+
 _MENTION_TIERS = text("""
     SELECT e.id, e.canonical_form, e.metadata, et.name AS entity_type,
            count(DISTINCT em.document_id) AS documents,
@@ -383,7 +391,8 @@ def improbable_link(documents: int, validated: int) -> bool:
     """
     if documents < MIN_DOCUMENTS:
         return False
-    return (validated / documents) < LINK_PROBABILITY_FLOOR
+    return (validated <= RECOGNISED_CEILING
+            and (validated / documents) < LINK_PROBABILITY_FLOOR)
 
 
 async def mark_generic_by_link_probability(

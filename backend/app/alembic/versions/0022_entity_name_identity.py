@@ -3,7 +3,7 @@
 The only uniqueness on `entity` was (entity_type_id, natural_key) WHERE
 natural_key IS NOT NULL — and 98.9% of entities have no natural key, because
 a natural key is derived from patterns like case numbers and ECLIs. Every
-entity identified by a NAME ("CMA", "European Commission") had no constraint
+entity identified by a NAME rather than a number had no constraint
 at all, so two resolvers running concurrently would each look one up, neither
 would see the other's uncommitted row, and both would insert. That is not a
 rare race: of the duplicates found on a production corpus, 47,607 were

@@ -273,7 +273,7 @@ def test_only_patch_operations_survive_parsing():
     good = (
         '{"revise": [{"seq": 4, "text": "Regulation (EU) 2018/1725, not the '
         'GDPR, governs the Commission\'s processing of personal data during '
-        'an inspection.", "evidence": [{"filename": "32018R1725.md", '
+        'an inspection.", "evidence": [{"filename": "a-regulation.md", '
         '"line_from": 40, "line_to": 52}]}], '
         '"drop": [{"seq": 9, "rationale": "no passage available carries the '
         'assertion about sealing obligations"}], "add": []}'
@@ -392,12 +392,12 @@ def test_a_keep_records_a_reason_and_cannot_smuggle_in_a_claim():
     from app.services.query_runner import _parse_patch
 
     patch = _parse_patch(
-        '{"keep": [{"seq": 3, "rationale": "32025M11936.md restates the '
+        '{"keep": [{"seq": 3, "rationale": "a-merger-decision.md restates the '
         'operative paragraph; m11936.md carries the Commission\'s own '
         'reasoning on the point."}]}'
     )
     assert patch and patch["keep"] == [
-        {"seq": 3, "rationale": "32025M11936.md restates the operative "
+        {"seq": 3, "rationale": "a-merger-decision.md restates the operative "
                                 "paragraph; m11936.md carries the "
                                 "Commission's own reasoning on the point."}
     ]
@@ -435,7 +435,7 @@ def test_a_revised_or_added_claim_carries_its_reasoning():
         'GDPR, governs the processing of personal data during an inspection.",'
         ' "rationale": "Answers the applicable-regime part of the question; '
         '2018/1725 is the instrument addressed to the institutions.", '
-        '"evidence": [{"filename": "32018R1725.md", "line_from": 40, '
+        '"evidence": [{"filename": "a-regulation.md", "line_from": 40, '
         '"line_to": 52}]}]}'
     )
     assert patch["revise"][0]["rationale"].startswith("Answers the applicable")

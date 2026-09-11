@@ -30,8 +30,8 @@ from app.services.relationship_oneshot import (
 )
 
 CONTENT = (
-    "JUDGMENT OF THE COURT. Intel Corporation appeals the decision of the "
-    "European Commission in Case COMP/C-3/37.990. The Court cites "
+    "DECISION OF THE TRIBUNAL. Ashgrove Systems appeals the decision of the "
+    "Northmoor Authority in Case COMP/C-3/12.345. The tribunal cites "
     "ECLI:EU:C:2015:184 on the treatment of rebates."
 )
 
@@ -147,8 +147,8 @@ def _reply(*edges):
 
 @pytest.mark.asyncio
 async def test_open_confident_edge_becomes_relationship():
-    case = _entity("Case COMP/C-3/37.990", DECISION_TYPE)
-    ec = _entity("European Commission", AUTHORITY_TYPE)
+    case = _entity("Case COMP/C-3/12.345", DECISION_TYPE)
+    ec = _entity("Northmoor Authority", AUTHORITY_TYPE)
     d = _definition("issued_by")
     session = _FakeSession()
     report = await _apply_edges(
@@ -157,14 +157,14 @@ async def test_open_confident_edge_becomes_relationship():
         content=CONTENT,
         edges=[{
             "definition": "issued_by",
-            "source": "Case COMP/C-3/37.990",
-            "target": "European Commission",
-            "quote": "the decision of the European Commission in Case COMP/C-3/37.990",
+            "source": "Case COMP/C-3/12.345",
+            "target": "Northmoor Authority",
+            "quote": "the decision of the Northmoor Authority in Case COMP/C-3/12.345",
             "confidence": 0.95,
         }],
         definitions=[d],
         name_to_entity={
-            "case comp/c-3/37.990": case.id, "european commission": ec.id
+            "case comp/c-3/12.345": case.id, "northmoor authority": ec.id
         },
         entity_types={case.id: DECISION_TYPE, ec.id: AUTHORITY_TYPE},
         doc_class_id=None,
@@ -202,16 +202,16 @@ async def test_low_confidence_becomes_proposal_and_review_mode_too():
 
 @pytest.mark.asyncio
 async def test_document_source_maps_to_document_id():
-    ec = _entity("European Commission", AUTHORITY_TYPE)
+    ec = _entity("Northmoor Authority", AUTHORITY_TYPE)
     doc_id = uuid.uuid4()
     d = _definition("cites", source=("document_class", DOC_CLASS))
     session = _FakeSession()
     report = await _apply_edges(
         session, document_id=doc_id, content=CONTENT,
         edges=[{"definition": "cites", "source": "DOCUMENT",
-                "target": "European Commission", "quote": "", "confidence": 0.9}],
+                "target": "Northmoor Authority", "quote": "", "confidence": 0.9}],
         definitions=[d],
-        name_to_entity={"european commission": ec.id},
+        name_to_entity={"northmoor authority": ec.id},
         entity_types={ec.id: AUTHORITY_TYPE},
         doc_class_id=DOC_CLASS,
         write=True,
@@ -222,15 +222,15 @@ async def test_document_source_maps_to_document_id():
 
 @pytest.mark.asyncio
 async def test_document_source_with_wrong_class_is_skipped():
-    ec = _entity("European Commission", AUTHORITY_TYPE)
+    ec = _entity("Northmoor Authority", AUTHORITY_TYPE)
     d = _definition("cites", source=("document_class", DOC_CLASS))
     session = _FakeSession()
     report = await _apply_edges(
         session, document_id=uuid.uuid4(), content=CONTENT,
         edges=[{"definition": "cites", "source": "DOCUMENT",
-                "target": "European Commission", "quote": "", "confidence": 0.9}],
+                "target": "Northmoor Authority", "quote": "", "confidence": 0.9}],
         definitions=[d],
-        name_to_entity={"european commission": ec.id},
+        name_to_entity={"northmoor authority": ec.id},
         entity_types={ec.id: AUTHORITY_TYPE},
         doc_class_id=uuid.uuid4(),  # a different class than the definition wants
         write=True,
@@ -250,7 +250,7 @@ async def test_cited_unmapped_target_parks_as_unresolved_not_dropped():
         edges=[{"definition": "cites_legal_instrument", "source": "Case A",
                 "target": "ECLI:EU:C:2015:184",
                 "target_reference": "ECLI:EU:C:2015:184",
-                "quote": "The Court cites ECLI:EU:C:2015:184",
+                "quote": "The tribunal cites ECLI:EU:C:2015:184",
                 "confidence": 0.9}],
         definitions=[d],
         name_to_entity={"case a": case.id},
@@ -326,7 +326,7 @@ async def test_unknown_definition_is_counted_and_skipped():
 
 def _doc_session(mentions, entities):
     doc = SimpleNamespace(
-        filename="intel.md", document_class_id=DOC_CLASS,
+        filename="a-judgment.md", document_class_id=DOC_CLASS,
     )
     version = SimpleNamespace(content_md=CONTENT, version=1)
     return _FakeSession(
@@ -336,14 +336,14 @@ def _doc_session(mentions, entities):
 
 @pytest.mark.asyncio
 async def test_one_call_per_document_and_edges_written():
-    case = _entity("Case COMP/C-3/37.990", DECISION_TYPE)
-    ec = _entity("European Commission", AUTHORITY_TYPE)
+    case = _entity("Case COMP/C-3/12.345", DECISION_TYPE)
+    ec = _entity("Northmoor Authority", AUTHORITY_TYPE)
     session = _doc_session([_mention(case), _mention(ec)], [case, ec])
     d = _definition("issued_by")
     sinas = _FakeSinas(_reply({
-        "definition": "issued_by", "source": "Case COMP/C-3/37.990",
-        "target": "European Commission",
-        "quote": "decision of the European Commission", "confidence": 0.9,
+        "definition": "issued_by", "source": "Case COMP/C-3/12.345",
+        "target": "Northmoor Authority",
+        "quote": "decision of the Northmoor Authority", "confidence": 0.9,
     }))
     report = await extract_document(
         session, sinas, uuid.uuid4(), definitions=[d], write=True
@@ -383,8 +383,8 @@ async def test_no_linked_mentions_skips_without_llm_call():
 async def test_long_document_is_chunked_and_edges_merged():
     from app.services.relationship_oneshot import _CHUNK_CHARS
 
-    case = _entity("Case COMP/C-3/37.990", DECISION_TYPE)
-    ec = _entity("European Commission", AUTHORITY_TYPE)
+    case = _entity("Case COMP/C-3/12.345", DECISION_TYPE)
+    ec = _entity("Northmoor Authority", AUTHORITY_TYPE)
     long_content = CONTENT + ("\nfiller " * ((_CHUNK_CHARS * 2) // 8))
     doc = SimpleNamespace(filename="long.md", document_class_id=DOC_CLASS)
     version = SimpleNamespace(content_md=long_content, version=1)
@@ -403,8 +403,8 @@ async def test_long_document_is_chunked_and_edges_merged():
             return self.replies[len(self.calls) - 1]
 
     edge = {
-        "definition": "issued_by", "source": "Case COMP/C-3/37.990",
-        "target": "European Commission", "quote": "x", "confidence": 0.9,
+        "definition": "issued_by", "source": "Case COMP/C-3/12.345",
+        "target": "Northmoor Authority", "quote": "x", "confidence": 0.9,
     }
     # same edge from two chunks (overlap) + one unparseable chunk: the
     # duplicate collapses, the bad chunk doesn't sink the document
@@ -424,11 +424,11 @@ def test_prompt_carries_definitions_guidance_and_names():
     d = _definition("issued_by")
     d["guidance"] = "Link each decision to its issuing authority."
     p = build_prompt(
-        filename="intel.md", content=CONTENT, definitions=[d],
-        mention_names=["European Commission", "Intel Corporation"],
+        filename="a-judgment.md", content=CONTENT, definitions=[d],
+        mention_names=["Northmoor Authority", "Ashgrove Systems"],
     )
     assert "issued_by" in p
     assert "Link each decision to its issuing authority." in p
-    assert "- European Commission" in p
-    assert "Intel Corporation" in p
-    assert "JUDGMENT OF THE COURT" in p
+    assert "- Northmoor Authority" in p
+    assert "Ashgrove Systems" in p
+    assert "DECISION OF THE TRIBUNAL" in p

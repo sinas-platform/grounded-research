@@ -52,8 +52,8 @@ def _row(filename, cls_name, summary):
 @pytest.mark.asyncio
 async def test_returns_identifying_fields_per_document():
     rows = [
-        _row("108587.md", "Regulatory Decision", "The Croatian Competition Authority..."),
-        _row("amazon-deliveroo-merger-inquiry--p04.md", "Court Decision", "The CMA assessed..."),
+        _row("a-decision.md", "Regulatory Decision", "The Northmoor Authority assessed..."),
+        _row("an-inquiry--p04.md", "Court Decision", "The reviewing body assessed..."),
     ]
     session = _FakeSession(rows)
     out = await matching_documents(
@@ -63,9 +63,9 @@ async def test_returns_identifying_fields_per_document():
     )
     assert len(out.documents) == 2
     first = out.documents[0]
-    assert first.filename == "108587.md"
+    assert first.filename == "a-decision.md"
     assert first.document_class_name == "Regulatory Decision"
-    assert first.summary.startswith("The Croatian")
+    assert first.summary.startswith("The Northmoor")
 
 
 @pytest.mark.asyncio

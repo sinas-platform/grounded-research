@@ -79,7 +79,7 @@ def normalize(s: str) -> str:
 
 
 def party_set(s: str) -> frozenset[str] | None:
-    """Case styles: 'Facebook / WhatsApp' == 'WhatsApp v Facebook'."""
+    """Case styles: 'Bellhaven / Ashgrove' == 'Ashgrove v Bellhaven'."""
     parts = re.split(r"\s+v\.?\s+|\s+vs\.?\s+|\s*/\s*", s)
     parts = [normalize(p) for p in parts if normalize(p)]
     return frozenset(parts) if len(parts) >= 2 else None
@@ -337,7 +337,7 @@ async def _t4_create(session, index, types, document_id, needs_creation,
                 nk = natural_key(m.surface_form or "")
                 # create-or-link. The partition above ran before any
                 # creation, so an in-document twin ("Case C-110/04" and
-                # "Strintzis Lines ... Case C-110/04") lands here twice
+                # "Ashgrove Systems ... Case C-110/04") lands here twice
                 # with the same derived key; inserting both violates
                 # ix_entity_natural_key and rolls back the whole
                 # document's resolution. The index is updated on every

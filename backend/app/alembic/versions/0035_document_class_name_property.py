@@ -3,7 +3,7 @@
 A claim can name its source two ways: by an identifier, which the class
 already declares through identifier_property and identifier_pattern, or in
 prose, by the document's name. The naming check only understood the first, so
-a claim writing "in Ferriere Nord v Commission the Court held" was reported as
+a claim writing "in Bellhaven v Authority the tribunal held" was reported as
 naming nothing, and that is the largest group of wrong findings the check
 produces.
 

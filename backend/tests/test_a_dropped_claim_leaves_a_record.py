@@ -105,3 +105,30 @@ def test_the_slice_is_taken_before_the_filter():
     })
     assert rec["evidence"] == ["c.md", "d.md"]
     assert rec["evidence_unreadable"] == 2
+
+
+def test_a_claim_that_is_not_an_object_does_not_abort_the_draft():
+    """The rule of this change, one level up, and the level it first missed.
+    `claims` can carry a bare string or a null beside good claims, and
+    `c.get` on one raised AttributeError out of the drafting transaction,
+    rolling back every valid claim written before it and failing the run.
+
+    Asserted against the source because the loop is inside a database
+    transaction that these tests do not stand up.
+    """
+    import inspect
+
+    from app.services import query_runner as qr
+
+    src = inspect.getsource(qr._draft_from_extracts)
+    loop = src[src.index("for i, c in enumerate(claims"):]
+    guard = loop[:loop.index('text_ = str(c.get("text")')]
+    assert "isinstance(c, dict)" in guard, (
+        "the type check must come before the first attribute access"
+    )
+    assert "malformed.append" in guard and "continue" in guard, (
+        "a malformed claim is recorded and skipped, not raised"
+    )
+    assert "malformed_claims" in src and "malformed_count" in src, (
+        "and the record reaches telemetry under its own key"
+    )

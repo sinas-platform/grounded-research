@@ -2119,6 +2119,7 @@ async def _draft_from_extracts(
     claims = data.get("claims") or []
     written = 0
     no_text: list[dict] = []
+    malformed: list[dict] = []
     async with AsyncSessionLocal() as session:
         start_seq = 1
         if append:
@@ -2127,6 +2128,16 @@ async def _draft_from_extracts(
                 .where(AnswerClaim.answer_id == answer_id)
             )).scalar() or 0) + 1
         for i, c in enumerate(claims[:(cap or 14)], start=start_seq):
+            if not isinstance(c, dict):
+                # The same rule as the evidence entry below, one level up, and
+                # the one this change first missed: the drafter's reply is
+                # unvalidated, so `claims` can carry a bare string or a null
+                # beside perfectly good claims. `c.get` on it raised
+                # AttributeError out of the transaction, which rolled back
+                # every valid claim written before it and failed the run over
+                # one malformed item. A malformed claim costs the claim.
+                malformed.append({"sequence": i, "repr": repr(c)[:200]})
+                continue
             text_ = str(c.get("text") or "").strip()
             if not text_:
                 # A claim with no text is dropped and its number goes with it,
@@ -2186,6 +2197,17 @@ async def _draft_from_extracts(
         _log.warning("run %s: drafter returned %d claim(s) with no text; "
                      "sequence numbers %s are absent from the answer",
                      run_id, len(no_text), [d["sequence"] for d in no_text])
+    if malformed:
+        # Its own key, not folded into no_text_claims. A claim that arrived as
+        # a string and one that arrived as an object with an empty text field
+        # are different failures of the drafter, and the record exists to tell
+        # cases apart.
+        detail["malformed_claims"] = malformed
+        detail["malformed_count"] = len(malformed)
+        _log.warning("run %s: drafter returned %d item(s) in claims that are "
+                     "not objects; sequence numbers %s are absent from the "
+                     "answer", run_id, len(malformed),
+                     [d["sequence"] for d in malformed])
     await _tele(run_id, "draft", **detail)
     return written
 

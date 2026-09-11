@@ -112,6 +112,7 @@ def test_an_unmeasured_word_is_not_judged():
     import inspect
     src = inspect.getsource(ge.mark_generic_by_case)
     assert "seen < min_occurrences" in src
+    assert 'int(evidence.get("any_case") or 0)' in src  # the floor counts every casing
     assert "unmeasured += 1" in src
 
 

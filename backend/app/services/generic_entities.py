@@ -312,7 +312,9 @@ async def mark_generic_by_case(
             already += 1
             continue
         evidence = case_evidence(name, sample)
-        seen = int(evidence.get("as_written") or 0) + int(evidence.get("lowercase") or 0)
+        # Every casing counts toward the floor, matching the share's own
+        # denominator: 20 lower-case plus 10 all-caps is 30 observations.
+        seen = int(evidence.get("any_case") or 0)
         if seen < min_occurrences:
             unmeasured += 1
             continue

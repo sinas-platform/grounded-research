@@ -33,6 +33,10 @@ class DocumentClass(Base, TimestampMixin):
     identifier_property: Mapped[str | None] = mapped_column(String(200))
     identifier_pattern: Mapped[str | None] = mapped_column(String(500))
     name_property: Mapped[str | None] = mapped_column(String(200))
+    #: Which front-matter keys this class reads directly, as a list of
+    #: {key, property, on_conflict}. Empty or null means every property is
+    #: extracted, which is what every class did before this existed.
+    declared_properties: Mapped[list | None] = mapped_column(JSONB)
     attribution_cues: Mapped[list[str] | None] = mapped_column(JSONB)
 
     properties: Mapped[list["DocumentClassProperty"]] = relationship(

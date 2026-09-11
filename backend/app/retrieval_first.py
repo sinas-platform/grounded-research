@@ -333,6 +333,33 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
     return out
 
 
+# The mention tiers whose rows came from a model that read the context, as
+# opposed to the gazetteer's blind string match. For an entity marked as a
+# generic term these are the only mentions that mean anything: the word
+# "thus" occurs everywhere, THUS plc was *recognised* twice.
+VALIDATED_LINK_METHODS = ("created", "adjudicated")
+
+
+def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]:
+    """The plan's anchors: the model's picks, then the strongest matches.
+
+    The determinism union used to take the top matches BY DOCUMENT COUNT —
+    which, for an entity marked as a generic term, selects it precisely for
+    being junk: the word's ubiquity was read as the name's strength. A
+    generic entity is never force-picked. The model may still pick one
+    deliberately (its match line says what it is), because a question
+    genuinely about that entity is the one case the mark must not foreclose.
+    """
+    anchors = [a for a in model_picks if a in matches]
+    strongest = sorted(
+        (m for m in matches.values() if not m.get("generic")),
+        key=lambda x: -x["docs"])
+    for m in strongest[:6]:
+        if m["id"] not in anchors:
+            anchors.append(m["id"])
+    return anchors
+
+
 async def _resolve_names(names: list[str]) -> list[dict]:
     """Named entities / seed cases -> entity matches (alias-tolerant)."""
     from app.db import AsyncSessionLocal
@@ -351,16 +378,22 @@ async def _resolve_names(names: list[str]) -> list[dict]:
             rows = (await s.execute(text("""
                 SELECT e.id, e.canonical_form, t.name,
                        (SELECT count(DISTINCT document_id)
-                        FROM entity_mention WHERE entity_id = e.id)
+                        FROM entity_mention WHERE entity_id = e.id),
+                       (e.metadata ? 'generic_term'),
+                       (SELECT count(DISTINCT document_id)
+                        FROM entity_mention WHERE entity_id = e.id
+                          AND link_method = ANY(:validated))
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                 WHERE e.merged_into_id IS NULL
                   AND (e.canonical_form ILIKE :pat OR e.id IN
                        (SELECT entity_id FROM entity_alias
                         WHERE alias ILIKE :pat))
-                LIMIT 6"""), {"pat": f"%{n}%"})).all()
-            for eid, cf, tn, docs in rows:
+                LIMIT 6"""), {"pat": f"%{n}%",
+                              "validated": list(VALIDATED_LINK_METHODS)})).all()
+            for eid, cf, tn, docs, generic, vdocs in rows:
                 seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,
-                                  "docs": int(docs)}
+                                  "docs": int(docs), "generic": bool(generic),
+                                  "validated_docs": int(vdocs)}
     return list(seen.values())
 
 
@@ -383,18 +416,18 @@ async def plan_question(
     all_matches = {m["id"]: m for m in probe_matches + name_matches}
     match_lines = "\n".join(
         f"- id={m['id']} [{m['type']}] {m['value']!r} ({m['docs']} docs)"
+        + (" — GENERIC TERM: matches the word, almost never the thing;"
+           " anchor only if the question is really about this entity"
+           if m.get("generic") else "")
         for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
         matches=match_lines, question=question),
         _ROUND2_GROUPS, run_id, "round 2")
-    anchors = [a for a in (r2.get("anchor_entity_ids") or [])
-               if a in all_matches]
     # determinism: model's picks unioned with the strongest matches, and
     # both rounds' queries kept — reduces run-to-run swing
-    for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:6]:
-        if m["id"] not in anchors:
-            anchors.append(m["id"])
+    anchors = _pick_anchors(
+        [str(a) for a in (r2.get("anchor_entity_ids") or [])], all_matches)
     queries = list(dict.fromkeys(
         [str(q) for q in (r1.get("websearch_queries") or [])]
         + [str(q) for q in (r2.get("websearch_queries") or [])]))[:14]
@@ -458,13 +491,28 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 break
             w_mention = 3.0 / (hop + 1) ** 2
             w_graph = 2.0 / (hop + 1) ** 2
+            # A generic-marked entity's gazetteer mentions are occurrences
+            # of a word, not sightings of the thing (measured: "Thus" holds
+            # 14,704 blind string matches and 2 context-validated mentions).
+            # For those entities only the validated tiers count, which is
+            # also what makes anchoring one deliberately still work: the
+            # question genuinely about THUS plc gets its two real documents
+            # instead of the shelf that contains the adverb.
+            generic_ids = {str(g) for (g,) in (await s.execute(text("""
+                SELECT id FROM entity WHERE id = ANY(CAST(:eids AS uuid[]))
+                  AND metadata ? 'generic_term'"""),
+                {"eids": list(frontier)})).all()}
             rows = (await s.execute(text("""
                 SELECT m.document_id, d.filename, m.entity_id, count(*)
                 FROM entity_mention m JOIN document d ON d.id = m.document_id
                 WHERE m.entity_id = ANY(CAST(:eids AS uuid[]))
                   AND m.status = 'active' AND d.staged IS NOT TRUE
+                  AND (m.link_method = ANY(:validated)
+                       OR NOT (m.entity_id = ANY(CAST(:generic AS uuid[]))))
                 GROUP BY 1, 2, 3"""),
-                {"eids": list(frontier)})).all()
+                {"eids": list(frontier),
+                 "validated": list(VALIDATED_LINK_METHODS),
+                 "generic": list(generic_ids)})).all()
             for did, fn, eid, hits in rows:
                 did = str(did)
                 w = idf.get(str(eid), 1.0)

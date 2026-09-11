@@ -232,3 +232,104 @@ async def mark_generic(session, when: str, dry_run: bool = True) -> dict:
             "spared_carries_identifier": identified,
             "patterns_declared": len(patterns),
             "dry_run": dry_run, "examples": examples}
+
+
+_TIER2_CANDIDATES = text("""
+    SELECT e.id, e.canonical_form, e.metadata, et.name AS entity_type,
+           (SELECT count(DISTINCT em.document_id)
+              FROM entity_mention em WHERE em.entity_id = e.id) AS documents
+    FROM entity e
+    JOIN entity_type et ON et.id = e.entity_type_id
+    WHERE e.merged_into_id IS NULL
+      AND e.canonical_form ~ '^[A-Za-z]+$'
+      AND e.canonical_form <> lower(e.canonical_form)
+""")
+
+_SAMPLE_TEXT = text("""
+    SELECT dv.content_md FROM document d
+    JOIN document_version dv ON dv.id = d.current_version_id
+    WHERE d.duplicate_of_id IS NULL AND d.staged IS NOT TRUE
+      AND dv.content_md IS NOT NULL
+    ORDER BY md5(d.id::text)
+    LIMIT :n
+""")
+
+
+async def mark_generic_by_case(
+    session, when: str, dry_run: bool = True,
+    sample_documents: int = 400, min_occurrences: int = 25,
+) -> dict:
+    """The second tier: a capitalised name the corpus writes as a word.
+
+    The first pass marks canonical forms that are already lower-case — the
+    strictest test, needing no corpus scan. It structurally cannot reach the
+    worst offenders, whose canonical form is capitalised while the corpus
+    writes the word lower-case everywhere: an undertaking named `Thus` with
+    14,704 blind mentions is invisible to it.
+
+    So this tier brings the corpus: one deterministic sample of in-service
+    documents (md5-ordered, so re-runs read the same sample), one case
+    census over it, and the same `is_generic` judgement the first tier uses
+    — a candidate is marked when the corpus writes it lower-case at least
+    ``LOWERCASE_SHARE`` of the time. Single-word candidates only: a
+    multi-word name is capitalised or not per word, and no share describes
+    it. A word the sample carries fewer than ``min_occurrences`` times is
+    left unmeasured rather than judged on noise — absence over arbitrary,
+    as everywhere else in this module.
+
+    Same contract as ``mark_generic``: dry by default, a mark merges into
+    ``entity.metadata``, an already-marked entity keeps its first mark, and
+    nothing is deleted.
+    """
+    patterns = [p for (p,) in (await session.execute(text(
+        "SELECT identifier_pattern FROM document_class "
+        "WHERE identifier_pattern IS NOT NULL AND identifier_pattern <> ''"
+    ))).all()]
+    sample = "\n".join(t for (t,) in (await session.execute(
+        _SAMPLE_TEXT, {"n": sample_documents})).all())
+    rows = (await session.execute(_TIER2_CANDIDATES)).mappings().all()
+    marked = skipped = already = excluded = identified = unmeasured = 0
+    examples: list[str] = []
+    for row in rows:
+        name, docs = row["canonical_form"], int(row["documents"] or 0)
+        if row["entity_type"] in EXCLUDED_TYPES:
+            excluded += 1
+            continue
+        if docs < MIN_DOCUMENTS:
+            skipped += 1
+            continue
+        if carries_an_identifier(name, patterns):
+            identified += 1
+            continue
+        meta = dict(row["metadata"] or {})
+        if "generic_term" in meta:
+            already += 1
+            continue
+        evidence = case_evidence(name, sample)
+        seen = int(evidence.get("as_written") or 0) + int(evidence.get("lowercase") or 0)
+        if seen < min_occurrences:
+            unmeasured += 1
+            continue
+        evidence["sampled_documents"] = sample_documents
+        if not is_generic(name, docs, evidence):
+            skipped += 1
+            continue
+        marked += 1
+        if len(examples) < 10:
+            examples.append(
+                f"{name} ({docs} documents, "
+                f"{evidence['lowercase_share']:.0%} lower-case)")
+        if dry_run:
+            continue
+        meta.update(mark(name, docs, evidence, when))
+        await session.execute(
+            text("UPDATE entity SET metadata = :m WHERE id = :i"),
+            {"m": json.dumps(meta), "i": row["id"]},
+        )
+    if not dry_run:
+        await session.commit()
+    return {"candidates": len(rows), "marked": marked, "already_marked": already,
+            "below_threshold": skipped, "excluded_by_type": excluded,
+            "spared_carries_identifier": identified, "unmeasured": unmeasured,
+            "patterns_declared": len(patterns), "dry_run": dry_run,
+            "examples": examples}

@@ -43,7 +43,7 @@ from app.models import (
     ResultDocument,
 )
 from app.models.query import QueryRun
-from app.services import claim_naming, obligations
+from app.services import claim_naming, supersession, obligations
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -3127,6 +3127,7 @@ async def _gate_answer(
     if mismatch_failed:
         issues.append(mismatch_failed)
     issues += await claim_naming.issues_for(answer_id)
+    issues += await supersession.issues_for(answer_id)
     # every uncovered part is a gap the answer must close, not just one
     if uncovered:
         missing = "; ".join(uncovered)

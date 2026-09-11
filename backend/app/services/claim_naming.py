@@ -251,6 +251,14 @@ def identifier_key(value: str, pattern: str) -> str | None:
     Anchored, so a value has to BE an identifier rather than merely contain
     something shaped like one. Being strict here can only shrink the set a
     claim is judged against, which loses a finding rather than inventing one.
+
+    A citation prefix belongs in the pattern, not here. `No. 85-1475` and
+    `n° 85-1475` are the same identifier as `85-1475`, but the words that
+    introduce one are notation and language, which is the deployment's to
+    declare: a class writes `(?:Nos?\.\s*)?` into its own shape and the
+    non-capturing group leaves the key unchanged. Skipping a short wordy
+    prefix here instead cannot tell `No. ` from `see `, and reading
+    `see T-249/17` as a named identifier invents a finding.
     """
     m = _compiled(pattern).match(value.strip())
     return _key(m) if m else None
@@ -605,10 +613,23 @@ async def mismatches_for(answer_id: uuid.UUID) -> list[Mismatch]:
 
 
 def _identifier_values(raw: str) -> list[str]:
-    """A property value is one identifier or a list of them."""
+    """A property value is one identifier or a list of them.
+
+    A list arrives two ways. Some are JSON, written by the split that separated
+    joined cases. The rest are one string holding several identifiers separated
+    by punctuation, which is how a source writes a judgment covering more than
+    one case: `97-2314, 97-2315`. Anchored keying reads only the first of
+    those, so every identifier after the separator was compared against nothing
+    -- 963 stored values in one corpus, plus one that already keyed and quietly
+    lost its second half.
+    """
     text = raw.strip()
     if not text.startswith("["):
-        return [text] if text else []
+        if not text:
+            return []
+        parts = [p.strip() for p in re.split(r"[;,]", text)]
+        parts = [p for p in parts if p]
+        return parts if len(parts) > 1 else [text]
     try:
         import json
 

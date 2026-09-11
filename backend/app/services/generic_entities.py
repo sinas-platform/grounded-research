@@ -76,8 +76,10 @@ MIN_DOCUMENTS = 350
 def case_evidence(name: str, text: str) -> dict:
     """How often this name is written lower-case where it appears.
 
-    Whole-word matching in both forms. A name whose canonical form is already
-    lower-case needs no counting: it was never written as a name at all.
+    The denominator is every casing of the word (case-insensitive whole-word
+    count), not just the canonical form and the lower-case form — an
+    all-caps variant in a heading would otherwise vanish from the total and
+    inflate the share.
     """
     if not name or not text:
         return {"as_written": 0, "lowercase": 0, "lowercase_share": None}
@@ -85,11 +87,15 @@ def case_evidence(name: str, text: str) -> dict:
         return {"as_written": 0, "lowercase": 0, "lowercase_share": 1.0,
                 "note": "the canonical form is itself lower-case"}
     boundary = r"(?<![A-Za-z]){}(?![A-Za-z])"
-    exact = len(re.findall(boundary.format(re.escape(name)), text))
-    lower = len(re.findall(boundary.format(re.escape(name.lower())), text))
-    total = exact + lower
-    return {"as_written": exact, "lowercase": lower,
-            "lowercase_share": (lower / total) if total else None}
+    pat = boundary.format(re.escape(name))
+    any_case = len(re.findall(f"(?i){pat}", text))
+    lowercase = len(re.findall(boundary.format(re.escape(name.lower())), text))
+    as_written = len(re.findall(pat, text))
+    if any_case == 0:
+        return {"as_written": 0, "lowercase": 0, "lowercase_share": None}
+    return {"as_written": as_written, "lowercase": lowercase,
+            "any_case": any_case,
+            "lowercase_share": round(lowercase / any_case, 4)}
 
 
 def carries_an_identifier(name: str, patterns: list[str]) -> bool:
@@ -335,6 +341,14 @@ async def mark_generic_by_case(
             "examples": examples}
 
 
+# The tiers that find a string without anything having recognised the
+# entity: the gazetteer's corpus scan and the pre-tiering legacy rows. A
+# NULL link_method is treated as blind too — unknown provenance is not
+# recognition. Everything else (created, adjudicated, natural_key, exact,
+# alias, and any manual tier added later) counts as recognition, so an
+# entity matched by its case number is never misread as unrecognised.
+BLIND_LINK_METHODS = ("gazetteer", "legacy")
+
 # Below this share of context-validated mentions, a widely-matched name is
 # functioning as a word: the extractor that reads documents almost never
 # recognises the thing the string matcher keeps finding. Measured poles on
@@ -346,7 +360,8 @@ _MENTION_TIERS = text("""
     SELECT e.id, e.canonical_form, e.metadata, et.name AS entity_type,
            count(DISTINCT em.document_id) AS documents,
            count(DISTINCT em.document_id)
-               FILTER (WHERE em.link_method = ANY(:validated)) AS validated
+               FILTER (WHERE em.link_method IS NOT NULL
+                       AND NOT (em.link_method = ANY(:blind))) AS validated
     FROM entity e
     JOIN entity_type et ON et.id = e.entity_type_id
     JOIN entity_mention em ON em.entity_id = e.id AND em.status = 'active'
@@ -371,7 +386,7 @@ def improbable_link(documents: int, validated: int) -> bool:
 
 async def mark_generic_by_link_probability(
     session, when: str, dry_run: bool = True,
-    validated_methods: tuple[str, ...] = ("created", "adjudicated"),
+    blind_methods: tuple[str, ...] = BLIND_LINK_METHODS,
 ) -> dict:
     """Mark entities the corpus matches everywhere and recognises nowhere.
 
@@ -384,7 +399,7 @@ async def mark_generic_by_link_probability(
     ``entity.metadata``, the first mark keeps its date, nothing is deleted.
     """
     rows = (await session.execute(_MENTION_TIERS, {
-        "validated": list(validated_methods),
+        "blind": list(blind_methods),
         "min_documents": MIN_DOCUMENTS})).mappings().all()
     marked = skipped = already = excluded = 0
     examples: list[str] = []

@@ -333,11 +333,37 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
     return out
 
 
-# The mention tiers whose rows came from a model that read the context, as
-# opposed to the gazetteer's blind string match. For an entity marked as a
-# generic term these are the only mentions that mean anything: the word
-# "thus" occurs everywhere, THUS plc was *recognised* twice.
-VALIDATED_LINK_METHODS = ("created", "adjudicated")
+# The tiers that find a string without anything having recognised the
+# entity. Every other tier — a model that read the document, an identifier
+# match, a curated alias — counts as recognition. For an entity marked as
+# a generic term only recognised mentions mean anything: the word "thus"
+# occurs everywhere, THUS plc was *recognised* twice.
+BLIND_LINK_METHODS = ("gazetteer", "legacy")
+
+
+async def _annotate_matches(matches: dict[str, dict]) -> dict[str, dict]:
+    """The generic mark and recognised-mention count for every match, from
+    whichever resolver it came. Probes and names go through one pass, so no
+    resolver can hand the planner an unlabelled match."""
+    if not matches:
+        return matches
+    from app.db import AsyncSessionLocal
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(text("""
+            SELECT e.id, (e.metadata ? 'generic_term'),
+                   (SELECT count(DISTINCT document_id) FROM entity_mention
+                    WHERE entity_id = e.id AND status = 'active'
+                      AND link_method IS NOT NULL
+                      AND NOT (link_method = ANY(:blind)))
+            FROM entity e WHERE e.id = ANY(CAST(:ids AS uuid[]))"""),
+            {"ids": list(matches), "blind": list(BLIND_LINK_METHODS)})).all()
+    for eid, generic, vdocs in rows:
+        matches[str(eid)]["generic"] = bool(generic)
+        matches[str(eid)]["validated_docs"] = int(vdocs)
+    for m in matches.values():  # an id the query did not return stays safe
+        m.setdefault("generic", False)
+        m.setdefault("validated_docs", 0)
+    return matches
 
 
 def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]:
@@ -378,22 +404,16 @@ async def _resolve_names(names: list[str]) -> list[dict]:
             rows = (await s.execute(text("""
                 SELECT e.id, e.canonical_form, t.name,
                        (SELECT count(DISTINCT document_id)
-                        FROM entity_mention WHERE entity_id = e.id),
-                       (e.metadata ? 'generic_term'),
-                       (SELECT count(DISTINCT document_id)
-                        FROM entity_mention WHERE entity_id = e.id
-                          AND link_method = ANY(:validated))
+                        FROM entity_mention WHERE entity_id = e.id)
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                 WHERE e.merged_into_id IS NULL
                   AND (e.canonical_form ILIKE :pat OR e.id IN
                        (SELECT entity_id FROM entity_alias
                         WHERE alias ILIKE :pat))
-                LIMIT 6"""), {"pat": f"%{n}%",
-                              "validated": list(VALIDATED_LINK_METHODS)})).all()
-            for eid, cf, tn, docs, generic, vdocs in rows:
+                LIMIT 6"""), {"pat": f"%{n}%"})).all()
+            for eid, cf, tn, docs in rows:
                 seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,
-                                  "docs": int(docs), "generic": bool(generic),
-                                  "validated_docs": int(vdocs)}
+                                  "docs": int(docs)}
     return list(seen.values())
 
 
@@ -413,7 +433,8 @@ async def plan_question(
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
         (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
-    all_matches = {m["id"]: m for m in probe_matches + name_matches}
+    all_matches = await _annotate_matches(
+        {m["id"]: m for m in probe_matches + name_matches})
     match_lines = "\n".join(
         f"- id={m['id']} [{m['type']}] {m['value']!r} ({m['docs']} docs)"
         + (" — GENERIC TERM: matches the word, almost never the thing;"
@@ -507,11 +528,12 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 FROM entity_mention m JOIN document d ON d.id = m.document_id
                 WHERE m.entity_id = ANY(CAST(:eids AS uuid[]))
                   AND m.status = 'active' AND d.staged IS NOT TRUE
-                  AND (m.link_method = ANY(:validated)
+                  AND ((m.link_method IS NOT NULL
+                        AND NOT (m.link_method = ANY(:blind)))
                        OR NOT (m.entity_id = ANY(CAST(:generic AS uuid[]))))
                 GROUP BY 1, 2, 3"""),
                 {"eids": list(frontier),
-                 "validated": list(VALIDATED_LINK_METHODS),
+                 "blind": list(BLIND_LINK_METHODS),
                  "generic": list(generic_ids)})).all()
             for did, fn, eid, hits in rows:
                 did = str(did)

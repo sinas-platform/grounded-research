@@ -66,16 +66,25 @@ def test_the_match_line_says_what_a_generic_entity_is():
     assert "GENERIC TERM: matches the word, almost never the thing" in SRC
 
 
-def test_the_mention_channel_gates_generic_entities_to_validated_tiers():
+def test_the_mention_channel_gates_generic_entities_to_recognised_tiers():
     assert "metadata ? 'generic_term'" in SRC
-    assert "m.link_method = ANY(:validated)" in SRC
+    assert "NOT (m.link_method = ANY(:blind))" in SRC
 
 
-def test_the_validated_tiers_are_the_context_reading_ones():
-    """`created` and `adjudicated` rows came from a model that read the
-    document; the gazetteer's rows are string matches. Pinned so a tier is
-    added here as a decision, not by accident."""
-    assert rf.VALIDATED_LINK_METHODS == ("created", "adjudicated")
+def test_recognition_is_the_complement_of_the_blind_tiers():
+    """Anything but the gazetteer's corpus scan and the pre-tiering legacy
+    rows counts as recognition — an entity matched by its case number or a
+    curated alias must never be misread as unrecognised. Pinned so a tier
+    moves between the sets as a decision, not by accident."""
+    assert rf.BLIND_LINK_METHODS == ("gazetteer", "legacy")
+
+
+def test_every_match_is_annotated_through_one_pass():
+    """Probe matches and name matches reach the planner through the same
+    annotation, so no resolver can hand it an unlabelled match — and an id
+    the annotation query cannot find defaults to safe values."""
+    assert "_annotate_matches(" in SRC
+    assert 'm.setdefault("generic", False)' in SRC
 
 
 # -- the second-tier marker ----------------------------------------------------
@@ -134,6 +143,15 @@ def test_the_floor_is_two_percent():
     assert ge.LINK_PROBABILITY_FLOOR == 0.02
     assert ge.improbable_link(1000, 19) is True
     assert ge.improbable_link(1000, 21) is False
+
+
+def test_the_case_denominator_counts_every_casing():
+    """An all-caps variant in a heading must not vanish from the total and
+    inflate the lower-case share."""
+    ev = ge.case_evidence("Thus", "thus and THUS and Thus and thus")
+    assert ev["any_case"] == 4
+    assert ev["lowercase"] == 2
+    assert ev["lowercase_share"] == 0.5
 
 
 def test_link_probability_needs_no_orthography():

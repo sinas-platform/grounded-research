@@ -337,3 +337,42 @@ def upgrade_cardinality(proposals: list[dict[str, Any]], per_doc_raw: list[tuple
     for p in proposals:
         if p["kind"] == "document_class_property" and p["name"] in many_keys:
             p["cardinality"] = "many"
+
+
+def front_matter_property_values(fm, properties):
+    """Property values a document's front matter declares, as
+    ``[(property_id, value_dict)]`` — the exporter's exact value, written
+    instead of transcribed.
+
+    A key matches a property by name, case-insensitively with ``-``/``_``
+    folded. Scalars are taken as-is; a list of scalars only fits a
+    ``cardinality="many"`` property — on a single-valued one the first
+    element is taken (the caller logs it). Dicts and lists of dicts are
+    entity candidates, not property values, and are ignored, as are keys
+    matching no property. Dates stay the ISO strings the exporter wrote.
+
+    Pure: a dict and a list in, pairs out.
+    """
+    def fold(name):
+        # Spaces, hyphens and underscores are all separators: the class may
+        # say "Case Number" where the exporter wrote "case-number".
+        out = str(name).strip().lower()
+        return out.replace("-", "_").replace(" ", "_")
+
+    def scalar(x):
+        return isinstance(x, (str, int, float, bool))
+
+    by_name = {fold(p.name): p for p in properties}
+    out = []
+    for key, raw in (fm or {}).items():
+        prop = by_name.get(fold(key))
+        if prop is None:
+            continue
+        if scalar(raw):
+            value = raw
+        elif isinstance(raw, list) and raw and all(scalar(x) for x in raw):
+            value = raw if getattr(prop, "cardinality", "one") == "many" else raw[0]
+        else:
+            continue
+        out.append((prop.id, {"_": value}))
+    return out

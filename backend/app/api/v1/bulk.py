@@ -91,6 +91,14 @@ async def upload_zip(file: UploadFile,
                          description="Hold the documents back from the live "
                                      "corpus (schema still being designed). "
                                      "Nothing unstages them automatically."),
+                     document_class: str | None = Query(
+                         default=None,
+                         description="Class name for every document in the "
+                                     "zip, stored at confidence 1.0. What "
+                                     "the operator knows about a source is "
+                                     "written, not re-guessed per file; the "
+                                     "model then never runs the class step "
+                                     "for these documents."),
                      session: AsyncSession = Depends(get_session),
                      caller: CallerIdentity = Depends(get_caller)):
     """Zip of .md files in -> registered, pipeline spawned.
@@ -99,6 +107,18 @@ async def upload_zip(file: UploadFile,
     them from the default listing until someone unstages them, and a bulk load
     that stages by mistake leaves a corpus that looks empty.
     """
+    # Resolved before anything is registered: an operator's typo must fail
+    # the whole upload, not classify half a corpus as None.
+    document_class_id = None
+    if document_class:
+        from app.models import DocumentClass
+        dc = (await session.execute(
+            select(DocumentClass).where(DocumentClass.name == document_class)
+        )).scalars().first()
+        if dc is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST,
+                                f"unknown document class: {document_class!r}")
+        document_class_id = dc.id
     raw = await file.read()
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
@@ -118,7 +138,8 @@ async def upload_zip(file: UploadFile,
         reg = await register_document(
             session, filename=base, content=content,
             owner_id=caller.user_id, roles=caller.roles,
-            source=source, staged=staged)
+            source=source, staged=staged,
+            document_class_id=document_class_id)
         if reg.outcome == "unchanged":
             unchanged += 1
         elif reg.outcome == "duplicate":

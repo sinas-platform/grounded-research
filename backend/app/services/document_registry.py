@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Document, DocumentVersion
+from app.services.front_matter import split_front_matter
 from app.services.toc import normalize_line_density
 
 
@@ -105,4 +106,47 @@ async def register_document(
     session.add(dv)
     await session.flush()
     doc.current_version_id = dv.id
+    await _seed_front_matter_values(session, doc, dv, content)
     return Registration(doc, outcome, version)
+
+
+async def _seed_front_matter_values(session, doc, dv, content: str) -> None:
+    """What the source already knows is written, not guessed.
+
+    For every front-matter key matching a property of the document's class,
+    a locked manual PropertyValue at confidence 1.0 — the exporter's exact
+    value. The resolver matches citations on these keys, so a model
+    transcription slip here is a missed link; a declared value cannot slip.
+
+    Only when the class is known at registration (properties belong to a
+    class), and never over an existing value: re-registration and re-extract
+    both leave earlier values standing, the same rule the one-shot applies.
+    """
+    if doc.document_class_id is None:
+        return
+    fm, _body = split_front_matter(content)
+    if not fm:
+        return
+    from app.models import DocumentClassProperty, PropertyValue
+    from app.services.front_matter import front_matter_property_values
+
+    properties = (await session.execute(
+        select(DocumentClassProperty).where(
+            DocumentClassProperty.document_class_id == doc.document_class_id)
+    )).scalars().all()
+    seeded = front_matter_property_values(fm, properties)
+    if not seeded:
+        return
+    existing = {pid for (pid,) in (await session.execute(
+        select(PropertyValue.property_id).where(
+            PropertyValue.document_id == doc.id)
+    )).all()}
+    for prop_id, value in seeded:
+        if prop_id in existing:
+            continue
+        session.add(PropertyValue(
+            property_id=prop_id, document_id=doc.id,
+            document_version_id=dv.id, value=value,
+            method="manual", locked=True, confidence=1.0,
+            reason="front-matter declared"))
+    await session.flush()

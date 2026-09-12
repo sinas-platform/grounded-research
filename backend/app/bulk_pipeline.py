@@ -380,7 +380,12 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
                 continue
             cls_name = str(data.get("document_class") or "")
             cid = next((c for c, n, _ in classes if n == cls_name), None)
-            hinted_matches = rule is not None and cls_name == rule[0]
+            # A class known before the call -- filename rule or the document's
+            # own assigned class -- had its properties preloaded into round 1,
+            # so a follow-up would ask the model for values it was already
+            # asked for. Only a genuinely model-discovered class earns one.
+            hinted_matches = (rule is not None and cls_name == rule[0]) or (
+                class_by_did.get(did) is not None)
             if cid is None or hinted_matches:
                 continue
             cprops = props_by_class.get(cid) or []

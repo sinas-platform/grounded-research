@@ -338,6 +338,51 @@ def objections_block(open_points: list[dict[str, Any]]) -> str:
     )
 
 
+#: The three things a drafter may still do about a claim the review has now
+#: failed twice, in the words the round uses. One string, because the finding
+#: line and the standing block must not drift into saying different things.
+PERMITTED_MOVES = (
+    "DROP it — put it in \"drop\" with a rationale; "
+    "DEFEND it — revise it and bind it to evidence it does not already cite, "
+    "a different passage or a different document; or "
+    "REFUSE — put it in \"keep\" with a rationale saying why it stands as "
+    "written."
+)
+
+
+def strike_block(rows: list[dict[str, Any]]) -> str:
+    """The claims rewording is no longer a move on. Pure.
+
+    A sentence asking the drafter not to reword a twice-failed claim already
+    existed inside the finding line, and on the measured run it did not bite:
+    one claim was reworded in round five, reworded again in round six, and
+    dropped in round seven for a reason that was available in round two. The
+    sentence is still there, because a rule is most useful at the point of
+    decision. This is the standing version of it — named claims, the three
+    moves, and the fact that a fourth is refused by the engine rather than
+    discouraged in prose.
+    """
+    if not rows:
+        return ""
+    lines = []
+    for r in rows:
+        refused = int(r.get("rejected_rewords") or 0)
+        lines.append(
+            f"  - claim {r.get('sequence')}: "
+            f"{int(r.get('findings') or 0)} findings"
+            + (f"; {refused} revision(s) of it already refused for returning "
+               "the same citation" if refused else ""))
+    return (
+        "\nCLAIMS ON THEIR SECOND FINDING — the review has now failed each of "
+        "these more than once, so rewording them is no longer one of your "
+        "moves. For each, do exactly one of three things: "
+        + PERMITTED_MOVES
+        + " A revision that comes back with the citation the claim already "
+        "has is not applied to the answer and is recorded as refused.\n"
+        + "\n".join(lines) + "\n"
+    )
+
+
 def numbering_key(rows: list[tuple[int, str]]) -> str:
     """How to address a claim in a patch. Pure.
 

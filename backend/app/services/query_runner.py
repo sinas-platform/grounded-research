@@ -56,8 +56,14 @@ from app.services import (
     drafting_chat,
     objections,
     obligations,
+    strikes,
     supersession,
 )
+
+#: How many findings one round puts to the drafter. A round that named
+#: thirty would be a redraft with extra steps, and the ones past the cap are
+#: not asked about — which is also why they do not count as strikes.
+MAX_FEEDBACK_ITEMS = 10
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -5073,6 +5079,12 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
                 # asking what was argued should not have to find the last gate
                 # cycle to learn how it ended.
                 objections=await objections.record(run_id),
+                # And the other argument the loop has: the review against one
+                # claim, round after round. Per claim, how many findings it
+                # attracted, how it ended, and whether a reword of it was
+                # refused — the three numbers that say whether the two-strike
+                # rule is doing anything.
+                claim_strikes=await strikes.record(run_id),
                 # The one thing in the ledger that changes the run's outcome.
                 # Written every publish, empty list included: an empty list
                 # says nothing was left contested, a missing key would say the
@@ -5638,6 +5650,38 @@ async def _revise_answer(
     numbering = drafting_chat.numbering_key(
         [(seq, c["text"]) for seq, c in sorted(by_claim.items())])
 
+    # What each claim stands on RIGHT NOW, in the same grain a patch item
+    # names its spans in. This is what a revision of a struck claim is
+    # measured against: a defence has to reach a passage the claim does not
+    # already cite, and that question is only answerable against the rows as
+    # they are at the moment the patch arrives.
+    cited_now: dict[int, list[dict]] = {}
+    for claim, ev, fn, _content in rows:
+        if ev is None or not fn:
+            continue
+        span = ev.span or {}
+        cited_now.setdefault(claim.sequence, []).append(
+            {"filename": fn, "line_from": span.get("line_from"),
+             "line_to": span.get("line_to")})
+    # The claims the review has now failed more than once, by the sequence the
+    # patch will key on — resolved from the row id every round, so a claim
+    # that was renumbered between rounds is still the same claim here.
+    strike_ledger = await strikes.entries(run_id)
+    on_strike: dict[int, dict] = {}
+    for claim, *_rest in rows:
+        entry = strike_ledger.get(str(claim.id))
+        if entry is None or claim.sequence in on_strike:
+            continue
+        if int(entry.get("findings") or 0) < strikes.STRIKE_LIMIT:
+            continue
+        on_strike[claim.sequence] = {
+            "claim_id": str(claim.id),
+            "sequence": claim.sequence,
+            "findings": int(entry.get("findings") or 0),
+            "rejected_rewords": int(entry.get("rejected_rewords") or 0),
+            "evidence": strikes.fingerprint(cited_now.get(claim.sequence) or []),
+        }
+
     # passages for anything the gate said was missing
     async def _anchors_for(point: str) -> tuple[list[str], str]:
         """Documents that could contain this point, best first: full-text
@@ -5739,10 +5783,12 @@ async def _revise_answer(
         "found; everything else stands.\n"
         + numbering
         + drafting_chat.removed_by_the_engine(removed or [])
+        + drafting_chat.strike_block(
+            [on_strike[s] for s in sorted(on_strike)])
         + "\n"
         + _claim_budget_line(len(by_claim), cap=cap,
                              refused_last_cycle=await _cap_refusals_last_cycle(run_id))
-        + "\n\nFINDINGS:\n- " + "\n- ".join(feedback[:10]) + "\n"
+        + "\n\nFINDINGS:\n- " + "\n- ".join(feedback[:MAX_FEEDBACK_ITEMS]) + "\n"
         + drafting_chat.objections_block(await objections.open_points(run_id))
         + ("\nThis is the final revision. If the passages available genuinely "
            "cannot settle a point the question asks about, do not stretch a "
@@ -5758,6 +5804,21 @@ async def _revise_answer(
     reply = await chat.turn(turn, label=f"round {chat.rounds}")
 
     patch = _parse_patch(reply, allow_abstention=last_attempt)
+    # The two-strike rule, applied to the reply rather than asked of it. A
+    # revision of a claim on its second finding is applied only if it rebinds
+    # the claim to evidence it does not already stand on; one that returns the
+    # same citation is removed from the patch here and recorded as refused, so
+    # a third round spent on the same wording cannot happen by being obeyed.
+    rejected_rewords: list[dict] = []
+    if patch and on_strike:
+        patch, rejected_rewords = strikes.screen_patch(patch, on_strike)
+        for r in rejected_rewords:
+            await strikes.rejected_reword(run_id, r["claim_id"], r["sequence"],
+                                          round_no=chat.rounds)
+        if rejected_rewords:
+            _log.info("run %s: refused %d reword(s) of struck claim(s) %s",
+                      run_id, len(rejected_rewords),
+                      [r["sequence"] for r in rejected_rewords])
     refusals = 0
     if patch:
         # A waive is a discharge with a recorded reason, not a dropped
@@ -5803,8 +5864,15 @@ async def _revise_answer(
                 "feedback_items": len(feedback), "yielded_no_change": True,
                 "refusals": refusals,
                 "dropped_unexplained": (patch or {}).get("drop_unexplained")
-                or []}})
-        chat.note(f"{refusals} refusal(s); no claim changed")
+                or [],
+                # A patch whose only content was a reword of a struck claim
+                # lands here, and this is the one line that says why nothing
+                # changed. Without it the cycle reads as a drafter that had
+                # nothing to say, when it made a move the rule does not allow.
+                "rewords_refused": rejected_rewords}})
+        chat.note(f"{refusals} refusal(s); no claim changed"
+                  + (f"; {len(rejected_rewords)} reword(s) of a twice-failed "
+                     "claim refused" if rejected_rewords else ""))
         await _save_drafting_chat(run_id, chat)
         return 0
 
@@ -5914,6 +5982,23 @@ async def _revise_answer(
                 kept += 1
         await session.commit()
 
+    # How each struck claim's argument ended, recorded against the claim's
+    # row id and only for the dispositions that were actually applied. Three
+    # moves were on the table and the ledger says which one was taken, so the
+    # rule can be read after the fact as an outcome rather than as a rule.
+    for seq in patch["drop"]:
+        if seq in on_strike and by_seq.get(seq) is not None:
+            await strikes.settle(run_id, on_strike[seq]["claim_id"],
+                                 strikes.DROPPED, round_no=chat.rounds)
+    for item in patch["revise"]:
+        if item["seq"] in on_strike and by_seq.get(item["seq"]) is not None:
+            await strikes.settle(run_id, on_strike[item["seq"]]["claim_id"],
+                                 strikes.DEFENDED, round_no=chat.rounds)
+    for item in patch["keep"]:
+        if item["seq"] in on_strike and by_seq.get(item["seq"]) is not None:
+            await strikes.settle(run_id, on_strike[item["seq"]]["claim_id"],
+                                 strikes.REFUSED, round_no=chat.rounds)
+
     # `added` counts rows written, not rows asked for. It used to be
     # len(patch["add"]), so a patch whose additions were all refused at the
     # cap recorded the same number as one where every addition landed.
@@ -5945,6 +6030,12 @@ async def _revise_answer(
             # the same reply — what the reviser did AND what it said about
             # what it was asked to do.
             "refusals": refusals,
+            # Beside the refusals because it is the same kind of fact: what
+            # the drafter tried and the engine would not take. A cycle that
+            # revised two claims and had a third reword refused is a different
+            # cycle from one that revised two and was asked for nothing else.
+            "rewords_refused": rejected_rewords,
+            "struck_claims": sorted(on_strike),
             "added": len(admitted),
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,
@@ -5962,7 +6053,49 @@ async def _revise_answer(
     return touched
 
 
-def _round_feedback(verdict: dict, seen_before: set[int] | None = None) -> list[str]:
+def _finding_subjects(verdict: dict) -> list[tuple[str, int | None]]:
+    """Whose claim each finding is about, in the order `_round_feedback`
+    writes them. Pure.
+
+    `(claim id, the sequence it is named by)`, one entry per finding line, so
+    the caller can slice this list by exactly the cap it slices the feedback
+    by and strike the claims the round actually asks about.
+
+    The id is what the strike ledger counts on. The sequence travels beside it
+    for the prompt, which addresses claims by number and knows nothing of row
+    ids — and for the record, so a reader can see which number a claim wore
+    when it was found.
+
+    Kept next to `_round_feedback` and iterating the same two lists in the
+    same order, because the two must stay in step: an entry here that is not
+    a line there would strike a claim nobody was asked about.
+    """
+    out: list[tuple[str, int | None]] = []
+    for group in ("failed", "overreaching"):
+        for f in (verdict.get(group) or []):
+            if not isinstance(f, dict):
+                continue
+            out.append((str(f.get("claim_id") or ""),
+                        _whole(f.get("claim_sequence"))))
+    return out
+
+
+def _whole(raw: Any) -> int | None:
+    """A claim sequence, or None if it is not one. Pure.
+
+    The same digit test the verdict readers below apply, and for the same
+    reason: int() reads 9.5 as claim 9 and True as claim 1.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return int(n) if n.is_integer() else None
+
+
+def _round_feedback(verdict: dict, struck: set[int] | None = None) -> list[str]:
     """What this round found, in the words the drafter is asked to act on. Pure.
 
     The wording carries a decision. "Narrow it to what the passages say" is an
@@ -5975,18 +6108,24 @@ def _round_feedback(verdict: dict, seen_before: set[int] | None = None) -> list[
     So abandoning is named as an option in every finding, and named as the
     LIKELY one for a claim that has already been raised once and survived.
     A claim the review has now failed twice is not a wording problem.
+
+    `struck` is the sequences the strike ledger says are on their second
+    finding. It used to be assembled here from two lists of sequence numbers
+    held in the validation loop's locals, and both halves of that were wrong:
+    a sequence is not a claim's identity, and a local does not survive the
+    loop restarting itself once per gate cycle. What arrives now is a set of
+    CURRENT sequence numbers resolved from claim row ids, and the finding line
+    says what the engine will and will not accept rather than asking nicely.
     """
-    seen_before = seen_before or set()
+    struck = struck or set()
 
     def _again(seq: Any) -> str:
-        try:
-            repeated = int(seq) in seen_before
-        except (TypeError, ValueError):
-            repeated = False
-        return (" This is the second round that has failed this claim. Do not "
-                "reword it again: unless a passage you have not yet cited "
-                "carries it outright, ABANDON it — drop it with a reason."
-                if repeated else "")
+        return (" This is the second round that has failed this claim, and "
+                "rewording is no longer one of your moves on it: "
+                + drafting_chat.PERMITTED_MOVES
+                + " Do not reword it again — a revision that comes back with "
+                "the citation it already has is not applied."
+                if _whole(seq) in struck else "")
 
     out = [f"Claim {f['claim_sequence']}: {f['reason']} Rebind it to a passage "
            "that carries it, or — if no passage available does — ABANDON the "
@@ -6310,12 +6449,26 @@ async def _stage_validate_publish(
                 return await _stage_validate_publish(
                     run_id, sinas, gate_cycles - 1)
         # One revision per round, over everything this round found. A claim
-        # this round names for the second time gets the harder sentence: see
-        # `_round_feedback`.
-        seen_before: set[int] = set()
-        for earlier in overreach_history[:-1] + pending_seq_history[:-1]:
-            seen_before |= earlier
-        fb = _round_feedback(verdict, seen_before)
+        # this round names for the second time is struck: rewording stops
+        # being a move it may make, here in the sentence it reads and in the
+        # patch screen that applies the reply — see `services/strikes`.
+        #
+        # Only the findings this round will actually SEND are counted. The
+        # ones past the cap are not put to the drafter, and a claim cannot be
+        # said to have failed to act on a request it never saw.
+        subjects = _finding_subjects(verdict)[:MAX_FEEDBACK_ITEMS]
+        tally = await strikes.record_findings(run_id, subjects,
+                                              round_no=round_no)
+        struck_seqs = {seq for cid, seq in subjects if seq is not None
+                       and tally.get(cid, 0) >= strikes.STRIKE_LIMIT}
+        if struck_seqs:
+            # `struck_N`, not `round_N_struck`. `answer_regress` reads every
+            # key under `validate` that starts with `round_` as a round's
+            # counts and takes the last one by name, so a sibling key sharing
+            # that prefix would be read as the final round of the run.
+            await _tele(run_id, "validate", **{
+                f"struck_{round_no}": sorted(struck_seqs)})
+        fb = _round_feedback(verdict, struck_seqs)
         if fb and await _revise_answer(sinas, run_id, answer_id, fb):
             continue
         break  # revision produced nothing usable; drop below
@@ -6364,6 +6517,12 @@ async def _stage_validate_publish(
         # and both describe the latest state. The numbered record is the history.
         await _tele(run_id, "validate", dropped_detail=dropped)
         await _record_removal(run_id, "rounds_exhausted", dropped)
+    # A claim the rounds ran out on did not end by a disposition, and the
+    # strike record must not read as though the drafter chose anything. It is
+    # the outcome the rule exists to make rarer, so it is named.
+    for cid in failing_ids:
+        await strikes.settle(run_id, str(cid), strikes.EXHAUSTED,
+                             round_no=round_no)
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues, correctness, points, gate_cause = await _gate_answer(

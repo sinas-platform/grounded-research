@@ -56,9 +56,20 @@ completeness from data (this query), never from run/unit status.
 - Synthesis: `POST /api/v1/query-runs {question, mode: "synthesis",
   effort, parent_result_id}`. Resume a failed run:
   `POST /api/v1/query-runs/{id}/resume`.
-- Terminal states: `published`, `partial` (semantic dead-end — cause +
-  client-facing note in `telemetry.partial`; verified claims retained),
-  `failed` (infrastructure, retryable), `cancelled`.
+- Terminal states: `published`, `published_contested`, `partial` (semantic
+  dead-end — cause + client-facing note in `telemetry.partial`; verified
+  claims retained), `failed` (infrastructure, retryable), `cancelled`.
+- `published_contested` is an ANSWER, not a degraded one: every part of the
+  question is covered and the prose is written. It says the completeness
+  review and the drafter argued to a standstill over a source the review
+  called essential and justified, and the drafter would not use. The answer
+  carries a reservation naming that source and what it bears on, printed
+  under the part it affects; `answer.open_notes` and
+  `telemetry.validate.objections` carry the whole argument. A human should
+  read the reservation and decide. Anything asking "did this run produce an
+  answer" must accept both published states.
+- A source the review named and the answer did not cite never makes a run
+  `partial`. `partial` means a part of the question could not be answered.
 
 ### Settings (backend `.env`, read at process start)
 - `SGR_DRAFT_MODE` — `extract` is the only value. Drafting is a plan

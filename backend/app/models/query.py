@@ -21,7 +21,7 @@ from app.models._common import OwnedMixin, TimestampMixin, uuid_pk
 
 # status lifecycle:
 #   pending → retrieving → synthesizing → validating
-#           → published | partial | failed
+#           → published | published_contested | partial | failed
 # "partial" is a terminal outcome with a client-facing note instead of a full
 # answer (budget ceiling, thin coverage); "failed" is infra and resumable.
 # decomposing/searching/merging belong to the retired agent-driven retrieval
@@ -35,6 +35,15 @@ QUERY_RUN_STATUSES = (
     "synthesizing",
     "validating",
     "published",
+    # Terminal, and an ANSWER: every part of the question is covered and the
+    # prose is written. What is different is that the completeness review and
+    # the drafter argued to a standstill over a source the review called
+    # essential and could not persuade the drafter to use. The answer carries
+    # a reservation naming that source and what it bears on, and this status
+    # is what tells a human to go and read it. Deliberately not `partial`,
+    # which means a part could not be answered at all, and deliberately not
+    # `published`, which would hide the disagreement.
+    "published_contested",
     "partial",
     "failed",
     # Terminal, and distinct from `failed`: the run was stopped on request and

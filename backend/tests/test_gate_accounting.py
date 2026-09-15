@@ -207,24 +207,41 @@ def test_the_reviser_is_told_the_question_is_not_fully_answered():
     assert "Adding a claim that cites one is in scope" in SRC
 
 
-def test_publication_is_tied_to_the_actionable_debt_only():
-    """Changed from "not tied at all", on wider evidence.
+def test_publication_is_not_tied_to_the_debt_at_all():
+    """Changed twice, and this is the reading the measurements support.
 
-    The earlier decision recorded a measured 0% conversion after three feeds.
-    That measurement stands, and it is exactly why `actionable` drops
-    system-waived sources: past `MAX_FEEDS` a source converts at 0%, so gating
-    on it buys partials and no citations. Below the cap the picture inverts —
-    of 19 debts that settled across the runs carrying per-cycle history, 17
-    settled in the very next cycle and 17 ended up cited.
+    It was first untied, then tied to `actionable` on the evidence that below
+    `MAX_FEEDS` a debt usually settles in the very next cycle — 17 of 19 across
+    the runs carrying per-cycle history. That evidence is about how debts
+    settle, and it argues for spending cycles on them, which is what `issues`
+    does and still does. It never argued for the verdict.
 
-    So the gate blocks on debt a further cycle could still discharge, and on
-    nothing else.
+    What settled it is the failure the two-way loop was built for: a run whose
+    every part was covered, with nothing missing, unsupported or unresponsive,
+    ended `partial` because one source it had reasoned its way out of citing
+    was fed three times and never incorporated. "Partial" told the reader the
+    question could not be answered. It could, and was.
+
+    So the debt buys revision cycles and never a verdict. `blocking` is still
+    computed and still named in `missing` — a cycle spent on an owed source
+    has to say which one — and `publishable` does not read it.
     """
     flat = " ".join(SRC.split())
-    assert "and not uncovered and not blocking" in flat
+    assert "publishable = bool(data.get(\"publishable\")) and not uncovered" in flat
+    assert "not blocking" not in flat
     assert "blocking = await obligations.actionable(run_id, answer_id)" in flat
     # the reported figure stays the honest one
     assert '"accounted": not unaccounted' in SRC
+
+
+def test_an_unincorporated_source_can_no_longer_name_a_partial():
+    """`accounting` was the cause a partial carried when the only thing wrong
+    was a source the answer did not use. It is gone from both sites that
+    raised it, and `partial` is back to meaning a part could not be answered.
+    """
+    assert 'PartialOutcome(\n                "accounting"' not in SRC
+    assert '"accounting",' not in SRC
+    assert 'sweep_cause == "accounting"' not in SRC
 
 
 # -- what the gate may block on ----------------------------------------------

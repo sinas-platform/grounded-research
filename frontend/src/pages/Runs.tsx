@@ -8,6 +8,23 @@ import { DocumentModal, EvidenceSpan } from '@/components/DocumentViewer';
 
 /* ---------------------------------- types ---------------------------------- */
 
+/** One point the review raised that never resolved. `caveat` marks the ones a
+    reader must see: an `essential` request the review justified, pressed, and
+    the drafter still refused. The rest are a record of what was argued. */
+interface OpenNote {
+  id: string | null;
+  state: string | null;
+  source: string | null;
+  source_citation?: string | null;
+  part: number | null;
+  importance: string;
+  why_essential: string;
+  asked: string;
+  reason: string;
+  exchanges: number;
+  caveat: boolean;
+}
+
 interface QueryRun {
   id: string;
   question: string;
@@ -20,6 +37,10 @@ interface QueryRun {
   parent_result_id: string | null;
   answer_id: string | null;
   error: string | null;
+  /** What the completeness review and the drafter left unsettled. The entries
+      with `caveat` are already printed in the answer as reservations; a run
+      that ends `published_contested` has at least one. Single-run read only. */
+  open_notes: OpenNote[] | null;
   telemetry: Record<string, any>;
   created_at: string;
   started_at: string | null;
@@ -110,7 +131,15 @@ interface StageNode {
   wide: boolean;
 }
 
-const TERMINAL = new Set(['published', 'failed', 'partial', 'cancelled']);
+const TERMINAL = new Set([
+  'published', 'published_contested', 'failed', 'partial', 'cancelled',
+]);
+/** Both statuses that carry a written answer. A run that ends contested is
+    published — every part is covered and the prose is there — and differs only
+    in carrying a reservation a human should read. Anything reading "did this
+    produce an answer" must ask this, not `=== 'published'`. */
+const isPublished = (status: string) =>
+  status === 'published' || status === 'published_contested';
 const isLive = (r?: QueryRun | null) => !!r && !TERMINAL.has(r.status);
 
 function stageOf(tel: Record<string, any>, key: string): StageState {
@@ -247,7 +276,7 @@ function buildStages(
 ): { rows: StageNode[][]; edges: [string, string][] } {
   const tel = run.telemetry ?? {};
   const failed = run.status === 'failed';
-  const published = run.status === 'published';
+  const published = isPublished(run.status);
   const partial = run.status === 'partial';
   const withSynthesis = run.mode !== 'retrieval';
 
@@ -765,24 +794,66 @@ function StatusPill({ status }: { status: string }) {
   const cls =
     status === 'published'
       ? 'bg-primary-100 text-primary-700'
-      : status === 'failed'
-        ? 'bg-red-50 text-red-700 border border-red-200'
-        : status === 'partial'
-          ? 'bg-orange-50 text-orange-700 border border-orange-200'
-          : status === 'cancelled'
-            ? 'bg-stone-100 text-stone-500 border border-stone-200'
-            : 'bg-amber-50 text-amber-700 border border-amber-200';
-  return <span className={`text-[10px] px-1.5 rounded ${cls}`}>{status}</span>;
+      : // An answer, so not the red of a failure or the orange of a partial —
+        // but one a human is being asked to look at, so not the plain
+        // published pill either.
+        status === 'published_contested'
+        ? 'bg-primary-50 text-primary-700 border border-amber-300'
+        : status === 'failed'
+          ? 'bg-red-50 text-red-700 border border-red-200'
+          : status === 'partial'
+            ? 'bg-orange-50 text-orange-700 border border-orange-200'
+            : status === 'cancelled'
+              ? 'bg-stone-100 text-stone-500 border border-stone-200'
+              : 'bg-amber-50 text-amber-700 border border-amber-200';
+  // "published_contested" is the stored value and reads as jargon in a pill.
+  const label = status === 'published_contested' ? 'published · contested' : status;
+  return <span className={`text-[10px] px-1.5 rounded ${cls}`}>{label}</span>;
+}
+
+/** What the review and the drafter could not settle, for a contested run.
+    Only the caveat notes: the others are a record of the argument and say
+    nothing about the answer as published. */
+function Reservations({ notes }: { notes?: OpenNote[] | null }) {
+  const caveats = (notes ?? []).filter((n) => n.caveat);
+  if (!caveats.length) return null;
+  return (
+    <div className="mb-3 rounded border border-amber-300 bg-amber-50/70 p-2.5">
+      <div className="text-[10.5px] font-semibold text-amber-800 uppercase tracking-wider mb-1">
+        Contested — the review and the drafter did not agree
+      </div>
+      {caveats.map((n, i) => (
+        <div key={n.id ?? i} className="text-[12.5px] leading-relaxed text-stone-800 mb-1.5 last:mb-0">
+          <div>
+            The review judged{' '}
+            <span className="font-semibold">{n.source_citation || n.source || 'a source'}</span>{' '}
+            necessary{n.part != null ? ` to part ${n.part + 1}` : ''}
+            {n.why_essential ? `: ${n.why_essential}` : ''}
+          </div>
+          {n.reason && (
+            <div className="text-stone-600 border-l-2 border-stone-200 pl-2 mt-0.5">
+              The analysis declined, for this reason: {n.reason}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  );
 }
 
 /** The client-facing note a partial run ends with, plus why it stopped. */
 function PartialNote({ tel }: { tel: Record<string, any> }) {
   const p = tel?.partial;
   if (!p) return null;
+  // Every cause the pipeline raises. `accounting` is gone: a source the
+  // review named and the answer did not use is no longer a partial at all —
+  // it is a note on the answer, and at most a reservation the reader sees.
   const cause: Record<string, string> = {
     budget_ceiling: 'the run reached its spend ceiling',
     coverage: 'the sources found did not cover the question',
     no_progress: 'drafting produced too little to stand behind',
+    holistic: 'the review rejected the answer as a whole',
+    consistency: 'the answer could not be made internally consistent',
   };
   return (
     <div className="mb-3 rounded border border-orange-200 bg-orange-50 p-2.5">
@@ -1260,6 +1331,10 @@ function Inspector({
     body = (
       <>
         {isPartial && <PartialNote tel={tel} />}
+        {/* Above the prose, which carries the same reservation inline under
+            the part it bears on. A reader arriving at the answer should learn
+            it was contested before reading it, not while. */}
+        <Reservations notes={run.open_notes} />
         {/* The answer as prose, above the rows it was assembled from. The
             rows are still the record — they carry the evidence and the
             verification state — but a reader wants the answer first, and
@@ -1336,6 +1411,7 @@ function Inspector({
     body = (
       <>
         {run.status === 'partial' && <PartialNote tel={tel} />}
+        <Reservations notes={run.open_notes} />
         <Label>Stages</Label>
         {[
           ['Question', ''],

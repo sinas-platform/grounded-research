@@ -27,7 +27,7 @@ _CLAIM_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 import pytest
 
-from app.services import query_runner as qr
+from app.services import objections, query_runner as qr
 
 SPLIT_CALL = "Split the question into the distinct things"
 #: The splitter answers with a heading and the full text of each part.
@@ -85,6 +85,23 @@ def gate_env(monkeypatch):
 
     monkeypatch.setattr(qr, "AsyncSessionLocal", _session_local)
     monkeypatch.setattr(qr, "_tele", _tele)
+    # The objection ledger keeps its own storage, so stubbing the runner's
+    # session leaves it reaching for a real database — where it fails open by
+    # design and silently degrades the loop to the one-way behaviour it
+    # replaces. An in-memory store keeps the ledger's real logic in the test
+    # and its storage out, and `tele["objections"]` is what it holds.
+    ledger: dict = {}
+    tele["objections"] = ledger
+
+    async def _load(_run_id):
+        return dict(ledger)
+
+    async def _store(_run_id, entries):
+        ledger.clear()
+        ledger.update(entries)
+
+    monkeypatch.setattr(objections, "_load", _load)
+    monkeypatch.setattr(objections, "_store", _store)
     return tele
 
 
@@ -133,19 +150,25 @@ async def test_uncovered_part_blocks_even_when_judge_says_publishable(gate_env):
 
 
 @pytest.mark.asyncio
-async def test_an_actionable_debt_blocks_even_when_every_part_is_covered(
+async def test_an_owed_source_does_not_block_a_fully_covered_answer(
     gate_env, monkeypatch
 ):
-    """The second thing that clears `publishable`. A source the review itself
-    named, still uncited and not waived by anyone, holds the answer back even
-    though the judge said publishable and no part is uncovered."""
+    """It used to, and that was the measured defect. A run whose every part
+    was covered, with nothing missing or unsupported, ended `partial` because
+    one source it had reasoned its way out of citing was never incorporated —
+    and `partial` told the reader the question could not be answered. It
+    could, and was.
+
+    The debt is still named in `missing`, because a cycle spent on an owed
+    source has to be able to say which one, and it still buys revision cycles
+    through `issues`. What it cannot do is decide the verdict."""
     from app.services import obligations
 
     async def _actionable(_run, _answer):
         return ["owed.md"]
 
     monkeypatch.setattr(obligations, "actionable", _actionable)
-    ok, missing, _issues, _corr, _pts, _cause = await _gate(
+    ok, missing, _issues, _corr, _pts, cause = await _gate(
         json.dumps(
             {
                 "publishable": True,
@@ -153,16 +176,17 @@ async def test_an_actionable_debt_blocks_even_when_every_part_is_covered(
             }
         )
     )
-    assert ok is False
+    assert ok is True
+    assert cause == ""
     assert "owed.md" in missing
     assert "neither cited nor waived" in missing
 
 
 @pytest.mark.asyncio
-async def test_the_cause_names_which_of_the_two_held_it(gate_env, monkeypatch):
-    """A partial labelled `coverage` for a run whose every part was covered
-    tells the reader the sources were silent on something they were not silent
-    on. The gate knows which held it, so the gate says."""
+async def test_an_owed_source_names_no_cause(gate_env, monkeypatch):
+    """`cause` names the thing that made a run partial, and an unincorporated
+    source no longer makes one. A cause here would put a partial's label on a
+    run that is about to publish."""
     from app.services import obligations
 
     async def _debt(_run, _answer):
@@ -172,7 +196,31 @@ async def test_the_cause_names_which_of_the_two_held_it(gate_env, monkeypatch):
     _ok, _m, _i, _c, _p, cause = await _gate(
         json.dumps({"publishable": True,
                     "parts": [{"n": 1, "covered": True}, {"n": 2, "covered": True}]}))
-    assert cause == "accounting"
+    assert cause == ""
+
+
+@pytest.mark.asyncio
+async def test_the_debt_never_speaks_for_the_judge(gate_env, monkeypatch):
+    """`missing` becomes the partial's stated reason. The debt used to replace
+    the judge's own words there, so a run rejected as a whole reached the
+    client-facing note with an unincorporated source as its only reason — and
+    the note opened by telling the reader the analysis could not cover the
+    material, on a run whose every part was covered. The judge's words lead;
+    the debt follows."""
+    from app.services import obligations
+
+    async def _debt(_run, _answer):
+        return ["owed.md"]
+
+    monkeypatch.setattr(obligations, "actionable", _debt)
+    _ok, missing, _i, _c, _p, cause = await _gate(
+        json.dumps({"publishable": False,
+                    "missing": "no conclusion is drawn",
+                    "parts": [{"n": 1, "covered": True},
+                              {"n": 2, "covered": True}]}))
+    assert cause == "holistic"
+    assert missing.startswith("no conclusion is drawn")
+    assert "owed.md" in missing
 
 
 @pytest.mark.asyncio

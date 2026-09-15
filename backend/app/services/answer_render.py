@@ -139,6 +139,61 @@ def paragraph_label(ref: str | None) -> str | None:
     return f"para. {s}" if re.fullmatch(r"\d+", s) else s
 
 
+def reservations(answer: dict, part_index: int | None) -> list[str]:
+    """The reservations attached to one part of the answer, as prose. Pure.
+
+    A reservation is what is left when the completeness review and the drafter
+    could not agree: the review named a source, said a part is not properly
+    answered without it and why, pressed the point, and the drafter still
+    would not use it. Both readings are stated, because that is the honest
+    shape of the thing — a reader is not told the answer is wrong, they are
+    told it was contested and by whom, and given enough to go and look.
+
+    Only notes carrying `caveat` are printed. A request the review accepted is
+    settled and says nothing about the answer; a `supporting` source left
+    unused is a record and not a caveat. Passing those through would put a
+    warning on an answer nobody thinks is incomplete, which teaches a reader
+    to ignore the warnings that mean something.
+
+    The source is named by the citation resolved when the answer published —
+    never by a filename, like every other reference in this file. A note whose
+    source could not be resolved still prints, without the name.
+    """
+    out = []
+    for n in (answer.get("open_notes") or []):
+        if not isinstance(n, dict) or not n.get("caveat"):
+            continue
+        if (n.get("part") if isinstance(n.get("part"), int) else None) != part_index:
+            continue
+        name = _str(n.get("source_citation")).strip()
+        asked = _str(n.get("why_essential")).strip() or _str(n.get("asked")).strip()
+        reason = _str(n.get("reason")).strip()
+        out.append(
+            "> **Reservation.** This analysis does not draw on "
+            + (name or "a source in the working set")
+            + ", which the completeness review judged necessary here"
+            + (f": {asked}" if asked else "")
+            + ". The analysis did not use it"
+            + (f", for this reason: {reason}" if reason else "")
+            + ". The two readings could not be reconciled; consider that "
+            "source before relying on this part."
+        )
+    return out
+
+
+def all_reservations(answer: dict) -> list[str]:
+    """Every reservation on the answer, whatever part it names. Pure.
+
+    For the branch that has no parts to hang them on. Ordered by part so the
+    output is stable, with the ones that name no part first.
+    """
+    parts = sorted(
+        {n.get("part") if isinstance(n.get("part"), int) else None
+         for n in (answer.get("open_notes") or []) if isinstance(n, dict)},
+        key=lambda p: (p is not None, p if p is not None else 0))
+    return [r for p in parts for r in reservations(answer, p)]
+
+
 def _labels(c: dict) -> str:
     """The bracketed labels a claim's sentence ends with, or "".
 
@@ -297,7 +352,8 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
                     documents: dict[str, dict]) -> Rendered:
     """The answer as markdown, and the marker → document mapping.
 
-    `answer` carries `question`, `question_parts` and `law_stated_as_at`;
+    `answer` carries `question`, `question_parts`, `open_notes` and
+    `law_stated_as_at`;
     `claims` are the claim rows as dicts; `evidence` the evidence rows
     (`claim_id`, `document_id`, `span`, optionally `paragraph_ref`);
     `documents` maps document id → {title, class, properties}.
@@ -328,11 +384,18 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
                 out += [_sentence(c, ev_by_claim, cites), ""]
         if not concl:
             out += ["(No conclusion was drawn.)", ""]
+        # A reservation the review did not tie to a part is about the answer
+        # as a whole, so it sits with the conclusion the whole answer draws.
+        for r in reservations(answer, None):
+            out += [r, ""]
 
         analysis = [c for c in claims if c.get("section") == "analysis"]
         indices = sorted({int(c["part_index"]) for c in analysis
                           if c.get("part_index") is not None}
                          | {int(p["index"]) for p in parts if "index" in p})
+        # What has a place to print: every rendered part, plus `None`, which
+        # prints with the conclusion above.
+        printed: set[int | None] = {None, *indices}
         for idx in indices:
             part = next((p for p in parts if p.get("index") == idx), {})
             label = part.get("label") or next(
@@ -350,11 +413,27 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
                 out += [p, ""]
             if not paras:
                 out += ["(No analysis for this part.)", ""]
+            # Under the part it bears on, where a reader deciding whether to
+            # rely on this part will meet it, rather than in a footnote at the
+            # end that the reader reaches after deciding.
+            for r in reservations(answer, idx):
+                out += [r, ""]
         loose = sorted([c for c in analysis if c.get("part_index") is None], key=_sort_key)
         if loose:
             out += ["## Analysis", ""]
             for p in _paragraphs(loose, ev_by_claim, cites):
                 out += [p, ""]
+        # A reservation naming a part this answer never renders. The index is
+        # clamped to the decomposition where it is read, so this should be
+        # empty — but "should be" is not a guarantee, and the one thing a
+        # reservation must never do is go unprinted. An answer whose parts were
+        # recorded nowhere would otherwise swallow it silently.
+        for idx in sorted({n.get("part") if isinstance(n.get("part"), int) else None
+                           for n in (answer.get("open_notes") or [])
+                           if isinstance(n, dict) and n.get("caveat")}
+                          - printed):
+            for r in reservations(answer, idx):
+                out += [r, ""]
         # Authority-section claims are prose too: what a source is and holds,
         # kept beside the bibliography so the reader sees both.
         auth_claims = sorted([c for c in claims if c.get("section") == "authority"],
@@ -369,6 +448,13 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
                 out += [_test_block(c, ev_by_claim, cites), ""]
             else:
                 out += [_sentence(c, ev_by_claim, cites), ""]
+        # An answer with no structure has no part to sit a reservation under,
+        # so every one of them prints here, together, before the sources. The
+        # structured branch places each under its part and would otherwise
+        # simply drop these: a reservation nobody reads is worse than none,
+        # because the run recorded that the reader had been warned.
+        for r in all_reservations(answer):
+            out += [r, ""]
         out += ["## Authorities", ""]
 
     auth = _authorities(claims, evidence, documents, cites)
@@ -474,6 +560,7 @@ async def assemble(session: Any, answer_id: Any,
     return render_markdown(
         {"question": answer.question,
          "question_parts": answer.question_parts,
+         "open_notes": getattr(answer, "open_notes", None),
          "law_stated_as_at": as_at},
         [_claim_dict(c) for c in claim_rows],
         [{"claim_id": str(e.claim_id), "document_id": str(e.document_id),

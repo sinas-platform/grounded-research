@@ -265,6 +265,11 @@ class AnswerOut(OwnedOut):
     # [{index, label, text}]. Both null on answers from before they existed.
     law_stated_as_at: date | None = None
     question_parts: list[dict[str, Any]] | None = None
+    # What the completeness review and the drafter argued about and did not
+    # settle. The ones carrying `caveat` are already printed in the prose as
+    # reservations; the rest are here to be read by a consumer asking what was
+    # contested. Null on answers from before the loop existed.
+    open_notes: list[dict[str, Any]] | None = None
     # The assembled prose, set at publish; GET /answers/{id}/markdown
     # regenerates it from the rows on demand.
     rendered_markdown: str | None = None

@@ -53,7 +53,7 @@ async def _latest_run(session, question: str) -> dict | None:
                   AND NOT EXISTS (SELECT 1 FROM claim_evidence e
                                   WHERE e.claim_id = c.id)) AS unsupported
         FROM query_run q
-        WHERE q.status IN ('published', 'partial')
+        WHERE q.status IN ('published', 'published_contested', 'partial')
         ORDER BY q.created_at DESC"""))).mappings().all()
     best, score = None, 0.0
     for r in rows:
@@ -110,7 +110,8 @@ async def _run_gold(effort: str, limit: int | None = None) -> None:
         async with AsyncSessionLocal() as s2:
             done = (await s2.execute(text("""
                 SELECT count(*) FROM query_run WHERE id = ANY(CAST(:i AS uuid[]))
-                  AND status IN ('published','partial','failed','cancelled')"""),
+                  AND status IN ('published','published_contested','partial',
+                                 'failed','cancelled')"""),
                 {"i": ids})).scalar()
         print(f"  {done}/{len(ids)} settled", flush=True)
         if done >= len(ids):

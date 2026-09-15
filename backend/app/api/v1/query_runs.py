@@ -86,6 +86,11 @@ class QueryRunOut(OwnedOut):
     # the list read stays one query.
     law_stated_as_at: date | None = None
     question_parts: list[dict[str, Any]] | None = None
+    # Carried over the same way, and for a reader who has the run and not the
+    # answer: what the review and the drafter could not settle. A run that
+    # ends `published_contested` has at least one of these with `caveat` set,
+    # and that note is what the status is telling a human to go and read.
+    open_notes: list[dict[str, Any]] | None = None
     telemetry: dict[str, Any] = {}
     # wall-clock bounds of the run itself — the only reliable elapsed time for
     # outcomes that write no closing stage telemetry (e.g. partial)
@@ -223,10 +228,11 @@ async def get_query_run(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    """One run, with the two answer-level facts a downstream consumer reads
-    off the run: the decomposition the answer was written to, and the date
-    the law is stated as at. Both also sit on the answer row; they are here
-    because the run is what a caller holds."""
+    """One run, with the answer-level facts a downstream consumer reads off
+    the run: the decomposition the answer was written to, the date the law is
+    stated as at, and what the completeness review and the drafter left
+    unsettled. All three also sit on the answer row; they are here because the
+    run is what a caller holds."""
     run = await _visible_run_or_404(run_id, session, caller)
     out = QueryRunOut.model_validate(run)
     if run.answer_id is not None:
@@ -234,6 +240,7 @@ async def get_query_run(
         if answer is not None:
             out.law_stated_as_at = answer.law_stated_as_at
             out.question_parts = answer.question_parts
+            out.open_notes = answer.open_notes
     return out
 
 
@@ -282,7 +289,8 @@ async def cancel_query_run(
     where there is nothing left to stop.
     """
     run = await _visible_run_or_404(run_id, session, caller)
-    if run.status in ("published", "partial", "failed", "cancelled"):
+    if run.status in ("published", "published_contested", "partial",
+                      "failed", "cancelled"):
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"run is {run.status}; only an unfinished run can be cancelled",

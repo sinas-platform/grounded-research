@@ -153,6 +153,13 @@ class _Run:
 class _AnswerRow:
     law_stated_as_at = date(2024, 3, 1)
     question_parts = [{"index": 0, "label": "Whether it applies", "text": "..."}]
+    # What the completeness review and the drafter left unsettled. Carried onto
+    # the run for the same reason as the two above: the caller holds the run.
+    open_notes = [{"id": "obj-1", "source": "a.md", "part": 0,
+                   "importance": "essential", "caveat": True,
+                   "why_essential": "the first part turns on it",
+                   "asked": "cite it", "reason": "it cannot carry the point",
+                   "exchanges": 2, "state": "stalled"}]
 
 
 class _RunExec:

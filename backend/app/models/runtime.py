@@ -473,6 +473,17 @@ class Answer(Base, TimestampMixin, OwnedMixin):
     #: services/answer_render. Regenerable; null before publish and on
     #: answers from before it existed.
     rendered_markdown: Mapped[str | None] = mapped_column(Text)
+    #: Points the completeness review raised that the answer did not take up,
+    #: one entry each: what was asked, how important the review called it, the
+    #: drafter's reason for declining, and how the argument ended. Written at
+    #: publish from the run's objection ledger.
+    #:
+    #: Most are a record only. The ones carrying `caveat: true` are not: a
+    #: source the review called essential, justified, pressed, and could not
+    #: settle. Those are rendered into the answer itself, beside the part they
+    #: bear on, because a reader deciding whether to rely on that part needs
+    #: to know two readers disagreed about whether it is complete.
+    open_notes: Mapped[list | None] = mapped_column(JSONB)
 
 
 class AnswerClaim(Base, TimestampMixin):

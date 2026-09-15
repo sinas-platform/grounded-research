@@ -14,7 +14,7 @@ field paths are a CONTRACT:
     /change_note                  what differs in THIS version, or null
     /run_id                       unique per export unit; idempotency key
     /question                     plain text
-    /outcome/status               "published" | "partial" | ...
+    /outcome/status               "published" | "published_contested" | "partial" | ...
     /outcome/partial              {cause, note} or null
     /outcome/error                string or null — why a failed run failed
     /claims/N/{seq,text,type,rationale}

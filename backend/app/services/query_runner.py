@@ -43,7 +43,14 @@ from app.models import (
     ResultDocument,
 )
 from app.models.query import QueryRun
-from app.services import answer_render, answer_structure, claim_naming, obligations, supersession
+from app.services import (
+    answer_render,
+    answer_structure,
+    claim_naming,
+    objections,
+    obligations,
+    supersession,
+)
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -3125,6 +3132,7 @@ async def _record_gate_cycle(
     naming_mismatches: list[dict] | None = None,
     checks: dict | None = None,
     reread: dict | None = None,
+    objection_ledger: list[dict] | None = None,
     no_claims: bool = False,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
@@ -3209,6 +3217,13 @@ async def _record_gate_cycle(
         # answer-scoped readings of this cycle, and a flat key would be a
         # last-write sitting next to a history.
         "closing": closing or {},
+        # What was argued and how far each argument had got when this cycle
+        # ended: id, what was asked, how important the gate called it, the
+        # drafter's reason, every ruling. Per cycle rather than flat, because
+        # the whole value of the ledger is being able to see a point move —
+        # raised, refused, accepted — and a last-write would show only where
+        # it stopped.
+        "objections": objection_ledger or [],
         # The cycle that judged nothing because nothing was left to judge.
         # Written every time, false included: a missing key would say the run
         # predates the field, and an absent cycle would say the gate never
@@ -3642,19 +3657,22 @@ async def _gate_answer(
     question.
 
     Returns (publishable, missing, issues, correctness, points, cause).
-    `cause` is "coverage", "accounting" or "" — what held the answer back, so a
-    partial is named by the thing that caused it.
+    `cause` is "coverage", "holistic" or "" — what held the answer back, so a
+    partial is named by the thing that caused it. There is no `accounting`
+    cause: material the answer did not incorporate never names a partial.
     `publishable` and `correctness` are the hard gate; `issues` are
     best-effort remediation targets that must never block publication on
     their own; `points` are the things revision must be given passages for —
     one entry per part of the question the claims do not answer, then each
     stronger source the gate named.
 
-    Two things clear `publishable`: every part of the question covered, and no
-    source the review itself named left neither cited nor waived. The second is
-    `obligations.actionable`, not `obligations.unaccounted` — the difference is
-    a system waiver, which retires an obligation without accounting for it and
-    so can never be discharged by another cycle.
+    One thing clears `publishable`: every part of the question covered, with
+    the judge's own verdict behind it. A source the review named and the
+    answer did not use holds `publishable` no longer — it buys revision
+    cycles through `issues`, and what survives the cycles is a note on the
+    answer, or, for an `essential` request pressed to a standstill, a
+    reservation the reader sees and a contested outcome. `partial` keeps
+    meaning a part could not be answered.
 
     Everything the gate finds is returned. It used to leave some of it in a
     module-level dict, which a later edit deleted the declaration of — so
@@ -3758,6 +3776,29 @@ async def _gate_answer(
     # here. An empty list means the split could not be read twice, and the
     # prompt falls back to deriving it, which is the behaviour this replaces.
     fixed = await _question_parts(sinas, run_id, run_question)
+    # The other half of the conversation. Each of these is a request this
+    # review made and the drafter declined WITH A REASON, and the review has
+    # not yet said anything back. Showing them here is what makes the loop
+    # two-way: the drafter's reasoning can retire a request instead of only
+    # obeying it, and a request the review cannot answer is one it should not
+    # be making a third time.
+    open_refusals = await objections.outstanding(run_id)
+    refusals_block = ("\n\nREQUESTS YOU MADE THAT THE DRAFTER DECLINED, EACH "
+                      "WITH ITS REASON:\n" + "\n".join(
+                          f"  [{o['id']}] you asked: {o.get('asked') or ''}\n"
+                          f"       the drafter declined: "
+                          f"{(o.get('reply') or {}).get('reason') or ''}"
+                          for o in open_refusals)
+                      + "\nRule on each one in objection_rulings. ACCEPT means "
+                      "the reason settles it: you will not raise that point "
+                      "again and the answer is not the poorer for it. RESTATE "
+                      "means you press it, and pressing costs something you "
+                      "have NOT said before — a different document, evidence "
+                      "the drafter has not seen, or a narrower ask. A "
+                      "restatement that repeats what you already said is read "
+                      "as an acceptance, and so is saying nothing about a "
+                      "request listed here."
+                      ) if open_refusals else ""
     reply = await sinas.invoke(
         "sgr/answer-gate-agent",
         "QUESTION:\n" + run_question
@@ -3791,7 +3832,16 @@ async def _gate_answer(
         'holding the answer lacks. Name such documents in unused_sources — '
         'coverage alone does not make an unused, plainly better document '
         'acceptable to leave unread.'
-        '\n\nReply ONLY JSON: {"publishable": true|false,'
+        '\n\nSay how much each one matters, because the two cases are not the '
+        'same and the answer treats them differently. "essential" means a '
+        'part of the question is NOT PROPERLY ANSWERED without this source, '
+        'and you must say in one line which part and why — an essential mark '
+        'with no such line is read as supporting, so do not mark one you '
+        'cannot justify. "supporting" means relevant: the answer would be '
+        'better with it and is not wrong without it. Most named sources are '
+        'supporting.'
+        + refusals_block
+        + '\n\nReply ONLY JSON: {"publishable": true|false,'
         + (' "parts": [{"n": <the number of the part above>, "covered": '
            'true|false, "covered_by": [<the sequence numbers of the claims '
            'that answer this part — name every one, and name none if the part '
@@ -3811,7 +3861,16 @@ async def _gate_answer(
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
         ' "concludes_at": <the sequence number of the claim that draws that overall conclusion, or null if no claim does. A claim that states the answer to the question, not one that reports what a single source says.>,'
-        ' "unused_sources": ["<filename>: <the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>", ...]}',
+        ' "unused_sources": [{"filename": "<name from the working set>",'
+        ' "point": "<the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>",'
+        ' "importance": "essential|supporting",'
+        ' "essential_because": "<REQUIRED when essential: which part of the question is not properly answered without this source, in one line. Leave empty for supporting.>",'
+        ' "part": <the number of the part it bears on, or null>}, ...]'
+        + (', "objection_rulings": [{"id": "<one of the ids listed above>",'
+           ' "ruling": "accept|restate",'
+           ' "new": "<for a restatement only: what you are adding that you have'
+           ' not already said>"}]' if open_refusals else "")
+        + '}',
     )
     # Only the parse is guarded. A wide try around the whole body turns a
     # fault in this function into "the gate had no objection" — which is what
@@ -3865,6 +3924,20 @@ async def _gate_answer(
                 "never established",
             ) from exc2
 
+    # Which cycle this is, read rather than counted: `_record_gate_cycle`
+    # derives the same number from the same telemetry at the end of this
+    # function, and neither call writes, so the argument's history is stamped
+    # with the cycle it actually happened in.
+    cycle_no = int((await _next_cycle_key(run_id, "validate", "gate"))
+                   .removeprefix("gate_"))
+    # The gate's half of the conversation, applied before anything is fed.
+    # A refusal it accepts is settled here, so the same document cannot be
+    # named again three lines further down; a restatement that carries
+    # nothing new is an acceptance; and a request it simply did not answer is
+    # an acceptance too, because reading silence as "still objecting" would
+    # let it press every point forever by answering none of them.
+    await objections.rule_all(run_id, data.get("objection_rulings") or [],
+                              cycle=cycle_no)
     # Coverage is judged per part. One holistic verdict let an answer
     # addressing two of a question's three parts publish, and named one
     # gap at a time when it failed — so revision fixed them one cycle
@@ -3993,12 +4066,25 @@ async def _gate_answer(
     # run's obligation ledger; what is fed below comes from the ledger's
     # unmet entries — persisting across rounds, reopening if the citing
     # claim dies — not from this round's gate reply alone.
+    #
+    # And every request carries an importance the gate had to choose between,
+    # because "you should have used this" covers two different findings: a
+    # part that is not properly answered without the source, and a source that
+    # would make a sound answer better. Only the first may ever reach the
+    # run's verdict, and only when the gate could say in one line which part.
+    named = _unused_sources(data, len(fixed))
     fresh: dict[str, str] = {}
-    for src in (data.get("unused_sources") or []):
-        fn, _, why = str(src).partition(":")
-        if fn.strip():
-            fresh[fn.strip()] = (why.strip() or str(src))[:400]
-            await obligations.record(run_id, fn.strip(), why.strip() or str(src))
+    for src in named:
+        fresh[src["filename"]] = src["point"]
+        await obligations.record(run_id, src["filename"], src["point"])
+    # A request the drafter refused and this gate accepted is over. It is not
+    # re-raised and its document is not fed again — enforced here rather than
+    # left to the prompt, because a gate that forgets is exactly the failure
+    # the ledger exists to stop.
+    settled = await objections.settled_subjects(run_id)
+    # A source that reached the answer settles its own argument, whatever
+    # either side last said about it.
+    await objections.resolve(run_id, sorted(cited))
     # What is owed this round is the ledger's to decide, this round's findings
     # included. Asking what was owed and then appending whatever had not come
     # back read an absence as "no opinion", and an entry is withheld for three
@@ -4006,7 +4092,8 @@ async def _gate_answer(
     # no opinion; the other two are decisions, and adding over them put retired
     # and satisfied obligations back in front of the reviser at a count the cap
     # could not act on.
-    owed = await obligations.to_feed(run_id, answer_id, fresh)
+    owed = [u for u in await obligations.to_feed(run_id, answer_id, fresh)
+            if u["doc"] not in settled]
     capped = [u for u in owed if u["fed"] >= obligations.MAX_FEEDS]
     for u in capped:
         await obligations.waive(
@@ -4016,13 +4103,32 @@ async def _gate_answer(
         await _tele(run_id, "validate",
                     obligations_system_waived=[u["doc"] for u in capped])
     feed = [u for u in owed if u["fed"] < obligations.MAX_FEEDS][:5]
+    # Each fed source is an objection with an id, so the drafter can answer
+    # THIS request rather than write its reasoning into a dropped claim where
+    # nothing reads it. A source the ledger refuses to re-raise drops out of
+    # the feed here: `raise_objection` returns None for a settled point.
+    by_name = {s["filename"]: s for s in named}
+    ids: dict[str, str] = {}
+    for u in list(feed):
+        src = by_name.get(u["doc"]) or {}
+        oid = await objections.raise_objection(
+            run_id, kind="source", subject=u["doc"], asked=u["note"],
+            importance=src.get("importance"),
+            why_essential=src.get("essential_because"),
+            part=src.get("part"), cycle=cycle_no)
+        if oid is None:
+            feed.remove(u)
+            continue
+        ids[u["doc"]] = oid
     stronger = [f"{u['note']} [obligated document: {u['doc']}]" for u in feed]
     for u in feed:
         issues.append(
             f"Owed source unused: {u['doc']} — {u['note']} Cite it for the "
             "point it carries, or waive it with a rationale you can only "
-            "give after reading its passages. An obligation neither cited "
-            "nor waived returns every round."
+            "give after reading its passages, or REFUSE it: reply with "
+            f'{{"objection": "{ids[u["doc"]]}", "rationale": "<why this '
+            'source cannot carry the point asked of it>"}, which is an '
+            "answer and will be ruled on rather than ignored."
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
 
@@ -4042,13 +4148,22 @@ async def _gate_answer(
     # uncovered part in an earlier cycle before converging — but it is the
     # verdict each run published on.
     #
-    # The tie is answer-scoped because it cannot honestly be finer: the gate
-    # names sources without saying which part each bears on.
+    # That tie no longer decides the run's verdict, and the reason is the
+    # measured failure this loop was built for: a run whose every part was
+    # covered, with nothing missing, unsupported or unresponsive, ended
+    # `partial` because one policy source it had reasoned its way out of
+    # citing was fed three times and never incorporated. "Partial" told the
+    # reader the question could not be answered. It could, and was.
+    #
+    # So an unincorporated source is a note, with one exception the gate has
+    # to earn: an `essential` request it justified, pressed, and could not
+    # settle. That is two readers disagreeing about completeness, and it
+    # surfaces as a reservation on the answer and a distinct outcome — never
+    # as `partial`, which keeps meaning a part could not be answered.
     unaccounted = await obligations.unaccounted(run_id, answer_id)
-    # What the gate blocks on is narrower than what it reports. See
-    # `obligations.actionable`: a system-waived source stays unaccounted
-    # by design, and gating on it would make the run unpublishable rather
-    # than late.
+    # Still read, still fed, still reported. What changed is that it drives
+    # cycles rather than verdicts: while a cycle is left and a source is owed,
+    # the run spends it; when the cycles run out, the answer publishes.
     blocking = await obligations.actionable(run_id, answer_id)
     if unaccounted:
         # Ahead of the per-source lines, because those read as "a better
@@ -4106,6 +4221,13 @@ async def _gate_answer(
         # otherwise, and telling an absent limb from an unchecked one is half
         # of why this is worth having.
         reread={"looked": reread_looked, "found": reread_found},
+        # The argument as it stands at this cycle: every request, what it
+        # asked, the importance the gate had to justify, the drafter's reason,
+        # the gate's ruling and the cycle each happened in. Recorded per cycle
+        # rather than once at the end, because the interesting question about a
+        # two-way loop is when a point turned, and an end-state snapshot cannot
+        # answer it.
+        objection_ledger=await objections.record(run_id),
         closing=_closing_record(data, claims_by_seq, parts))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
@@ -4131,33 +4253,42 @@ async def _gate_answer(
     # every uncovered part is a gap the answer must close, not just one
     if uncovered:
         missing = "; ".join(uncovered)
-    elif blocking:
-        # Named in `missing` and not only in `issues`, because `missing` is what
-        # the remediation message leads with, what `_gate_key` dedupes on, and
-        # what the partial note explains the run by. An answer held for a debt
-        # whose `missing` was empty would be held for a reason it never stated.
-        missing = (
-            f"{len(blocking)} source(s) this review named as bearing on the "
-            "question are neither cited nor waived: " + ", ".join(blocking[:5])
-        )
     else:
-        missing = str(data.get("missing") or "")
-    publishable = (
-        bool(data.get("publishable")) and not uncovered and not blocking
-    )
-    # Which of the three held it, decided here because here is where all three
-    # are known. The caller would have to infer it from `missing`'s wording, and
-    # a partial labelled `coverage` for a run whose every part was covered is
-    # the mislabelling `consistency` was split out to stop.
+        # The judge's own words first, the debt after it — not instead of it.
+        # An owed source is still named here, because `missing` is what the
+        # remediation message leads with and what `_gate_key` dedupes on, and a
+        # cycle spent on an owed source has to say which one.
+        #
+        # What it may not do is speak FOR the judge. It used to replace the
+        # judge's `missing` outright, so a run the judge rejected as a whole
+        # reached the partial note with the debt as its only stated reason, and
+        # the note opened by telling the reader the analysis could not cover
+        # the material — on a run whose every part was covered. The debt never
+        # was the reason; it is a fact beside it.
+        missing = "; ".join(x for x in (
+            str(data.get("missing") or ""),
+            (f"{len(blocking)} source(s) this review named as bearing on the "
+             "question are neither cited nor waived: "
+             + ", ".join(blocking[:5])) if blocking else "",
+        ) if x)
+    # An owed source is not a reason to call the question unanswered. It buys
+    # revision cycles through `issues` — the caller publishes only once the
+    # cycles are spent — and what it cannot do any more is turn a fully
+    # covered answer into a `partial` whose note tells the reader the
+    # analysis could not cover the question. That note was false on every run
+    # it was written for.
+    publishable = bool(data.get("publishable")) and not uncovered
+    # Which of the two held it, decided here because here is where both are
+    # known. `accounting` is gone with the verdict it named: nothing that only
+    # concerns an unincorporated source reaches a partial any more.
     #
     # `holistic` is the judge rejecting the answer as a whole: it said
-    # publishable false while marking every part covered and naming no unmet
-    # source, so there is no part to point at. Falling through to `coverage`
-    # there would report a coverage failure for a run with no uncovered part,
-    # which is the same defect one case further along.
+    # publishable false while marking every part covered, so there is no part
+    # to point at. Falling through to `coverage` there would report a coverage
+    # failure for a run with no uncovered part, which is the same defect one
+    # case further along.
     cause = (
         "coverage" if uncovered
-        else "accounting" if blocking
         else "holistic" if not bool(data.get("publishable"))
         else ""
     )
@@ -4165,6 +4296,48 @@ async def _gate_answer(
     # is given passages for a bounded number of points.
     return (publishable, missing, issues + correctness, correctness,
             uncovered + stronger, cause)
+
+
+def _unused_sources(data: dict, part_count: int = 0) -> list[dict]:
+    """The sources the gate named, with how much each matters. Pure.
+
+    Two shapes are read. The object form is what the gate is asked for now —
+    filename, the point, an importance and the line that earns it. The old
+    `"<filename>: <why>"` string is still read, as `supporting`: a verdict
+    written before importance existed named no essential source, and quietly
+    promoting one would put a request on the run's verdict that no gate ever
+    marked.
+
+    `essential` survives only with a reason. The check is the whole of what
+    the word means here — an importance nobody had to justify is not a
+    judgment, and this one can hold a reservation against a published answer.
+    """
+    out: list[dict] = []
+    for src in (data.get("unused_sources") or []):
+        if isinstance(src, dict):
+            fn = str(src.get("filename") or "").strip()
+            point = str(src.get("point") or "").strip()
+            raw_imp, why = src.get("importance"), src.get("essential_because")
+            part = src.get("part")
+        else:
+            fn, _, point = str(src).partition(":")
+            fn, point = fn.strip(), (point.strip() or str(src))
+            raw_imp, why, part = objections.SUPPORTING, "", None
+        if not fn:
+            continue
+        importance, why = objections.importance_of(raw_imp, why)
+        # The parts the gate is shown are numbered from 1; a claim's
+        # `part_index` counts from 0, and a note that lands on the wrong part
+        # is worse than one that lands on none. A number outside the
+        # decomposition names no part and becomes one: a reservation attached
+        # to a part that is never rendered would not be printed at all, which
+        # is the one thing a reservation must not do.
+        idx = (part - 1 if isinstance(part, int) and not isinstance(part, bool)
+               and 1 <= part <= part_count else None)
+        out.append({"filename": fn, "point": (point or fn)[:400],
+                    "importance": importance, "essential_because": why,
+                    "part": idx})
+    return out
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -4343,12 +4516,11 @@ async def _pre_publish_sweep(
                 "after removing claims the final review could not support, the "
                 "review rejected the answer as a whole without naming a part it "
                 "fails to address" + (f" — {missing}" if missing else ""))
-        if sweep_cause == "accounting":
-            raise PartialOutcome(
-                "accounting",
-                "after removing claims the final review could not support, a "
-                "source this review named as bearing on the question is neither "
-                "cited nor waived — " + (missing or " ".join(fb))[:600])
+        # There is no `accounting` branch here any more, and its absence is
+        # the point: after the drop, a source the review named and the answer
+        # did not use cannot turn this into a partial either. The only two
+        # partials left on this path are the two that mean the answer is not
+        # there — a part gone uncovered, or the review rejecting the whole.
         raise PartialOutcome(
             "coverage",
             "after removing claims the final review could not support, the "
@@ -4515,13 +4687,86 @@ def _last_mention_losses(deleted: list[dict], live: set[str]) -> list[dict]:
     return [{"identifier": t, "sequences": _seqs(v)} for t, v in sorted(by.items())]
 
 
+async def _open_notes(raw: list[dict]) -> list[dict]:
+    """The objection ledger as notes an answer can carry.
+
+    One thing happens here that the ledger cannot do for itself: the source is
+    resolved from the filename it was argued about to the citation a reader is
+    given. A reservation printed in the answer must name the source the way
+    every other sentence in the answer names one — by what it is, never by a
+    storage name — and the renderer stays pure because the lookup happens
+    here, once, at publish.
+
+    A filename that resolves to nothing keeps the note and loses the name:
+    what was asked and why it was declined is the substance, and a note that
+    vanished because a document row moved would hide the disagreement rather
+    than the filename.
+    """
+    names = sorted({str(n.get("source")) for n in raw if n.get("source")})
+    if not names:
+        return list(raw)
+    docs: dict[str, str] = {}
+    async with AsyncSessionLocal() as session:
+        from app.models import DocumentClassProperty, PropertyValue
+        from app.services.document_identity import document_title_subquery
+
+        rows = (await session.execute(
+            select(Document.id, Document.filename, DocumentClass.name,
+                   document_title_subquery())
+            .outerjoin(DocumentClass,
+                       DocumentClass.id == Document.document_class_id)
+            .where(Document.filename.in_(names))
+        )).all()
+        by_id = {did: {"title": title, "class": cls, "properties": {}}
+                 for did, _fn, cls, title in rows}
+        if by_id:
+            for did, prop, value in (await session.execute(
+                select(PropertyValue.document_id, DocumentClassProperty.name,
+                       PropertyValue.value)
+                .join(DocumentClassProperty,
+                      DocumentClassProperty.id == PropertyValue.property_id)
+                .where(PropertyValue.document_id.in_(list(by_id)))
+            )).all():
+                entry = by_id.get(did)
+                if entry is not None and value is not None:
+                    entry["properties"][str(prop)] = value
+        for did, fn, _cls, _title in rows:
+            docs[fn] = answer_render.citation(by_id.get(did))
+    return [{**n, "source_citation": docs.get(str(n.get("source")) or "")}
+            for n in raw]
+
+
+async def _final_status(run_id: uuid.UUID) -> str:
+    """`published`, or `published_contested` when a disagreement survived.
+
+    A run is contested when the review called a source essential, said in one
+    line which part is not properly answered without it, pressed the point,
+    and the drafter still would not use it. That is not a failure — the answer
+    is written and every part is covered — and it is not silence either: a
+    human should read the reservation and decide. So it gets a status of its
+    own, between `published` and `partial`, and `partial` keeps meaning what
+    it has always meant.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        v = ((run.telemetry if run is not None else None) or {}).get("validate") or {}
+    return "published_contested" if (v.get("contested") or []) else "published"
+
+
 async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) -> None:
     from app.models import Answer
 
+    # What was argued and did not settle, written onto the answer before the
+    # prose is assembled so the reservations are IN the published text rather
+    # than beside it. A reader who has only the answer must still learn that
+    # the review thought a part incomplete.
+    notes = await _open_notes(await objections.notes(run_id))
+    contested = [n for n in notes if n.get("caveat")]
     async with AsyncSessionLocal() as session:
         row = await session.get(Answer, answer_id)
         row.status = "published"
         row.published_at = _now()
+        row.open_notes = notes or None
         await _compact_claim_sequences(session, answer_id)
         await session.commit()
         # The prose, written once the claim numbering is final. Stored rather
@@ -4570,6 +4815,18 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
     await _tele(run_id, "validate", published=_iso(),
                 lost_last_citation=_last_citation_losses(deleted, live_docs),
                 lost_last_mention=_last_mention_losses(deleted, live_ids),
+                open_notes=notes,
+                # The whole argument in one place, flat, at the one moment it
+                # is final. The per-cycle copies show how it got here; a reader
+                # asking what was argued should not have to find the last gate
+                # cycle to learn how it ended.
+                objections=await objections.record(run_id),
+                # The one thing in the ledger that changes the run's outcome.
+                # Written every publish, empty list included: an empty list
+                # says nothing was left contested, a missing key would say the
+                # run predates the loop, and `_final_status` reads it to decide
+                # between `published` and `published_contested`.
+                contested=contested,
                 **tele)
 
 
@@ -4635,6 +4892,7 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         return None
 
     drop_reasons: dict[int, str] = {}
+    drop_objections: dict[int, str] = {}
     revise = []
     for c in (data.get("revise") or []):
         if not isinstance(c, dict):
@@ -4699,6 +4957,15 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             (drop if len(why) >= 20 else drop_unexplained).append(seq)
             if len(why) >= 20:
                 drop_reasons[seq] = why[:400]
+                # The measured case, given somewhere to go. A claim dropped
+                # BECAUSE the source the gate demanded cannot carry the point
+                # is a refusal of that request, and the reason for the drop is
+                # the reason for the refusal. Naming the request is what turns
+                # the two into one move instead of a deletion the gate reads
+                # as silence.
+                oid = str(x.get("objection") or "").strip()
+                if oid:
+                    drop_objections[seq] = oid
         elif str(x).lstrip("-").isdigit():
             # The old bare-integer shape. Read as a drop the reviser declined
             # to explain rather than rejected outright, so the refusal is
@@ -4717,7 +4984,27 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             continue
         why = str(c.get("rationale") or "").strip()
         if len(why) >= 20 and str(c.get("seq", "")).lstrip("-").isdigit():
-            keep.append({"seq": int(c["seq"]), "rationale": why})
+            keep.append({"seq": int(c["seq"]), "rationale": why,
+                         # A keep can also be an answer to a request the gate
+                         # made. When it names one, the reason travels to the
+                         # objection ledger and the gate has to rule on it.
+                         "objection": str(c.get("objection") or "").strip()})
+
+    # A reasoned refusal: the gate asked for something and the drafter will
+    # not do it, and says why. Before this existed the reasoning had nowhere
+    # to go — one measured run wrote it into a dropped claim's rationale, from
+    # where nothing read it, and the gate fed the same document back twice.
+    # It is not a claim operation, so it carries no sequence and touches no
+    # row; it is a reply, and the only thing it needs is the id of what it
+    # answers and a reason worth ruling on.
+    refuse = []
+    for r in (data.get("refuse") or []):
+        if not isinstance(r, dict):
+            continue
+        oid = str(r.get("objection") or r.get("id") or "").strip()
+        why = str(r.get("rationale") or "").strip()
+        if oid and len(why) >= 20:
+            refuse.append({"objection": oid, "rationale": why[:400]})
 
     waives = []
     for w in (data.get("waive") or []):
@@ -4725,11 +5012,13 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
                 and len(str(w.get("rationale") or "").strip()) >= 20:
             waives.append({"doc": str(w["doc"]).strip(),
                            "rationale": str(w["rationale"]).strip()})
-    if not (revise or add or drop or keep or waives or drop_unexplained):
+    if not (revise or add or drop or keep or waives or refuse
+            or drop_unexplained):
         return None
     return {"revise": revise, "add": add, "drop": drop, "keep": keep,
-            "drop_reasons": drop_reasons, "drop_unexplained": drop_unexplained,
-            "waive": waives}
+            "drop_reasons": drop_reasons, "drop_objections": drop_objections,
+            "drop_unexplained": drop_unexplained,
+            "waive": waives, "refuse": refuse}
 
 
 def _cycle_key(existing: dict, prefix: str) -> str:
@@ -4999,6 +5288,35 @@ def _apply_source_facts(row: AnswerClaim, evidence: Any,
                          else None)
 
 
+async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
+    """The patch's replies to the gate's requests, into the objection ledger.
+
+    Three shapes, one meaning. An explicit `refuse` entry is a reply and
+    nothing else. A `drop` or a `keep` that names an objection is a reply
+    made by doing something to a claim — the claim citing the demanded source
+    is removed, or the claim the gate wanted re-sourced stays — and its
+    rationale is the reason. Recording all three here keeps the ledger's view
+    of "the drafter answered" from depending on which disposition the reviser
+    happened to reach for.
+
+    Returns how many replies were recorded, for the cycle's telemetry.
+    """
+    seen: set[str] = set()
+    cycle = int((await _next_cycle_key(run_id, "validate", "gate"))
+                .removeprefix("gate_")) - 1
+    for oid, why in (
+        [(r["objection"], r["rationale"]) for r in (patch.get("refuse") or [])]
+        + [(oid, (patch.get("drop_reasons") or {}).get(seq, ""))
+           for seq, oid in (patch.get("drop_objections") or {}).items()]
+        + [(k["objection"], k["rationale"]) for k in (patch.get("keep") or [])
+           if k.get("objection")]
+    ):
+        if oid and oid not in seen:
+            seen.add(oid)
+            await objections.refused(run_id, oid, why, cycle=cycle)
+    return len(seen)
+
+
 async def _revise_answer(
     sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID, question: str,
     feedback: list[str], extra_points: list[str] | None = None,
@@ -5200,6 +5518,21 @@ async def _revise_answer(
         'or list it in "waive" with a rationale you could only give after '
         "reading its passages. An obligation neither cited nor waived comes "
         "back every round.\n\n"
+        # The other half of the loop. Obeying and ignoring were the only two
+        # things the reviser could do, so reasoning that should have retired a
+        # request instead went into a dropped claim and the same document came
+        # back twice more.
+        "THERE IS A THIRD ANSWER, AND IT IS A REAL ONE. A feedback line that "
+        'carries an objection id can be REFUSED: put {"objection": "<the id '
+        'from the line>", "rationale": "<why>"} in "refuse". A refusal is a '
+        "reply, not a silence: the review reads your reason next cycle and "
+        "must either accept it — in which case the point is settled and never "
+        "comes back — or press it with something it has not said before. "
+        "Refuse when the source cannot carry what is asked of it and say why "
+        "in terms of what the source IS and what the point NEEDS, not in "
+        "terms of effort. If you are dropping or keeping a claim BECAUSE of "
+        'such a request, put the same id on that "drop" or "keep" entry '
+        "instead and its rationale answers the request.\n\n"
         "Give a RATIONALE with every claim you revise, add or keep: ONE "
         "short sentence, at most 20 words — which part of the question it "
         "answers and why this source settles it. Never restate the claim. "
@@ -5225,9 +5558,14 @@ async def _revise_answer(
         '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>, '
         '"locator": "<or null>"}]}], '
         '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
-        'and why no passage available can carry it>"}], '
+        'and why no passage available can carry it>", '
+        '"objection": "<the id of the request this answers, or omit>"}], '
         '"keep": [{"seq": <int>, "rationale": "<why the current citation '
-        'stands despite the feedback>"}], '
+        'stands despite the feedback>", '
+        '"objection": "<the id of the request this answers, or omit>"}], '
+        '"refuse": [{"objection": "<the id from a feedback line>", '
+        '"rationale": "<why this source cannot carry the point asked of '
+        'it>"}], '
         '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
         'its passages, this OWED document does not carry any point this '
         'answer needs>"}], '
@@ -5257,12 +5595,20 @@ async def _revise_answer(
     )
 
     patch = _parse_patch(reply, allow_abstention=last_attempt)
+    refusals = 0
     if patch:
         # A waive is a discharge with a recorded reason, not a dropped
         # message: it is honored even when the rest of the patch is empty.
         for w in patch.get("waive") or []:
             await obligations.waive(run_id, w["doc"], w["rationale"])
-    if not patch or not (patch["revise"] or patch["add"] or patch["drop"]):
+        # A refusal is honored on the same terms and for the same reason: it
+        # is a REPLY, so it must survive a patch that changes no claim. The
+        # reply that mattered on the measured run was exactly that — a reason
+        # why a source could not carry the point — and the shape that lost it
+        # was "nothing was applied, so nothing is recorded".
+        refusals = await _record_refusals(run_id, patch)
+    if not patch or not (patch["revise"] or patch["add"] or patch["drop"]
+                         or patch["keep"]):
         # Numbered like any other cycle, though it changed nothing. The reviser
         # replied, so this IS a cycle, and `_cap_refusals_last_cycle` reads the
         # latest one as "your previous reply". Leaving it unnumbered left an
@@ -5271,8 +5617,13 @@ async def _revise_answer(
         # invitation to drop a sound claim to make room for nothing.
         #
         # Counts are all zero because nothing was applied. `kept_with_reason`
-        # is not recorded here even when the patch carried keeps: the early
-        # return above means they were not written either.
+        # is zero here for the same reason and now means it: a patch carrying
+        # keeps no longer reaches this branch. It used to — keeps were absent
+        # from the condition above, so a reply whose only content was "this
+        # citation stands, and here is why" was parsed, counted nowhere and
+        # discarded, which is why `kept_with_reason` read 0 on every round of
+        # every run. The one disposition built for the reviser to answer back
+        # with was the one the early return threw away.
         #
         # Refused drops are the exception, and they have to be. A reply whose
         # only content is drops with no reason lands here rather than below,
@@ -5287,12 +5638,18 @@ async def _revise_answer(
                 "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
                 "add_dropped_at_cap": 0, "untouched": len(by_claim),
                 "feedback_items": len(feedback), "yielded_no_change": True,
+                "refusals": refusals,
                 "dropped_unexplained": (patch or {}).get("drop_unexplained")
                 or []}})
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}
     touched = 0
+    # Keeps APPLIED, not keeps proposed. A keep naming a sequence that is not
+    # in this answer changes nothing and is skipped below, and counting it
+    # would put the same defect back one layer down: a number that says the
+    # reviser answered when nothing recorded the answer.
+    kept = 0
     # Bound before the add block, which does not run when the patch adds
     # nothing; the telemetry below reads both either way.
     admitted: list[dict] = []
@@ -5383,6 +5740,13 @@ async def _revise_answer(
                 # text and spans untouched, so its verdicts still stand and
                 # it is not re-judged. Only the reasoning is recorded.
                 row.rationale = item["rationale"][:2000]
+                # Counted as work done, because it is. A keep is the reviser
+                # answering the feedback rather than obeying it, and a round
+                # that returns 0 is read by the caller as "revision produced
+                # nothing usable" — which would end the loop on the one reply
+                # that most needs the next cycle to read it.
+                touched += 1
+                kept += 1
         await session.commit()
 
     # `added` counts rows written, not rows asked for. It used to be
@@ -5402,7 +5766,7 @@ async def _revise_answer(
     await _tele(run_id, "validate", **{
         cycle: {
             "claims": len(by_claim), "revised": len(patch["revise"]),
-            "kept_with_reason": len(patch.get("keep") or []),
+            "kept_with_reason": kept,
             "abstentions": sum(1 for a in admitted
                                if a.get("type") == "abstention"),
             "dropped": len(patch["drop"]), "dropped_detail": dropped_here,
@@ -5411,6 +5775,11 @@ async def _revise_answer(
             # is suppressing the disposition rather than documenting it, and
             # that is the thing to know first.
             "dropped_unexplained": patch.get("drop_unexplained") or [],
+            # Replies to the gate's requests: refusals, plus the drops and
+            # keeps that named one. Beside the claim counts because they are
+            # the same reply — what the reviser did AND what it said about
+            # what it was asked to do.
+            "refusals": refusals,
             "added": len(admitted),
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,
@@ -5684,16 +6053,14 @@ async def _stage_validate_publish(
                             last_attempt=True)
                         return await _stage_validate_publish(run_id, sinas, 0)
                     if not ok:
-                        # Named by what held it. `accounting` is not a coverage
-                        # gap: every part was covered and a named source was
-                        # left neither cited nor waived, and calling that
-                        # "coverage" tells the reader the sources were silent
-                        # on something they were not silent on.
-                        if gate_cause == "accounting":
-                            raise PartialOutcome(
-                                "accounting",
-                                "the answer does not account for every source this "
-                                "review named as bearing on the question — " + missing)
+                        # `accounting` was a cause here and is gone. A named
+                        # source the answer did not incorporate cannot make a
+                        # run partial any more: `partial` says a part could not
+                        # be answered, and that was false on every run this
+                        # branch fired for. Unincorporated material is a note
+                        # on the answer and a line in the objection ledger; an
+                        # essential request that the review pressed and could
+                        # not settle is a reservation the reader sees.
                         if gate_cause == "holistic":
                             raise PartialOutcome(
                                 "holistic",
@@ -5812,11 +6179,6 @@ async def _stage_validate_publish(
                                  points or ([missing] if missing else []),
                                  last_attempt=True)
             return await _stage_validate_publish(run_id, sinas, 0)
-        if not ok and gate_cause == "accounting":
-            raise PartialOutcome(
-                "accounting",
-                "validation exhausted with a source this review named as bearing "
-                "on the question neither cited nor waived — " + missing)
         if not ok and gate_cause == "holistic":
             raise PartialOutcome(
                 "holistic",
@@ -6103,8 +6465,13 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
         await _stage_synthesize(run_id, sinas)
         await _check_cancel(run_id)
         await _stage_validate_publish(run_id, sinas)
-        await _mark(run_id, status="published", completed_at=_now())
-        _log.info("query run %s published", run_id)
+        # Not always `published`. A run whose review pressed an essential
+        # source the drafter refused ends `published_contested`: the answer is
+        # there, complete and readable, with a reservation naming what two
+        # readers disagreed about. See `_final_status`.
+        status = await _final_status(run_id)
+        await _mark(run_id, status=status, completed_at=_now())
+        _log.info("query run %s %s", run_id, status)
     except CancelledOutcome as c:
         _log.info("query run %s cancelled", run_id)
         await _mark_cancelled(run_id, c)

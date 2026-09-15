@@ -1,0 +1,223 @@
+{
+ "question": "Does legal professional privilege in EU competition law cover advice from a company's own in-house lawyers? How have the courts justified where the line falls, and what does that mean in practice during an inspection?",
+ "question_parts": [
+  "Does legal professional privilege in EU competition law cover advice from a company's own in-house lawyers?",
+  "How have the courts justified where the line falls?",
+  "What does that mean in practice during an inspection?"
+ ],
+ "criteria": {
+  "conclusion_first": {
+   "score": 1,
+   "reason": "Claim 1 gives only the AM&S rule; the full synthesis answering all three parts appears only in claim 11 near the end."
+  },
+  "parts_answered": {
+   "score": 2,
+   "reason": "Part 1 covered by claims 1,4,5,11; part 2 by claims 2,3,4; part 3 by claims 9,10,13."
+  },
+  "tests_as_conditions": {
+   "score": 0,
+   "reason": "The AM&S two-condition test (defence purpose + independent lawyer) in claim 1 is stated in prose, not as an ordered, labelled cumulative list."
+  },
+  "authorities_labelled": {
+   "score": 2,
+   "reason": "Commentary is labelled as such in claims 4 and 8, and no rule rests on commentary alone since the underlying cases are also cited."
+  },
+  "citations_complete": {
+   "score": 0,
+   "reason": "Multiple authorities are cited only by filename (e.g. 120985.md, 129913.md, 65144.md, 65468.md) with no dates, ECLI or paragraph numbers anywhere."
+  },
+  "no_duplicate_authorities": {
+   "score": 1,
+   "reason": "61979CJ0155.md is cited four times (claims 1,2,3,11) for closely related propositions, though not exact duplicates."
+  },
+  "no_off_topic": {
+   "score": 1,
+   "reason": "Claims 9 and 10 discuss general inspection notification/judicial review mechanics rather than privilege itself, only loosely tied to the question."
+  },
+  "no_contradictions": {
+   "score": 2,
+   "reason": "Claim 12's broader Orde van Vlaamse Balies holding is expressly reconciled with AM&S's independence requirement, avoiding contradiction with claims 1-11."
+  },
+  "currency_flagged": {
+   "score": 0,
+   "reason": "No 'as at' date is given and the later Orde van Vlaamse Balies development (claim 12) is not flagged as changing the currency of AM&S/Akzo Nobel doctrine."
+  }
+ },
+ "parts_answered": [
+  {
+   "part": "Does legal professional privilege in EU competition law cover advice from a company's own in-house lawyers?",
+   "score": 2,
+   "reason": "Claims 1, 4, 5 and 11 directly and substantively answer that in-house advice is not covered."
+  },
+  {
+   "part": "How have the courts justified where the line falls?",
+   "score": 2,
+   "reason": "Claims 2, 3 and 4 substantively explain the independence/administration-of-justice rationale from AM&S and Akzo Nobel."
+  },
+  {
+   "part": "What does that mean in practice during an inspection?",
+   "score": 2,
+   "reason": "Claims 9, 10, 11 and 13 substantively address notification, sealed-envelope procedure and judicial review during inspections."
+  }
+ ],
+ "prechecks": {
+  "citations": {
+   "claims": 13,
+   "filename_citations": [
+    "120985.md",
+    "129913.md",
+    "45408-the-eu-court-of-justice-holds-that-in-house-lawyers-are-not-protected-by-legal-p.md",
+    "61979CJ0155.md",
+    "62003TJ0125.md",
+    "62007CJ0550.md",
+    "62018CJ0403.md",
+    "65144.md",
+    "65468.md",
+    "competition-inspections-25-jurisdictions--16_netherlands.md",
+    "competition-inspections-25-jurisdictions--7_european_union.md",
+    "eu-antitrust-enforcement--14_xiii_legal_professional_privilege_in_eu_antitrust_enforcement_law_policy_and_procedure.md",
+    "inspections-eu-law-2nd--3_chapter_1_-_inspections_upon_decision_regulation_1_2003_article_20_4.md"
+   ],
+   "with_name_and_number": 7,
+   "with_date": 0,
+   "with_year_only": 0,
+   "with_ecli": 0,
+   "with_paragraph": 0,
+   "cap": 1,
+   "per_claim": [
+    {
+     "claim": 1,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 2,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 3,
+     "name": true,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 4,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 5,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 6,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 7,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 8,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 9,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 10,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 11,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 12,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 13,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    }
+   ]
+  },
+  "duplicates": {
+   "near_duplicate_pairs": [],
+   "authorities_cited_thrice_or_more": {},
+   "cap": 2
+  },
+  "currency": {
+   "markers": [],
+   "dated": false
+  }
+ },
+ "total": 9,
+ "max": 18,
+ "verdict": "9/18 — Substantively covers all three parts and reconciles the case law, but is undermined by filename-only citations, a buried overall conclusion, an unstructured core test, and no dating or flagging of the more recent Orde van Vlaamse Balies development.",
+ "judge": {
+  "agent": "sgr/retrieval-planner-agent"
+ }
+}

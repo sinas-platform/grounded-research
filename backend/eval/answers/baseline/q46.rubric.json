@@ -1,0 +1,219 @@
+{
+ "question": "Can the Commission inspect a company over conduct a national authority has already investigated? What limits apply, and how have the courts treated the overlap?",
+ "question_parts": [
+  "Can the Commission inspect a company over conduct a national authority has already investigated?",
+  "What limits apply?",
+  "How have the courts treated the overlap?"
+ ],
+ "criteria": {
+  "conclusion_first": {
+   "score": 0,
+   "reason": "Answer opens with claim 1, an analytical point, not a conclusion addressing all three parts of the question."
+  },
+  "parts_answered": {
+   "score": 2,
+   "reason": "Part 1 answered by claim 12, part 2 by claims 2, 3, 5, 8, 10, and part 3 by claims 9, 11, 12."
+  },
+  "tests_as_conditions": {
+   "score": 0,
+   "reason": "The ne bis in idem test (claim 5) and Article 11(6) devolution test (claim 3) are stated in prose without ordered conditions or cumulation noted."
+  },
+  "authorities_labelled": {
+   "score": 2,
+   "reason": "Claim 6 correctly labels the Nordzucker source as an Advocate General's Opinion and no rule rests on it alone."
+  },
+  "citations_complete": {
+   "score": 0,
+   "reason": "All 12 claims cite filenames (e.g. 62013CJ0583.md, 62019CJ0857.md) without dates, ECLI or paragraph numbers as flagged in pre-checks."
+  },
+  "no_duplicate_authorities": {
+   "score": 1,
+   "reason": "Regulation 1/2003 is invoked repeatedly (claims 3, 4, 10) and C-857/19 is cited twice (claims 3 and 5) for related but distinct points."
+  },
+  "no_off_topic": {
+   "score": 1,
+   "reason": "Claim 4 on the ECN work-allocation mechanism describes a policy tool without directly answering any of the three question parts."
+  },
+  "no_contradictions": {
+   "score": 2,
+   "reason": "Claims 11 and 12 (prior proceedings don't bar inspection) sit consistently with claims 2, 9, 10 (limits on using tainted evidence)."
+  },
+  "currency_flagged": {
+   "score": 0,
+   "reason": "No claim states the date as of which the law is given, and none of the cases are checked for supersession despite citing pre- and post-2019 rulings."
+  }
+ },
+ "parts_answered": [
+  {
+   "part": "Can the Commission inspect a company over conduct a national authority has already investigated?",
+   "score": 2,
+   "reason": "Claim 12 directly holds an inspection is not inappropriate merely because a national authority already examined the conduct."
+  },
+  {
+   "part": "What limits apply?",
+   "score": 2,
+   "reason": "Claims 2, 3, 5, 8 and 10 set out limits: purpose limitation, loss of national competence, ne bis in idem, sufficient indicia, and recording obligations."
+  },
+  {
+   "part": "How have the courts treated the overlap?",
+   "score": 2,
+   "reason": "Claims 9, 11 and 12 show courts examining lawfulness of earlier inspections and rejecting automatic bars from prior proceedings."
+  }
+ ],
+ "prechecks": {
+  "citations": {
+   "claims": 12,
+   "filename_citations": [
+    "62004TJ0340.md",
+    "62013CJ0583.md",
+    "62013TJ0402.md",
+    "62017TJ0249.md",
+    "62019CJ0857.md",
+    "62020CC0151.md",
+    "62020CJ0690.md",
+    "92525.md",
+    "inspections-eu-law-2nd--3_chapter_1_-_inspections_upon_decision_regulation_1_2003_article_20_4.md",
+    "judicial-review-competition-cases--6_european_union_-_judicial_review_of_inspection_decisions.md"
+   ],
+   "with_name_and_number": 6,
+   "with_date": 0,
+   "with_year_only": 1,
+   "with_ecli": 0,
+   "with_paragraph": 0,
+   "cap": 1,
+   "per_claim": [
+    {
+     "claim": 1,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 2,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 3,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 4,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": true,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 5,
+     "name": false,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 6,
+     "name": false,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 7,
+     "name": false,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 8,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 9,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 10,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 11,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 12,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    }
+   ]
+  },
+  "duplicates": {
+   "near_duplicate_pairs": [],
+   "authorities_cited_thrice_or_more": {
+    "1/2003": [
+     3,
+     4,
+     10
+    ]
+   },
+   "cap": 2
+  },
+  "currency": {
+   "markers": [
+    "national law"
+   ],
+   "dated": false
+  }
+ },
+ "total": 8,
+ "max": 18,
+ "verdict": "8/18 — Substantively covers all three parts with relevant case law but lacks an upfront conclusion, proper citation detail (dates/ECLI/paragraphs), ordered test structure, and date-stamping of the law, undermining reliability.",
+ "judge": {
+  "agent": "sgr/retrieval-planner-agent"
+ }
+}

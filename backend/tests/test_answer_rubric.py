@@ -233,7 +233,7 @@ def test_a_multi_marker_claim_takes_the_best_and_the_counts_stay_honest():
             "- [2] Bellhaven Retail v Authority (T-200/10, 2013-04-09)\n")
     c = citation_precheck(body)
     assert c["complete_citations"] == 1        # [2] carries the claim
-    assert c["authorities_incomplete"] == [1]  # [1] is still reported undated
+    assert c["incomplete_authority_markers"] == [1]  # [1] is still reported undated
     assert c["with_date"] == 1 and c["per_claim"][0]["markers"] == [1, 2]
 
 

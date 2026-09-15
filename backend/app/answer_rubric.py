@@ -459,8 +459,10 @@ def _resolved_precheck(body: str, entries: dict[int, dict]) -> dict:
         "claims": len(per),
         "authorities": len(entries),
         "authorities_by_kind": kinds,
-        "authorities_incomplete": sorted(m for m, e in entries.items()
-                                         if not e["complete"]),
+        # Marker numbers, not claim numbers: the judge reads this and will
+        # say "claims 2, 4, 9" if the name lets it.
+        "incomplete_authority_markers": sorted(
+            m for m, e in entries.items() if not e["complete"]),
         "filename_citations": filenames,
         "claims_with_citation": len(cited),
         "claims_without_citation": len(per) - len(cited),

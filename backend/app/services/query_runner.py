@@ -43,7 +43,7 @@ from app.models import (
     ResultDocument,
 )
 from app.models.query import QueryRun
-from app.services import claim_naming, supersession, obligations
+from app.services import answer_structure, claim_naming, obligations, supersession
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -520,6 +520,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
     annotations existed and reached only the planner."""
     from app.models import AnnotationDefinition
     from app.services.annotations import annotations_for_documents
+    from app.services.document_identity import document_title_subquery
 
     async with AsyncSessionLocal() as session:
         rows = (
@@ -531,6 +532,8 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     ResultDocument.reason,
                     Document.summary,
                     ResultDocument.rank,
+                    DocumentClass.identifier_property,
+                    document_title_subquery(),
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -587,7 +590,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         return str(value)
 
     out = []
-    for did, fn, cls, reason, summary, rank in rows:
+    for did, fn, cls, reason, summary, rank, ident_prop, title in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -595,12 +598,20 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         props = "; ".join(
             f"{n}: {_fmt(v)}"[:60] for n, v in (props_by_doc.get(did) or [])[:6]
         )
+        # The same values unformatted, for the code that reads them rather
+        # than the model: the currency rules, the source date, the tier.
+        raw_props = {n: answer_structure.unwrap(v)
+                     for n, v in (props_by_doc.get(did) or [])}
         out.append({
             "document_id": did, "filename": fn, "class": cls or "",
             "annotations": ann, "properties": props, "reason": (reason or ""),
             "summary": (summary or ""),
             "rank": rank,
             "briefing": briefing_by_doc.get(str(did)),
+            "title": title,
+            "props": raw_props,
+            "annotation_values": values,
+            "identifier": (raw_props.get(ident_prop) if ident_prop else None),
         })
     return out
 
@@ -1812,6 +1823,10 @@ async def _extract_passages(
                     "spans_prefix_only": prefix_only,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
+                # Which part of the question the plan filed this under, so
+                # the drafter sees each passage group beside the part it
+                # was read for.
+                "part": c.get("part"), "conclusion": bool(c.get("conclusion")),
                 "passages": good, "proposed": proposed_total,
                 "rejected": rejected, "recovered_by_symmetry": recovered,
                 "spans_corrected": corrected, "spans_moved": moved,
@@ -1959,8 +1974,15 @@ async def _synthesis_playbook(role: str = "drafting") -> str:
         return ""
     if not content:
         return ""
-    return (f"\n\nHOUSE RULES for {role} (how to write, not what is true — "
-            "only the passages decide that):\n" + content.strip() + "\n")
+    # Applied AFTER the structure rules and said to be beneath them. The
+    # deployment's playbook governs wording and emphasis; the section order,
+    # the per-part conclusions, the tests as conditions and the labelling of
+    # secondary sources are the engine's and a house rule cannot lower them.
+    return (f"\n\nHOUSE RULES for {role} (how to write — wording and emphasis. "
+            "They never change the STRUCTURE rules above: section order, "
+            "conclusion first per part, tests as ordered conditions, labelled "
+            "authorities. And they say nothing about what is true — only the "
+            "passages decide that):\n" + content.strip() + "\n")
 
 
 def _claims_json(reply: str) -> dict:
@@ -2050,11 +2072,20 @@ def _no_text_record(sequence: int, claim: dict) -> dict:
 async def _draft_from_extracts(
     run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
     question: str, extracts: list[dict], append: bool = False,
-    cap: int | None = None,
+    cap: int | None = None, parts: list[dict] | None = None,
+    sources: dict[str, dict] | None = None,
 ) -> int:
     """Inverted split, writing half: one tool-less Sonnet call drafts all
     claims from the verified extracts; the runner persists claims and
-    evidence rows itself. No chat loop, no nudges, no wedge surface."""
+    evidence rows itself. No chat loop, no nudges, no wedge surface.
+
+    The drafter writes to the structure: it files every claim under a part
+    of the question, leads each part with its conclusion, states a
+    multi-condition test as one claim of ordered conditions, and labels what
+    each source is. Above each passage group it is shown what the documents
+    ARE — title, class, tier, issuing body, date, jurisdiction, currency —
+    which is for labelling and never for asserting: a claim may still say
+    only what its passages show."""
     # Grounding is on raw source text only. The plan's "establishes" sentence
     # is written from the manifest — summaries, classes, annotations — which
     # are themselves interpretation produced at ingestion, unverified and
@@ -2067,6 +2098,9 @@ async def _draft_from_extracts(
     # is shown. The drafter echoes those coordinates back, so the quote behind
     # a citation is recoverable without asking it to copy the text again, and
     # what is recorded is what was checked rather than what came back.
+    parts = parts or []
+    sources = sources or {}
+    cap = cap or MAX_CLAIMS
     verified: dict[tuple[str, int, int], str] = {}
     for e in extracts:
         for p in e.get("passages") or []:
@@ -2077,10 +2111,24 @@ async def _draft_from_extracts(
     for i, e in enumerate(extracts, start=1):
         if not e.get("passages"):
             continue
+        # What the documents in this group ARE, once each, above the
+        # passages. The line carries no summary and no holding: it is the
+        # material for `authority_label`, `jurisdiction_note` and
+        # `currency_note`, and the prompt says so.
+        seen_fn: list[str] = []
+        for p in e["passages"]:
+            if p["filename"] not in seen_fn:
+                seen_fn.append(p["filename"])
+        heads = "\n".join(
+            f"  SOURCE {fn}: {(sources.get(fn) or {}).get('line') or 'no record'}"
+            for fn in seen_fn)
         ps = "\n".join(
             f"  [{p['filename']} lines {p['line_from']}-{p['line_to']}]\n"
             f"  {p['text']}" for p in e["passages"])
-        blocks.append(f"PASSAGE GROUP {i}\n{ps}")
+        part = e.get("part")
+        where = (f" (for part {part + 1})" if isinstance(part, int) else
+                 " (for the overall conclusion)" if e.get("conclusion") else "")
+        blocks.append(f"PASSAGE GROUP {i}{where}\n{heads}\n{ps}")
     if not blocks:
         return 0
     reply = await sinas.invoke(
@@ -2097,21 +2145,48 @@ async def _draft_from_extracts(
         # average 84% of the way through. A reader who wants the answer has to
         # read to the end for it, which is the reviewer's first must-have and
         # the one the answer has never met. Claim 1 is the only position a
-        # renderer cannot lose and a reader cannot miss.
+        # renderer cannot lose and a reader cannot miss. With the question in
+        # parts the rule is the same one, per part: the overall conclusion is
+        # claim 1, each part's conclusion leads that part.
         "The FIRST claim states the answer to the question, in one sentence, "
         "before any reasoning or authority: a reader who stops there has the "
         "answer. The claims after it give the reasoning, then the detail. Do "
         "not repeat the conclusion at the end.\n\n"
-        "For each claim also give a RATIONALE: ONE short sentence, at most "
+        "Each group opens with SOURCE lines saying what its documents ARE "
+        "(title, class, authority tier where 1 is highest, issuing body, "
+        "date, jurisdiction, and a CURRENCY note where the instrument is "
+        "superseded or a later ruling in the same case was retrieved). Use "
+        "them ONLY to fill authority_label, jurisdiction_note and "
+        "currency_note and to decide what a source may carry; never assert "
+        "anything from them in a claim.\n\n"
+        + _structure_rules(parts, cap)
+        + "\nFor each claim also give a RATIONALE: ONE short sentence, at most "
         "20 words — which part of the question this answers and why this "
         "source settles it. Never restate the claim; the reader has just "
         "read it. Where two passage groups spoke to the same point, name "
         "the one you relied on. It is reasoning, not evidence — nothing in "
         "it may assert anything the passages do not show. Name a source the "
         "way the claim names it — deciding body and case reference — never "
-        "by its filename.\n\n"
-        'Reply ONLY JSON: {"claims": [{"text": "<claim>", "type": '
-        '"legal_principle|factual|procedural|conclusion", '
+        "by its filename. One claim per proposition per source: do not "
+        "restate a point a claim already makes from the same document.\n\n"
+        'Reply ONLY JSON: {"claims": [{"n": <1, 2, ...>, "text": "<claim>", '
+        '"section": "conclusion|analysis|authority", '
+        '"part": <part number or null>, "kind": '
+        '"legal_principle|factual|procedural|conclusion|test|label|inference", '
+        '"follows_from": [<n of each claim this one reasons from; required '
+        'for inference and conclusion claims>], '
+        '"authority_label": "court_judgment|court_order|ag_opinion|'
+        'regulator_decision|legislation|commentary|party_submission|other", '
+        '"jurisdiction_note": "<null, or one line when the source\'s '
+        "jurisdiction differs from the question's, e.g. national law "
+        '(country)>", '
+        '"currency_note": "<null, or one line when the instrument is '
+        'superseded, repealed, or pre-dates a later ruling in the same case>", '
+        '"test": <null, or for kind test: {"name": "<the test>", "conditions": '
+        '[{"text": "<condition, in the source\'s order>", "cumulative": '
+        'true|false, "evidence": {"filename": "...", "line_from": <int>, '
+        '"line_to": <int>}}], "source_para": "<paragraph number if the passage '
+        'shows one, else null>"}>, '
         '"rationale": "<why this claim rests on this source>", "evidence": '
         '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
         + await _synthesis_playbook()
@@ -2146,10 +2221,48 @@ async def _draft_from_extracts(
         "absent" if claims is None else type(claims).__name__)
     if not isinstance(claims, list):
         claims = []
-    written = 0
-    drafted: list[tuple[int, set]] = []
     no_text: list[dict] = []
     malformed: list[dict] = []
+    # Normalised, then ORDERED before numbering: conclusions lead, analysis
+    # follows part by part, authorities close. The drafter was told to write
+    # in that order; the row order does not depend on whether it did. The
+    # drafter's own number `n` travels with each claim: it is what
+    # `follows_from` refers to and what the no-text record is keyed by.
+    prepared: list[dict] = []
+    for i, c in enumerate(claims[:(cap or 14)], start=1):
+        if not isinstance(c, dict):
+            # The same rule as the evidence entry below, one level up, and
+            # the one this change first missed: the drafter's reply is
+            # unvalidated, so `claims` can carry a bare string or a null
+            # beside perfectly good claims. `c.get` on it raised
+            # AttributeError out of the transaction, which rolled back
+            # every valid claim written before it and failed the run over
+            # one malformed item. A malformed claim costs the claim.
+            malformed.append({"sequence": i, "repr": repr(c)[:200]})
+            continue
+        text_ = str(c.get("text") or "").strip()
+        cols = answer_structure.normalise_claim(c, parts) if text_ else None
+        if cols is None:
+            # A claim with no text is dropped and its number goes with it,
+            # which is why published answers jump from 9 to 11. Keep what
+            # the drafter actually sent, because the gap alone cannot say
+            # which of two things happened: an empty placeholder, where the
+            # numbering is the only casualty, or a claim whose text failed
+            # to arrive while its reasoning and its sources did, where the
+            # answer is short a proposition it meant to make. Once the
+            # reply is discarded the two are indistinguishable, and nothing
+            # else records that a claim was dropped at all.
+            no_text.append(_no_text_record(i, c))
+            continue
+        spans = _evidence_entries(c)
+        if cols["claim_kind"] == "test":
+            spans = spans + answer_structure.condition_spans(c.get("test"))
+        cols["_n"] = c.get("n") if c.get("n") is not None else i
+        cols["_spans"] = spans
+        prepared.append(cols)
+    ordered = answer_structure.order_claims(prepared)
+    written = 0
+    drafted: list[tuple[int, set]] = []
     async with AsyncSessionLocal() as session:
         start_seq = 1
         if append:
@@ -2157,37 +2270,21 @@ async def _draft_from_extracts(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id)
             )).scalar() or 0) + 1
-        for i, c in enumerate(claims[:(cap or 14)], start=start_seq):
-            if not isinstance(c, dict):
-                # The same rule as the evidence entry below, one level up, and
-                # the one this change first missed: the drafter's reply is
-                # unvalidated, so `claims` can carry a bare string or a null
-                # beside perfectly good claims. `c.get` on it raised
-                # AttributeError out of the transaction, which rolled back
-                # every valid claim written before it and failed the run over
-                # one malformed item. A malformed claim costs the claim.
-                malformed.append({"sequence": i, "repr": repr(c)[:200]})
-                continue
-            text_ = str(c.get("text") or "").strip()
-            if not text_:
-                # A claim with no text is dropped and its number goes with it,
-                # which is why published answers jump from 9 to 11. Keep what
-                # the drafter actually sent, because the gap alone cannot say
-                # which of two things happened: an empty placeholder, where the
-                # numbering is the only casualty, or a claim whose text failed
-                # to arrive while its reasoning and its sources did, where the
-                # answer is short a proposition it meant to make. Once the
-                # reply is discarded the two are indistinguishable, and nothing
-                # else records that a claim was dropped at all.
-                no_text.append(_no_text_record(i, c))
-                continue
-            row = AnswerClaim(answer_id=answer_id, sequence=i,
-                              claim_text=text_,
-                              rationale=(str(c.get("rationale") or "").strip()
-                                         or None),
-                              claim_type=str(c.get("type") or "legal_principle")[:50])
+        id_by_n: dict[int, uuid.UUID] = {}
+        pending_refs: list[tuple[AnswerClaim, list[int]]] = []
+        for i, cols in enumerate(ordered, start=start_seq):
+            spans = cols.pop("_spans")
+            n = cols.pop("_n")
+            refs = cols.pop("follows_from_refs")
+            row = AnswerClaim(answer_id=answer_id, sequence=i, **cols)
             session.add(row)
             await session.flush()
+            try:
+                id_by_n[int(n)] = row.id
+            except (TypeError, ValueError):
+                pass
+            if refs:
+                pending_refs.append((row, refs))
             # What actually became a citation, not what the drafter offered.
             # Two things drop evidence between the two: the cap at four, and a
             # filename that resolves to no document. `plan_outcome` reads this
@@ -2195,9 +2292,11 @@ async def _draft_from_extracts(
             # as used on a citation that was never written is the one reading
             # the record must not produce.
             cited_here: set[str] = set()
-            # Same guard as the no-text record above: a malformed entry here
-            # crashed the transaction for a claim that was otherwise fine.
-            for ev_ in _evidence_entries(c)[:4]:
+            # Four spans is enough for a claim; a test is one span per
+            # condition and needs room for each.
+            capped = spans[:4] if cols.get("claim_kind") != "test" else spans[:8]
+            first_doc_fn: str | None = None
+            for ev_ in capped:
                 fn_ = str(ev_.get("filename") or "")
                 doc = (await session.execute(
                     select(Document).where(Document.filename == fn_)
@@ -2206,7 +2305,8 @@ async def _draft_from_extracts(
                     continue
                 span = {"line_from": ev_.get("line_from"),
                         "line_to": ev_.get("line_to"),
-                        "char_from": None, "char_to": None, "note": None}
+                        "char_from": None, "char_to": None,
+                        "note": ev_.get("note")}
                 quote = _verified_quote(verified, fn_, ev_)
                 if quote:
                     ver = await session.get(DocumentVersion,
@@ -2223,10 +2323,26 @@ async def _draft_from_extracts(
                     span=span, quote=(quote or None) and quote[:2000],
                     validated=False))
                 cited_here.add(fn_)
+                first_doc_fn = first_doc_fn or fn_
+            # What the code knows about the source beats what the model
+            # guessed: the tier comes from the hierarchy annotation, and a
+            # currency note the retrieved set establishes is set whether or
+            # not the drafter noticed.
+            src = sources.get(first_doc_fn or "") or {}
+            if row.authority_tier is None and src.get("tier") is not None:
+                row.authority_tier = int(src["tier"])
+            if not row.currency_note and src.get("currency"):
+                row.currency_note = str(src["currency"])[:500]
             written += 1
             drafted.append((i, cited_here))
+        for row, refs in pending_refs:
+            ids = [str(id_by_n[r]) for r in refs if r in id_by_n and id_by_n[r] != row.id]
+            row.follows_from = ids or None
         await session.commit()
-    detail: dict[str, Any] = {"extract_mode": True, "claims": written}
+    detail: dict[str, Any] = {
+        "extract_mode": True, "claims": written,
+        "claims_by_part": answer_structure.part_counts(
+            ordered, len(parts), key="part_index")}
     if not append:
         detail["plan_outcome"] = _plan_outcome(extracts, drafted)
     if no_text:
@@ -2320,8 +2436,58 @@ def _plan_outcome(extracts: list[dict], drafted: list[tuple[int, set]]) -> list[
     return out
 
 
+def _structure_rules(parts: list[dict], cap: int) -> str:
+    """The order an answer is written in, as every drafting prompt states it.
+
+    Conclusion first is a DRAFTING rule, not a rendering nicety: the drafter
+    writes each part's answer before its reasoning, and the reasoning as a
+    chain — the governing rule, then its application, then the step that
+    follows — so a reader meets the answer and then sees why. These rules
+    sit ABOVE the deployment's playbook, which governs wording and emphasis
+    and cannot lower them. Pure.
+    """
+    n = len(parts)
+    per_part = (
+        f"The question has {n} part(s), listed below. Every claim names the "
+        'part it answers ("part": the part number, or null for the overall '
+        "conclusion). Each part gets at least "
+        f"{answer_structure.MIN_CLAIMS_PER_PART} claims; the whole answer at "
+        f"most {cap}.\n" if n else
+        f"The whole answer holds at most {cap} claims.\n")
+    return (
+        "STRUCTURE (binding, and above any house rules):\n" + per_part
+        + '1. Conclusion first. One claim with "section": "conclusion" per '
+        "part, stating that part's answer, and one overall conclusion "
+        '("part": null) as the FIRST claim. Conclusions lead; nothing '
+        "precedes them, and no later claim restates them.\n"
+        '2. Then the analysis per part ("section": "analysis"), written as a '
+        "chain: the governing rule (evidenced) before its application "
+        "(evidenced), then the step that follows from them. Each claim reads "
+        "on from the previous one in its part.\n"
+        "3. A test a source states as two or more conditions is ONE claim of "
+        'kind "test" listing the conditions in the order the source states '
+        "them, each condition pinned to its own passage, saying whether they "
+        "are cumulative.\n"
+        '4. A reasoning step that rests on earlier claims rather than on a '
+        'passage is a claim of kind "inference": it carries no evidence, names '
+        'the claims it follows from in "follows_from", and introduces no '
+        "authority those claims do not carry. A conclusion also names what it "
+        'follows from in "follows_from".\n'
+        '5. Authorities last ("section": "authority"): claims that state what '
+        "a source is and holds, labelled.\n"
+        "6. Commentary, advisory opinions, party submissions, regulator "
+        "decisions and sources from another jurisdiction than the question's "
+        "are labelled as such and never carry a rule on their own: a rule "
+        "rests on a court judgment or on legislation, or is stated as what "
+        "the labelled source says.\n"
+        + (("PARTS OF THE QUESTION:\n" + answer_structure.parts_block(parts) + "\n")
+           if parts else "")
+    )
+
+
 async def _argument_plan(
-    sinas: _Sinas, run_id: uuid.UUID, question: str, manifest: str
+    sinas: _Sinas, run_id: uuid.UUID, question: str, manifest: str,
+    parts: list[dict] | None = None, cap: int | None = None,
 ) -> tuple[str, list[dict]]:
     """Split drafting: a strong tool-less model designs the ARGUMENT (which
     claims, anchored where) from the briefing manifest alone; the drafter
@@ -2329,22 +2495,35 @@ async def _argument_plan(
     and writing are cheap and large — price each accordingly (17 Aug:
     memory-padding lived entirely in the deciding, never the writing).
     Fail-open: any planning failure returns "" and drafting proceeds
-    exactly as before."""
+    exactly as before.
+
+    Given the question's parts, the plan allocates claims per part — each
+    planned claim names the part it answers — and is capped by the parts'
+    budget rather than a flat number. Planned claims that answer no part
+    are dropped before anything is read for them."""
+    parts = parts or []
+    cap = cap or MAX_CLAIMS
     try:
         reply = await sinas.invoke(
             "sgr/retrieval-planner-agent",
             "Design the argument for answering the question below, using ONLY "
             "the documents listed. Reply ONLY JSON:\n"
-            '{"claims": [{"n": 1, "establishes": "<one sentence: what this '
+            '{"claims": [{"n": 1, "part": <part number, or null for the overall '
+            'conclusion>, "kind": "<conclusion|rule|application|inference|test|'
+            'authority>", "establishes": "<one sentence: what this '
             'claim must establish>", "anchors": ["<filename>", ...], '
             '"hint": "<which part of the anchor documents to read, from their '
             'TOCs>"}]}\n'
-            "Rules: 6-12 claims; every claim anchored to at least one listed "
-            "document; never anchor to anything not listed; the FIRST claim "
+            f"Rules: at most {cap} claims; every claim anchored to at least one "
+            "listed document; never anchor to anything not listed; the FIRST claim "
             "must state the overall conclusion, and no later claim restates "
-            "it. If the documents cannot "
+            "it; every claim names the part of the question it answers, and a "
+            "claim that answers no part is not planned. Plan each part's "
+            "conclusion, then per part the governing rule before its "
+            "application. If the documents cannot "
             "support a part of the question, plan NO claim for it — the gap "
             "will be reported honestly downstream.\n"
+            + _structure_rules(parts, cap)
             # The planner designs claims the drafter has to execute, and the
             # drafter is told to skip a group that establishes nothing usable.
             # Planning against rules the drafter is not held to produces claims
@@ -2359,7 +2538,7 @@ async def _argument_plan(
         )
         cleaned = reply.strip().strip("`").removeprefix("json").strip()
         data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
-        claims = data.get("claims") or []
+        claims = [c for c in (data.get("claims") or []) if isinstance(c, dict)]
         if not claims:
             # Both halves, like every other exit. Returning the bare string
             # here made the caller's `_plan_text, plan_claims = await ...`
@@ -2369,8 +2548,23 @@ async def _argument_plan(
             # the corpus rather than a crash; that branch was unreachable
             # through this path.
             return "", []
+        # Filter before reading: a planned claim that answers no part of the
+        # question is extraction spent on material the answer cannot use.
+        # Recorded, so a planner that keeps answering questions nobody asked
+        # is visible. With no decomposition nothing is dropped.
+        claims, dropped = answer_structure.filter_plan_to_parts(claims, parts)
+        if dropped:
+            await _tele(run_id, "draft", plan_dropped_no_part=[
+                {"n": c.get("n"), "establishes": str(c.get("establishes") or "")[:200]}
+                for c in dropped])
+        if not claims:
+            return "", []
+        thin = answer_structure.thin_parts(claims, parts)
+        if thin:
+            await _tele(run_id, "draft", plan_parts_thin=[
+                {"index": p["index"], "label": p["label"]} for p in thin])
         lines = []
-        for c in claims[:12]:
+        for c in claims[:cap]:
             anchors = ", ".join(str(a) for a in (c.get("anchors") or [])[:4])
             hint = str(c.get("hint") or "").strip()
             lines.append(
@@ -2378,13 +2572,14 @@ async def _argument_plan(
                 f"\n   anchors: {anchors}" + (f"\n   read: {hint}" if hint else "")
             )
         await _tele(run_id, "draft", argument_plan=[
-            {"n": c.get("n"), "establishes": c.get("establishes"),
-             "anchors": c.get("anchors")} for c in claims[:12]])
+            {"n": c.get("n"), "part": c.get("part"), "kind": c.get("kind"),
+             "establishes": c.get("establishes"),
+             "anchors": c.get("anchors")} for c in claims[:cap]])
         return (
             "ARGUMENT PLAN (realize these claims in order; read each claim's "
             "anchor documents, write the claim, bind its evidence; do not add "
             "claims beyond the plan):\n" + "\n".join(lines) + "\n\n"
-        ), claims[:12]
+        ), claims[:cap]
     except CancelledOutcome:
         # Not a planning failure. The catch below turns anything that is not a
         # JSON problem into RuntimeError("argument planning failed"), which
@@ -2404,6 +2599,55 @@ async def _argument_plan(
         # an empty plan turns it into "the corpus supports no claims" — a
         # semantic verdict the run then reports as its outcome.
         raise RuntimeError(f"argument planning failed: {str(exc)[:200]}") from exc
+
+
+def _source_context(rows: list[dict]) -> dict[str, dict]:
+    """Per filename: the line the drafter is shown above the document's
+    passages, the document's tier, and its currency note if any. Pure over
+    `_manifest_rows` rows."""
+    currency = answer_structure.currency_notes(rows)
+    out: dict[str, dict] = {}
+    for r in rows:
+        fn = r.get("filename")
+        if not fn:
+            continue
+        out[fn] = {
+            "line": answer_structure.source_context_line(r, currency.get(fn)),
+            "tier": answer_structure.tier_of(r.get("annotation_values")),
+            "currency": currency.get(fn),
+        }
+    return out
+
+
+async def _fix_question_parts(
+    run_id: uuid.UUID, answer_id: uuid.UUID, texts: list[str]
+) -> list[dict]:
+    """The run's decomposition as the structure uses it: [{index, label,
+    text}], written on the answer row and under `draft` in telemetry.
+
+    The split itself is `_question_parts`: one call on the question alone,
+    stable across cycles, and the gate judges the same list. This only gives
+    each part an index and a heading, and records it where the drafter and
+    the API read it. A resumed run reads what the first one wrote.
+    """
+    from app.models import Answer
+
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = ((run.telemetry or {}).get("draft") or {}).get("question_parts")
+    if isinstance(stored, list) and stored:
+        return [p for p in stored if isinstance(p, dict)]
+    parts = answer_structure.parse_parts(
+        {"parts": [{"text": t} for t in texts if str(t or "").strip()]})
+    await _tele(run_id, "draft", question_parts=parts,
+                claim_cap=answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS)
+    if parts:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(Answer, answer_id)
+            if row is not None:
+                row.question_parts = parts
+                await session.commit()
+    return parts
 
 
 async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
@@ -2470,9 +2714,13 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # every run so the next reading of it comes from measurement rather than
     # from this comment.
     observed_from = time.monotonic()
+    # The split is needed before planning now, not only by the observation:
+    # the planner allocates claims to the parts and the drafter files every
+    # claim under one. So it is made outside the observation's budget, and
+    # only the theme observation is bounded.
+    parts_now = await _question_parts(sinas, run_id, question)
     try:
         async with asyncio.timeout(_OBSERVATION_BUDGET_S):
-            parts_now = await _question_parts(sinas, run_id, question)
             await _uncovered_themes(sinas, run_id, question, parts_now, manifest)
     except CancelledOutcome:
         raise
@@ -2486,7 +2734,13 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     await _tele(run_id, "validate",
                 uncovered_themes_seconds=round(time.monotonic() - observed_from, 1))
 
-    _plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
+    # The question's parts, decided before anything is planned: the planner
+    # allocates claims to them, the drafter files every claim under one, and
+    # the gate judges each. The budget follows from the count.
+    parts = await _fix_question_parts(run_id, answer_id, parts_now)
+    cap = answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS
+    _plan_text, plan_claims = await _argument_plan(
+        sinas, run_id, question, manifest, parts=parts, cap=cap)
     if not plan_claims:
         # the planner ran and produced nothing usable: that IS a judgment
         # about the sources, unlike a transport failure, which raises above
@@ -2497,7 +2751,8 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # matches it. The planner picks from summaries and tops out at the few it
     # names, so an authority that is retrieved but not summarised in those
     # terms is never opened.
-    corpus_rows = (await _manifest_rows(parent_id))[:60]
+    all_rows = await _manifest_rows(parent_id)
+    corpus_rows = all_rows[:60]
     for c in plan_claims:
         named = [str(a) for a in (c.get("anchors") or [])]
         extra = [d for d in _relevant_docs(str(c.get("establishes") or ""),
@@ -2507,7 +2762,13 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
 
     await _tele(run_id, "draft", started=_iso())
     extracts = await _extract_passages(sinas, plan_claims, run_id)
-    n = await _draft_from_extracts(run_id, answer_id, sinas, question, extracts)
+    # What each document IS, for the drafter to label sources by: never a
+    # summary, never a holding. The currency notes are decided here from the
+    # retrieved set — a superseded status, a later ruling in the same case —
+    # and set on the claims whether or not the drafter repeats them.
+    sources = _source_context(all_rows)
+    n = await _draft_from_extracts(run_id, answer_id, sinas, question, extracts,
+                                   cap=cap, parts=parts, sources=sources)
     if not n:
         raise PartialOutcome(
             "no_progress", "no passage supported a claim well enough to draft")
@@ -3214,6 +3475,19 @@ async def _gate_answer(
                 select(QueryRun.parent_result_id).where(QueryRun.answer_id == answer_id)
             )
         ).scalar_one_or_none()
+        # The rows with their structure, for the checks arithmetic can make:
+        # does every part have its conclusion, and does every inference rest
+        # on a supported claim. Read as objects so an older answer, whose
+        # rows carry no structure, is recognised and left to the judge.
+        from app.models import Answer
+
+        structured = (await session.execute(
+            select(AnswerClaim).where(AnswerClaim.answer_id == answer_id)
+            .order_by(AnswerClaim.sequence))).scalars().all()
+        answer_row = await session.get(Answer, answer_id)
+        question_parts = [
+            p for p in (getattr(answer_row, "question_parts", None) or [])
+            if isinstance(p, dict)]
     # The gate judges which sources the answer should have used, which is
     # planning-shaped work: it gets the planner's manifest line — class and
     # declared annotations included — not a bare filename and summary. It
@@ -3433,10 +3707,28 @@ async def _gate_answer(
         )
     if data.get("no_conclusion"):
         correctness.append(
-            "The answer never draws its overall conclusion. Add a final claim "
-            "that directly answers the question, supported by the evidence "
-            "already cited."
+            "The answer never draws its overall conclusion. Add a claim with "
+            '"section": "conclusion" and "part": null that directly answers '
+            "the question, supported by the evidence already cited; it leads "
+            "the answer, so restore the order rather than append."
         )
+    # The structure, judged without the model. A part whose conclusion is
+    # missing, or written into the analysis so the reader meets it last, and
+    # an inference resting on nothing supported, are correctness defects:
+    # the answer is held back until the reviser restores the order. Judged
+    # only over an answer that carries structure; the rows of an older
+    # answer carry none and are left to the judge's `no_conclusion`.
+    claim_dicts = [
+        {"sequence": c.sequence, "id": c.id, "claim_kind": c.claim_kind,
+         "claim_type": c.claim_type, "section": c.section,
+         "part_index": c.part_index, "follows_from": c.follows_from,
+         "claim_text": c.claim_text, "supported": c.sequence in with_evidence}
+        for c in structured]
+    structure_gaps = (answer_structure.conclusion_gaps(claim_dicts, question_parts)
+                      + answer_structure.inference_gaps(claim_dicts))
+    correctness += structure_gaps
+    if structure_gaps:
+        await _tele(run_id, "validate", structure_gaps=structure_gaps)
     # Naming the document in prose is not enough. Revision may cite only
     # passages it is shown, and it is shown passages for the points passed to
     # it — so a run was told to use 32025M11936.md, given no line of it, and
@@ -4026,6 +4318,24 @@ def _spans_of(obj: dict) -> list[dict]:
 MAX_ABSTENTIONS = 2
 
 
+_STRUCTURE_KEYS = ("section", "part", "kind", "follows_from", "test",
+                   "authority_label", "jurisdiction_note", "currency_note")
+
+
+def _structure_of(c: dict) -> dict:
+    """The structure fields a patch item carries, and only those it carries,
+    so an absent key means "leave it" rather than "clear it". Pure."""
+    return {k: c[k] for k in _STRUCTURE_KEYS if k in c and c[k] is not None}
+
+
+def _derived_patch_item(c: dict) -> bool:
+    """May this patch item stand without a span? Only an inference that names
+    what it follows from: a reasoning step rests on other claims, and one
+    that names none rests on nothing. Pure."""
+    kind = str(c.get("kind") or c.get("type") or "").strip().lower()
+    return kind == "inference" and bool(answer_structure.ref_list(c.get("follows_from")))
+
+
 def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
     """A revision is a patch: which claims to rewrite, drop and add.
 
@@ -4052,9 +4362,14 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             continue
         text = str(c.get("text") or "").strip()
         spans = _spans_of(c)
-        if len(text) >= 30 and spans and str(c.get("seq", "")).lstrip("-").isdigit():
+        # An inference rests on the claims it follows from and needs no span
+        # of its own; everything else needs at least one.
+        derived = _derived_patch_item(c)
+        if len(text) >= 30 and (spans or derived) \
+                and str(c.get("seq", "")).lstrip("-").isdigit():
             revise.append({"seq": int(c["seq"]), "text": text, "evidence": spans,
-                           "rationale": str(c.get("rationale") or "").strip()})
+                           "rationale": str(c.get("rationale") or "").strip(),
+                           **_structure_of(c)})
 
     add = []
     abstentions = 0
@@ -4065,9 +4380,11 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         spans = _spans_of(c)
         if len(text) < 30:
             continue
-        if spans:
-            add.append({"text": text, "type": c.get("type"), "evidence": spans,
-                        "rationale": str(c.get("rationale") or "").strip()})
+        if spans or _derived_patch_item(c):
+            add.append({"text": text, "type": c.get("type") or c.get("kind"),
+                        "evidence": spans,
+                        "rationale": str(c.get("rationale") or "").strip(),
+                        **_structure_of(c)})
         elif (allow_abstention
               and str(c.get("type") or "").lower() == "abstention"
               and abstentions < MAX_ABSTENTIONS):
@@ -4165,7 +4482,8 @@ async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
     return _cycle_key(entry, prefix)
 
 
-def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
+def _claim_budget_line(live: int, refused_last_cycle: int = 0,
+                       cap: int = MAX_CLAIMS) -> str:
     """What the reviser may add, said before it writes rather than after.
 
     `_admit_adds` refuses an addition once the answer is at MAX_CLAIMS and
@@ -4184,8 +4502,8 @@ def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
 
     Pure: two counts in, the sentence out.
     """
-    room = max(0, MAX_CLAIMS - live)
-    out = f"The answer holds {live} claims and the hard maximum is {MAX_CLAIMS}. "
+    room = max(0, cap - live)
+    out = f"The answer holds {live} claims and the hard maximum is {cap}. "
     if room:
         out += (f"You may add up to {room}. An addition beyond that is "
                 "discarded, not queued. ")
@@ -4197,10 +4515,15 @@ def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
         out += (f"Your previous reply proposed {refused_last_cycle} addition(s) "
                 "that were discarded for exactly this reason; they were never "
                 "written. Free a slot if you still want them. ")
-    return out + "Aim for about 12 claims.\n\n"
+    # The target sits a little under the cap: a one-part question aims at 12
+    # under its cap of 14 as it always did, and a question with more parts
+    # aims correspondingly higher.
+    target = 12 if cap <= MAX_CLAIMS else cap - 2
+    return out + f"Aim for about {target} claims.\n\n"
 
 
-def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
+def _admit_adds(adds: list[dict], live: int,
+                cap: int = MAX_CLAIMS) -> tuple[list[dict], int]:
     """Split the reviser's additions into those the answer has room for and
     the count refused, given `live` claims already in it.
 
@@ -4210,7 +4533,7 @@ def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
     count is what lets the caller record a cap hit instead of recording an
     addition that never happened.
     """
-    room = max(0, MAX_CLAIMS - live)
+    room = max(0, cap - live)
     return adds[:room], len(adds) - min(len(adds), room)
 
 
@@ -4315,6 +4638,58 @@ async def _removal_record(session, claim_ids: list) -> list[dict]:
     return sorted(out.values(), key=lambda d: d["sequence"])
 
 
+def _claim_where(claim: AnswerClaim) -> str:
+    """` [conclusion, part 2, inference]` — how a claim is marked in the
+    reviser's listing, or "" for a row with no structure. Pure."""
+    bits = []
+    if claim.section:
+        bits.append(str(claim.section))
+    if claim.part_index is not None:
+        bits.append(f"part {int(claim.part_index) + 1}")
+    elif claim.section:
+        bits.append("overall")
+    if claim.claim_kind and claim.claim_kind not in ("legal_principle", "factual",
+                                                     "procedural"):
+        bits.append(str(claim.claim_kind))
+    return f" [{', '.join(bits)}]" if bits else ""
+
+
+def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
+                     id_by_seq: Mapping[int, uuid.UUID], added: bool = False) -> None:
+    """Write the structure fields a patch item carries onto a claim row.
+
+    A revised claim keeps whatever the patch does not mention; an added claim
+    is normalised whole, so it always lands in a section. `follows_from`
+    arrives as sequence numbers and is stored as claim ids; a number naming
+    no live claim, or the claim itself, is dropped. Pure over the row.
+    """
+    carries = {k for k in ("section", "part", "kind", "type", "test",
+                           "authority_label", "jurisdiction_note",
+                           "currency_note") if item.get(k) is not None}
+    if added or carries:
+        cols = answer_structure.normalise_claim(
+            {**item, "text": row.claim_text,
+             "kind": item.get("kind") or item.get("type") or row.claim_kind,
+             "section": item.get("section") or (None if added else row.section),
+             "part": item.get("part") if "part" in item else (
+                 None if added or row.part_index is None else row.part_index + 1)},
+            parts)
+        if cols is not None:
+            for k in ("section", "part_index", "part_label", "claim_kind",
+                      "claim_type", "test", "authority_label"):
+                if added or k in ("section", "part_index", "part_label") or \
+                        k in carries or (k == "claim_kind" and "kind" in carries):
+                    setattr(row, k, cols[k])
+            for k in ("jurisdiction_note", "currency_note"):
+                if k in carries:
+                    setattr(row, k, cols[k])
+    refs = answer_structure.ref_list(item.get("follows_from"))
+    if refs:
+        ids = [str(id_by_seq[r]) for r in refs
+               if r in id_by_seq and id_by_seq[r] != row.id]
+        row.follows_from = ids or None
+
+
 async def _revise_answer(
     sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID, question: str,
     feedback: list[str], extra_points: list[str] | None = None,
@@ -4336,6 +4711,7 @@ async def _revise_answer(
     """
     if not feedback:
         return 0
+    from app.models import Answer
 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
@@ -4350,8 +4726,27 @@ async def _revise_answer(
             .where(AnswerClaim.answer_id == answer_id)
             .order_by(AnswerClaim.sequence)
         )).all()
+        answer_row = await session.get(Answer, answer_id)
+        parts = [p for p in (getattr(answer_row, "question_parts", None) or [])
+                 if isinstance(p, dict)]
+    cap = answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS
     corpus_rows = (await _manifest_rows(parent_id))[:60]
     corpus = [r["filename"] for r in corpus_rows if r.get("filename")]
+
+    # Two claims restating one proposition from one source are found here,
+    # by arithmetic, and handed to the reviser as a merge to judge. The
+    # finding names both claims, so both arrive with their passages below.
+    dup_input: dict[int, dict] = {}
+    for claim, _ev, fn, _content in rows:
+        d = dup_input.setdefault(claim.sequence, {"sequence": claim.sequence,
+                                                  "text": claim.claim_text,
+                                                  "docs": set()})
+        if fn:
+            d["docs"].add(fn)
+    dup_pairs = answer_structure.duplicate_pairs(list(dup_input.values()))
+    if dup_pairs:
+        feedback = list(feedback) + answer_structure.duplicate_feedback(dup_pairs)
+        await _tele(run_id, "validate", duplicate_pairs=[list(p) for p in dup_pairs])
 
     # Current claims — but full passages only for the ones the feedback
     # names. The reviser is instructed to change only what the feedback
@@ -4365,8 +4760,9 @@ async def _revise_answer(
               for m in re.findall(r"(?:^|[ ,])(\d+)(?=[ ,.:]|$)", f)}
     by_claim: dict[int, dict] = {}
     for claim, ev, fn, content in rows:
-        entry = by_claim.setdefault(claim.sequence, {"text": claim.claim_text,
-                                                     "passages": []})
+        entry = by_claim.setdefault(claim.sequence, {
+            "text": claim.claim_text, "passages": [],
+            "where": _claim_where(claim)})
         if ev is None or not content or (ev.span or {}).get("line_from") is None:
             continue
         lf, lt = int(ev.span["line_from"]), int(ev.span.get("line_to") or ev.span["line_from"])
@@ -4374,7 +4770,7 @@ async def _revise_answer(
         entry["passages"].append(f"[{fn} lines {lf}-{lt}]\n{body}")
 
     current = "\n\n".join(
-        f"CLAIM {seq}: {c['text']}\n"
+        f"CLAIM {seq}{c['where']}: {c['text']}\n"
         + (("\n".join(c["passages"]) or "(no passage)")
            if (seq in named or not named) else "(passages withheld — this "
            "claim is context; do not revise it)")
@@ -4466,8 +4862,19 @@ async def _revise_answer(
         "fails to address the question. Every claim you write must be carried "
         "entirely by the passages you cite for it, and you may cite only "
         "passages shown below. "
-        + _claim_budget_line(len(by_claim),
-                             await _cap_refusals_last_cycle(run_id))
+        + _claim_budget_line(len(by_claim), cap=cap,
+                             refused_last_cycle=await _cap_refusals_last_cycle(run_id))
+        + _structure_rules(parts, cap)
+        + "\nThe structure is part of what is corrected. Each claim above is "
+        "marked with its section and part. Where the feedback says a part "
+        "lacks its conclusion, or a conclusion sits in the analysis, RESTORE "
+        'THE ORDER: add or revise a claim with "section": "conclusion" for that '
+        "part, never append a conclusion to the end of the analysis. Every "
+        'claim you add or revise states its "section", "part" and "kind", and '
+        'an inference or conclusion its "follows_from" (the sequence numbers '
+        "of the claims it reasons from). Where the feedback names two claims "
+        "restating one proposition from one source, merge them: revise one to "
+        "carry the point and both citations, drop the other with a reason.\n\n"
         + "Where the feedback names a stronger source and you judge the current "
         "citation to be the better one, say so instead of changing nothing: "
         'put the claim in "keep" with a rationale giving the reason. A keep '
@@ -4495,6 +4902,9 @@ async def _revise_answer(
            f"At most {MAX_ABSTENTIONS} such claims, and never for the central "
            "question if the sources do answer it.\n\n" if last_attempt else "")
         + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
+        '"section": "conclusion|analysis|authority", "part": <part number or '
+        'null>, "kind": "legal_principle|factual|procedural|conclusion|test|'
+        'label|inference", "follows_from": [<seq>, ...], '
         '"rationale": "<why this claim rests on this source>", '
         '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
         '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
@@ -4505,7 +4915,16 @@ async def _revise_answer(
         'its passages, this OWED document does not carry any point this '
         'answer needs>"}], '
         '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
-        'procedural|conclusion", "rationale": "<why this claim rests on this '
+        'procedural|conclusion|test|label|inference", '
+        '"section": "conclusion|analysis|authority", "part": <part number or '
+        'null>, "follows_from": [<seq>, ...], '
+        '"authority_label": "court_judgment|court_order|ag_opinion|'
+        'regulator_decision|legislation|commentary|party_submission|other", '
+        '"jurisdiction_note": <null or one line>, "currency_note": <null or one '
+        'line>, "test": <null, or {"name", "conditions": [{"text", '
+        '"cumulative", "evidence": {"filename", "line_from", "line_to"}}], '
+        '"source_para"}>, '
+        '"rationale": "<why this claim rests on this '
         'source>", "evidence": [{"filename": "...", '
         '"line_from": <int>, "line_to": <int>}]}]}\n\n'
         + await _synthesis_playbook()
@@ -4578,6 +4997,7 @@ async def _revise_answer(
                                   .where(AnswerClaim.id == claim.id))
             touched += 1
 
+        id_by_seq = {seq: c.id for seq, c in by_seq.items()}
         for item in patch["revise"]:
             claim = by_seq.get(item["seq"])
             if claim is None:
@@ -4588,6 +5008,9 @@ async def _revise_answer(
             row.claim_text = item["text"][:4000]
             if item.get("rationale"):
                 row.rationale = item["rationale"][:2000]
+            # The structure moves with the text when the patch says so; a
+            # revision that says nothing about it leaves the row where it is.
+            _apply_structure(row, item, parts, id_by_seq)
             # its evidence is re-bound, so its verdicts no longer apply
             await session.execute(ClaimEvidence.__table__.delete()
                                   .where(ClaimEvidence.claim_id == row.id))
@@ -4601,7 +5024,7 @@ async def _revise_answer(
             nxt = ((await session.execute(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id))).scalar() or 0) + 1
-            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live)
+            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live, cap)
             for item in admitted:
                 row = AnswerClaim(answer_id=answer_id, sequence=nxt,
                                   claim_text=item["text"][:4000],
@@ -4611,6 +5034,19 @@ async def _revise_answer(
                                                  or "legal_principle")[:50])
                 session.add(row)
                 await session.flush()
+                # An added claim lands in its section and part, positioned
+                # after what is there, so the order survives the addition.
+                _apply_structure(row, item, parts, id_by_seq, added=True)
+                if row.section:
+                    same_part = (AnswerClaim.part_index.is_(None)
+                                 if row.part_index is None
+                                 else AnswerClaim.part_index == row.part_index)
+                    row.position = ((await session.execute(
+                        select(func.max(AnswerClaim.position))
+                        .where(AnswerClaim.answer_id == answer_id)
+                        .where(AnswerClaim.section == row.section)
+                        .where(same_part)
+                    )).scalar() or 0) + 1
                 await _bind_spans(session, row.id, item["evidence"])
                 nxt += 1
                 touched += 1

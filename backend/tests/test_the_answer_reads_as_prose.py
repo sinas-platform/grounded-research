@@ -71,18 +71,19 @@ def _claims():
         {"id": "c3", "sequence": 3, "section": "conclusion", "part_index": 1,
          "position": 1, "claim_kind": "conclusion",
          "claim_text": "It is mandatory."},
+        # No label: the class these cite declares none, which is what says a
+        # source carries a rule on its own.
         {"id": "c4", "sequence": 4, "section": "analysis", "part_index": 0,
          "position": 1, "claim_kind": "legal_principle",
-         "authority_label": "court_judgment", "authority_tier": 1,
+         "authority_tier": 1,
          "claim_text": "The deciding body held that the obligation reaches "
                        "an undertaking in the respondent's position."},
         {"id": "c5", "sequence": 5, "section": "analysis", "part_index": 0,
          "position": 2, "claim_kind": "legal_principle",
-         "authority_label": "court_judgment", "authority_tier": 1,
+         "authority_tier": 1,
          "claim_text": "It reasoned from the wording of the instrument."},
         {"id": "c6", "sequence": 6, "section": "analysis", "part_index": 0,
          "position": 3, "claim_kind": "test",
-         "authority_label": "court_judgment",
          "claim_text": "The reach test.",
          "test": {"name": "The reach test",
                   "conditions": [{"text": "the first limb", "cumulative": True},
@@ -93,13 +94,16 @@ def _claims():
          "claim_text": "It follows that the respondent is within reach."},
         {"id": "c8", "sequence": 8, "section": "analysis", "part_index": 1,
          "position": 1, "claim_kind": "legal_principle",
-         "authority_label": "legislation", "authority_tier": 2,
+         "authority_tier": 2,
          "currency_note": "repealed; superseded by a later instrument",
          "claim_text": "The instrument states the duty in mandatory terms."},
+        # Labelled, because the class it cites declares the label. The words
+        # are the deployment's; the renderer prints them and knows nothing
+        # about what they mean.
         {"id": "c9", "sequence": 9, "section": "analysis", "part_index": 1,
          "position": 2, "claim_kind": "legal_principle",
          "authority_label": "commentary",
-         "jurisdiction_note": "national law (a single state)",
+         "jurisdiction_note": "jurisdiction: a single state",
          "claim_text": "A commentator reads the duty the same way."},
     ]
 
@@ -212,7 +216,7 @@ def test_an_inference_renders_inline_and_cites_nothing():
 
 def test_a_secondary_source_says_so_after_the_sentence():
     assert ("A commentator reads the duty the same way.[3] [commentary] "
-            "[national law (a single state)]") in _render().markdown
+            "[jurisdiction: a single state]") in _render().markdown
 
 
 def test_a_stale_instrument_carries_its_currency_note():
@@ -220,18 +224,49 @@ def test_a_stale_instrument_carries_its_currency_note():
             in _render().markdown)
 
 
-def test_a_primary_source_carries_no_label():
+def test_a_source_whose_class_declares_no_label_carries_none():
+    """The label is the class's, so a class that declares none produces no
+    bracket at all. The claims citing the decision and the instrument carry
+    a tier and a currency note and still say nothing about what the source
+    IS."""
     md = _render().markdown
-    assert "[court_judgment]" not in md
-    assert "[court judgment]" not in md
+    for c in _claims():
+        if c["id"] in ("c4", "c5", "c6", "c8"):
+            assert not c.get("authority_label")
+    assert "[Court Decision]" not in md
+    assert "[Legislation]" not in md
+
+
+def test_no_label_vocabulary_survives_in_engine_code():
+    """The labels the drafter used to pick from, the words they printed as
+    and the headings they grouped under were a vocabulary for one collection
+    living in engine code. All four tables are gone: the label a claim
+    carries is the one its document's class declares, and the heading is the
+    class's own name.
+
+    Pinned by the names rather than by the words, so the check says nothing
+    about any deployment's subject matter — which is the property being
+    protected."""
+    from app.services import answer_render, answer_structure
+
+    for module in (answer_render, answer_structure):
+        for name in ("AUTHORITY_LABELS", "SECONDARY_LABELS", "GROUP_HEADINGS",
+                     "LABEL_TEXT"):
+            assert not hasattr(module, name), f"{module.__name__}.{name}"
+    # The one heading the engine still names, and it names the absence of a
+    # class rather than any kind of source.
+    assert answer_structure.UNCLASSIFIED_HEADING == "Unclassified"
 
 
 # ── authorities ──────────────────────────────────────────────────────────────
 
-def test_authorities_are_grouped_in_the_contracts_order():
+def test_authorities_are_grouped_by_class_highest_authority_first():
+    """The heading is the document's own class — the deployment's word for
+    what the thing is — and the groups lead with whichever class holds the
+    most authoritative source cited."""
     md = _render().markdown
     auth = md.split("## Authorities")[1]
-    assert (auth.index("**Court judgments**") < auth.index("**Legislation**")
+    assert (auth.index("**Court Decision**") < auth.index("**Legislation**")
             < auth.index("**Commentary**"))
 
 
@@ -334,10 +369,10 @@ def test_an_answer_with_no_structure_renders_one_paragraph_per_claim():
     ev = [{"claim_id": "a", "document_id": "d1", "span": {}},
           {"claim_id": "b", "document_id": "d3", "span": {}}]
     md = render_markdown({"question": "Q?"}, claims, ev, DOCS).markdown
-    # Byte for byte. A claim with no `authority_label` classifies its source
-    # as nothing, so both documents sit under "Other sources" — the old rows
-    # never said what a source was, and the renderer must not decide for
-    # them.
+    # Byte for byte, including the marker numbers: the old rows said nothing
+    # about what a source was, so the groups come from the documents' own
+    # classes and neither claim acquires a label. Numbering stays first
+    # appearance in the prose even though the groups sort the other way.
     assert md == (
         "# Q?\n"
         "\n"
@@ -347,11 +382,14 @@ def test_an_answer_with_no_structure_renders_one_paragraph_per_claim():
         "\n"
         "## Authorities\n"
         "\n"
-        "**Other sources**\n"
+        "**Commentary**\n"
+        "\n"
+        "- [2] A Textbook Chapter (2024-03-01)\n"
+        "\n"
+        "**Court Decision**\n"
         "\n"
         "- [1] Kestrel Holdings v Northmoor Authority (T-100/20, "
         "ECLI:XX:YY:2021:1, 2021-05-04)\n"
-        "- [2] A Textbook Chapter (2024-03-01)\n"
     )
 
 

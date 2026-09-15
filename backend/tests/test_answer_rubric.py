@@ -26,9 +26,11 @@ from app.answer_rubric import (
     compare,
     duplicate_precheck,
     load_answer,
+    parse_authorities,
     question_parts,
     score_answer,
     split_answer,
+    split_authorities,
 )
 
 QUESTION = ("Can a decision be annulled in part where the evidence supports "
@@ -36,9 +38,9 @@ QUESTION = ("Can a decision be annulled in part where the evidence supports "
             "material already gathered?")
 
 GOOD_ANSWER = """\
-**1.** A decision may be annulled in part, as held in Alpha v Authority (Case T-100/09, ECLI:EU:T:2012:596, 14 November 2012), para 91.
+**1.** A decision may be annulled in part, as held in Ashgrove Systems v Authority (Case T-100/09, ECLI:EU:T:2012:596, 14 November 2012), para 91.
 
-**2.** Material gathered outside the surviving scope may not be used, per Alpha v Authority (Case T-100/09, ECLI:EU:T:2012:596, 14 November 2012), para 116.
+**2.** Material gathered outside the surviving scope may not be used, per Ashgrove Systems v Authority (Case T-100/09, ECLI:EU:T:2012:596, 14 November 2012), para 116.
 
 **3.** The same follows from Regulation No 1/2003, Article 20(4), as in force on 1 May 2004.
 """
@@ -49,6 +51,38 @@ FILENAME_ANSWER = """\
 
 **2.** Material gathered outside the surviving scope may not be used.
     62009TJ0135.md, digest--p10.md
+"""
+
+# The current format: a marker in the claim, the citation once at the end.
+MARKER_ANSWER = """\
+## Conclusion
+
+A decision may be annulled in part, and material outside the surviving scope falls away.
+
+## Analysis
+
+A decision may be annulled in part.[1][2]
+
+Material gathered outside the surviving scope may not be used.[3]
+
+The same follows from the governing regulation.[4]
+
+## Authorities
+
+**Court Decision**
+
+- [1] Case 100/09 - Ashgrove v Authority (T-100/09, ECLI:EU:T:2012:596, 2012-11-14), para. 91
+- [2] Bellhaven Retail v Authority (T-200/10, 2013-04-09), r.o. 4.2
+
+**Article (Review)**
+
+- [3] 45. Partial annulment and the material already gathered (2019-05-21), pt. 44
+
+**Legislation**
+
+- [4] Regulation No 1/2003 (1/2003, 2002-12-16), recital 14
+
+Law stated as at 2020-01-01.
 """
 
 
@@ -152,6 +186,136 @@ def test_a_bare_docket_number_is_not_a_name():
 def test_an_instrument_number_is_not_a_year():
     c = citation_precheck("**1.** Regulation No 1/2003 says so.\n")
     assert c["per_claim"][0]["year"] is False
+
+
+# ── the Authorities apparatus ────────────────────────────────────────────────
+
+def test_the_authorities_list_is_apparatus_and_not_a_claim():
+    cl = claims(MARKER_ANSWER)
+    assert len(cl) == 4
+    assert not any(c.lstrip().startswith(("- [", "**Court")) for c in cl)
+    assert "Law stated as at" not in " ".join(cl)
+
+
+def test_an_answer_with_no_authorities_heading_keeps_its_whole_body():
+    assert split_authorities(GOOD_ANSWER) == (GOOD_ANSWER.strip(), "")
+
+
+def test_every_entry_is_read_for_what_the_citation_carries():
+    e = parse_authorities(split_authorities(MARKER_ANSWER)[1])
+    assert sorted(e) == [1, 2, 3, 4]
+    assert e[1]["kind"] == "decision" and e[1]["number"] and e[1]["ecli"]
+    assert e[3]["kind"] == "commentary"
+    assert e[4]["kind"] == "instrument"
+    assert all(x["complete"] for x in e.values())
+
+
+def test_a_marker_in_a_claim_is_scored_on_the_entry_it_resolves_to():
+    c = citation_precheck(MARKER_ANSWER)
+    assert c["format"] == "authorities"
+    assert c["claims_with_citation"] == 3 and c["claims_without_citation"] == 1
+    assert c["complete_citations"] == 3
+    assert c["with_ecli"] == 1 and c["with_paragraph"] == 3
+    assert c["cap"] == 2
+
+
+def test_an_uncited_conclusion_is_counted_apart_and_not_against_the_share():
+    c = citation_precheck(MARKER_ANSWER)
+    assert c["per_claim"][0]["markers"] == []
+    assert c["claims"] == c["claims_with_citation"] + c["claims_without_citation"]
+
+
+def test_a_multi_marker_claim_takes_the_best_and_the_counts_stay_honest():
+    body = ("A decision may be annulled in part.[1][2]\n\n"
+            "## Authorities\n\n"
+            "**Court Decision**\n\n"
+            "- [1] Ashgrove Systems v Authority (T-100/09)\n"
+            "- [2] Bellhaven Retail v Authority (T-200/10, 2013-04-09)\n")
+    c = citation_precheck(body)
+    assert c["complete_citations"] == 1        # [2] carries the claim
+    assert c["authorities_incomplete"] == [1]  # [1] is still reported undated
+    assert c["with_date"] == 1 and c["per_claim"][0]["markers"] == [1, 2]
+
+
+def test_a_commentary_entry_is_complete_without_a_case_number():
+    body = ("Commentators agree.[1]\n\n"
+            "## Authorities\n\n"
+            "### Article (Review)\n\n"
+            "- [1] Partial annulment reconsidered (2019-05-21)\n")
+    e = parse_authorities(split_authorities(body)[1])
+    assert e[1]["kind"] == "commentary"
+    assert not e[1]["number"] and e[1]["complete"]
+    assert citation_precheck(body)["cap"] == 2
+
+
+def test_a_decision_without_a_number_is_not_complete():
+    body = ("The court so held.[1]\n\n"
+            "## Authorities\n\n"
+            "**Court Decision**\n\n"
+            "- [1] Ashgrove Systems v Authority (2012-11-14)\n")
+    assert parse_authorities(split_authorities(body)[1])[1]["complete"] is False
+    assert citation_precheck(body)["cap"] == 0
+
+
+def test_a_trailing_locator_is_read_off_the_entry():
+    e = parse_authorities(split_authorities(MARKER_ANSWER)[1])
+    assert e[1]["locators"] == ["para. 91"]
+    assert e[2]["locators"] == ["r.o. 4.2"]
+    assert e[3]["locators"] == ["pt. 44"]
+    assert e[4]["locators"] == ["recital 14"]
+
+
+def test_a_locator_is_not_mistaken_for_the_entry_title():
+    e = parse_authorities("- [1] (T-100/09, 2012-11-14), para. 91\n")
+    assert e[1]["title"] is False and e[1]["locators"] == ["para. 91"]
+
+
+def test_a_bare_docket_entry_is_not_a_title():
+    e = parse_authorities("**Court Decision**\n\n- [1] Case T-100/09\n")
+    assert e[1]["title"] is False and e[1]["complete"] is False
+
+
+def test_an_entry_wrapped_over_two_lines_is_read_as_one():
+    e = parse_authorities("**Court Decision**\n\n"
+                          "- [1] Ashgrove Systems v Authority (T-100/09,\n"
+                          "      2012-11-14), para. 91\n")
+    assert e[1]["number"] and e[1]["date"] and e[1]["complete"]
+
+
+def test_a_marker_with_no_entry_behind_it_counts_against_its_claim():
+    body = ("The court so held.[9]\n\n"
+            "## Authorities\n\n"
+            "**Court Decision**\n\n"
+            "- [1] Ashgrove Systems v Authority (T-100/09, 2012-11-14)\n")
+    c = citation_precheck(body)
+    assert c["unresolved_markers"] == [9]
+    assert c["per_claim"][0]["complete"] is False and c["cap"] == 0
+
+
+def test_an_answer_with_no_authorities_section_falls_back_to_the_claim_scan():
+    c = citation_precheck(GOOD_ANSWER)
+    assert c["format"] == "inline"
+    assert c["with_name_and_number"] == 3 and c["cap"] == 2
+    assert citation_precheck(FILENAME_ANSWER)["format"] == "inline"
+
+
+def test_a_filename_in_the_authorities_list_still_fails():
+    body = MARKER_ANSWER.replace(
+        "- [4] Regulation No 1/2003 (1/2003, 2002-12-16), recital 14",
+        "- [4] a-regulation.md")
+    c = citation_precheck(body)
+    assert c["filename_citations"] == ["a-regulation.md"]
+    assert c["cap"] == 1
+
+
+def test_every_marker_pointing_at_a_filename_caps_at_zero():
+    body = ("A decision may be annulled in part.[1]\n\n"
+            "## Authorities\n\n"
+            "**Court Decision**\n\n"
+            "- [1] a-judgment.md\n")
+    c = citation_precheck(body)
+    assert c["filename_citations"] == ["a-judgment.md"]
+    assert c["cap"] == 0
 
 
 # ── duplicate pre-check ──────────────────────────────────────────────────────

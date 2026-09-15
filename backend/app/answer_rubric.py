@@ -15,6 +15,11 @@ reading them one at a time. A model judges; where the text itself settles a
 point (a filename is a filename), a deterministic pre-check caps the score
 so the judge cannot be generous about it.
 
+A pre-check is only as good as the text it reads. Answers come in two
+formats — the citation inline in the claim, or a numeric marker in the claim
+and the citation once in an `Authorities` list at the end — and the citation
+pre-check detects which before it scores anything.
+
     python -m app.answer_rubric score <dir>            # <name>.md -> <name>.rubric.json
     python -m app.answer_rubric compare <base> <cand>  # per-criterion deltas
 
@@ -70,8 +75,12 @@ CRITERIA: dict[str, str] = {
     "citations_complete": (
         "Every authority cited carries a name, a case or instrument number "
         "and a date, plus an ECLI and paragraph number where the source "
-        "has them. Never a filename and never a bare identifier. 2: "
-        "complete throughout; 1: mostly named but numbers or dates often "
+        "has them. Never a filename and never a bare identifier. Where the "
+        "answer cites by numeric marker and lists its authorities at the "
+        "end, judge the entry a marker resolves to and not the sentence "
+        "carrying it; and a source that has no case number of its own — a "
+        "commentary article, a book — is complete with a title and a date. "
+        "2: complete throughout; 1: mostly named but numbers or dates often "
         "missing; 0: authorities identified by filename or by a bare "
         "number."),
     "no_duplicate_authorities": (
@@ -142,7 +151,11 @@ _CLAIM_START = re.compile(r"^\s*(?:\*\*)?\d+\.(?:\*\*)?\s+")
 
 def claims(body: str) -> list[str]:
     """The answer as a list of claims: numbered paragraphs (`**1.** …` or
-    `1. …`) when it has them, otherwise every non-heading paragraph."""
+    `1. …`) when it has them, otherwise every non-heading paragraph. The
+    Authorities list at the end is apparatus, not claims, and is dropped —
+    otherwise its entries are counted and numbered as if a reader could
+    read them as assertions."""
+    body, _ = split_authorities(body)
     paras = [p.strip() for p in re.split(r"\n\s*\n", body or "") if p.strip()]
     numbered = [p for p in paras if _CLAIM_START.match(p)]
     if numbered:
@@ -199,13 +212,166 @@ _YEAR = re.compile(r"\b(?:19|20)\d{2}\b")
 _PARA = re.compile(r"\b(?:para(?:graph)?s?\.?|points?|recital)\s+\(?\d+", re.I)
 
 
+# ── the Authorities apparatus ────────────────────────────────────────────────
+#
+# Two answer formats are in the field. The older one puts the citation inline
+# in the claim sentence; the current one puts a numeric marker there — `[1]`,
+# or `[2][3]` for several — and carries the citation once at the end, under an
+# `Authorities` heading, grouped by document class:
+#
+#     ## Authorities
+#
+#     **Court Decision**
+#
+#     - [1] Case 155/79 - X v Y (C-155/79, ECLI:EU:C:1982:95, 1982-05-18)
+#     - [4] Case T-125/03 - X v Y (T-125/03, 2007-01-01), para. 83
+#
+# Scoring a marker-carrying sentence for a case number is scoring the wrong
+# text, so the marker is resolved to its entry first and the entry is scored.
+
+_AUTHORITIES_HEADING = re.compile(
+    r"^[ \t]{0,3}(?:#{1,6}[ \t]*|\*\*)[ \t]*authorities[ \t]*\**[ \t]*:?[ \t]*$", re.I)
+_ENTRY = re.compile(r"^[ \t]*(?:[-*•][ \t]+)?\[(\d+)\][ \t]*(.+?)[ \t]*$")
+_GROUP_HEADING = re.compile(
+    r"^[ \t]{0,3}(?:#{1,6}[ \t]*(?P<h>.+?)|\*\*(?P<b>.+?)\*\*)[ \t]*:?[ \t]*$")
+_MARKER = re.compile(r"\[(\d+)\]")
+# para. 83 · paras 12-14 · pt. 44 · point 12 · recital 14 · r.o. 4.2 · § 7
+_LOCATOR = re.compile(
+    r"(?:\b(?:paras?|paragraphs?|pts?|points?|recitals?|r\.o)\.?|§§?)"
+    r"[ \t]*\(?\d+(?:[.\-–]\d+)*", re.I)
+_PARENS = re.compile(r"\([^()]*\)")
+_ALPHA_WORD = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
+# Words that dress an identifier rather than name a source: "Case T-100/09"
+# is a docket, not a title.
+_FILLER = frozenset({"case", "cases", "joined", "and", "others", "nos"})
+
+# Document classes, by what the group heading says. A court decision is
+# expected to identify itself by number; a commentary article legitimately
+# cannot, and holding that against it is what made the old check unusable.
+_KIND_WORDS = (
+    ("decision", re.compile(
+        r"\b(?:courts?|decisions?|judgments?|judgements?|orders?|rulings?|"
+        r"case[ -]law|jurisprudence)\b", re.I)),
+    ("instrument", re.compile(
+        r"\b(?:legislation|regulations?|directives?|treaty|treaties|statutes?|"
+        r"conventions?|charters?|notices?|guidelines?|acts?)\b", re.I)),
+)
+# What "complete" means per class: the attributes an entry of that class must
+# carry. An ECLI is recorded but never required — a source either has one or
+# does not, and the text cannot tell which.
+_COMPLETE_BY_KIND = {
+    "decision": ("title", "number", "date"),
+    "instrument": ("title", "number", "date"),
+    "commentary": ("title", "date"),
+}
+
+
+def split_authorities(body: str) -> tuple[str, str]:
+    """(claims, authorities): the body split at the `Authorities` heading.
+    No such heading — the older format — leaves the body whole and the
+    second half empty, which is how the two formats are told apart."""
+    lines = (body or "").splitlines()
+    for i, line in enumerate(lines):
+        if _AUTHORITIES_HEADING.match(line):
+            return "\n".join(lines[:i]).strip(), "\n".join(lines[i + 1:]).strip()
+    return (body or "").strip(), ""
+
+
+def _entry_kind(group: str, has_identifier: bool) -> str:
+    """The document class of an entry, from its group heading. With no
+    heading to go on, an entry that identifies itself by docket or ECLI is
+    read as a decision and everything else as commentary."""
+    heading = (group or "").strip()
+    for kind, pattern in _KIND_WORDS:
+        if pattern.search(heading):
+            return kind
+    if heading:
+        return "commentary"
+    return "decision" if has_identifier else "commentary"
+
+
+def _parse_entry(marker: int, text: str, group: str) -> dict:
+    """One Authorities entry, read for what a citation must carry."""
+    locators = [m.group(0) for m in _LOCATOR.finditer(text)]
+    body = _LOCATOR.sub(" ", text)
+    # The title is what is left once the identifier apparatus is removed:
+    # nested parentheticals, then numbers, ECLIs and dates.
+    bare = body
+    while _PARENS.search(bare):
+        bare = _PARENS.sub(" ", bare)
+    for pattern in (_ECLI, _NUMBER, _DATE):
+        bare = pattern.sub(" ", bare)
+    # A title is a caption of its own — two words that are not apparatus —
+    # or the name of an instrument, which may be a single word.
+    words = [w for w in _ALPHA_WORD.findall(bare) if w.lower() not in _FILLER]
+    ecli = bool(_ECLI.search(text))
+    return {
+        "marker": marker,
+        "group": group,
+        "kind": _entry_kind(group, bool(ecli or _NUMBER.search(body))),
+        "title": len(words) >= 2 or bool(_INSTRUMENT.search(bare)),
+        "number": bool(_NUMBER.search(body)),
+        "ecli": ecli,
+        "date": bool(_DATE.search(text)),
+        "year": bool(_DATE.search(text) or _YEAR.search(_NUMBER.sub(" ", body))),
+        "locators": locators,
+        "text": text,
+    }
+
+
+def parse_authorities(block: str) -> dict[int, dict]:
+    """`{marker: entry}` for an Authorities block. Group headings — `###` or
+    a bold line — name the document class of the entries under them; an
+    entry wrapped over several lines is joined back together."""
+    entries: dict[int, dict] = {}
+    group = ""
+    open_marker: int | None = None
+    for raw in (block or "").splitlines():
+        line = raw.rstrip()
+        if not line.strip():
+            open_marker = None
+            continue
+        m = _ENTRY.match(line)
+        if m:
+            open_marker = int(m.group(1))
+            entries[open_marker] = _parse_entry(open_marker, m.group(2), group)
+            continue
+        heading = _GROUP_HEADING.match(line)
+        if heading:
+            group = (heading.group("h") or heading.group("b") or "").strip(" *:")
+            open_marker = None
+            continue
+        if open_marker is not None and raw.startswith((" ", "\t")):
+            e = entries[open_marker]
+            entries[open_marker] = _parse_entry(
+                open_marker, f"{e['text']} {line.strip()}", e["group"])
+        else:
+            open_marker = None
+    for e in entries.values():
+        e["complete"] = all(e[a] for a in _COMPLETE_BY_KIND[e["kind"]])
+    return entries
+
+
 def citation_precheck(body: str) -> dict:
     """What the text settles about citations before any judge reads it.
 
     A filename is not a citation, whatever the judge thinks of the prose
     around it; and a claim that names no authority and gives no number
     cites nothing. The result caps `citations_complete`: 2 leaves the
-    judge free, 1 and 0 are ceilings."""
+    judge free, 1 and 0 are ceilings.
+
+    Which text carries the citation depends on the format, so the format is
+    detected, never assumed: an answer with a parseable Authorities list is
+    scored on the entries its markers resolve to, one without is scored on
+    the claim sentences as before."""
+    entries = parse_authorities(split_authorities(body)[1])
+    if entries:
+        return _resolved_precheck(body, entries)
+    return _inline_precheck(body)
+
+
+def _inline_precheck(body: str) -> dict:
+    """The older format: the citation is in the claim sentence."""
     cl = claims(body)
     filenames = sorted({m.group(0) for m in _FILENAME.finditer(body or "")})
     per = []
@@ -229,6 +395,7 @@ def citation_precheck(body: str) -> dict:
     else:
         cap = 2 if share >= 0.8 else 1 if share >= 0.3 else 0
     return {
+        "format": "inline",
         "claims": len(per),
         "filename_citations": filenames,
         "with_name_and_number": named,
@@ -236,6 +403,74 @@ def citation_precheck(body: str) -> dict:
         "with_year_only": sum(1 for p in per if p["year"] and not p["date"]),
         "with_ecli": sum(1 for p in per if p["ecli"]),
         "with_paragraph": sum(1 for p in per if p["para"]),
+        "cap": cap,
+        "per_claim": per,
+    }
+
+
+def _resolved_precheck(body: str, entries: dict[int, dict]) -> dict:
+    """The current format: the claim carries markers, the Authorities list
+    carries the citation. Each claim is scored on the entries its markers
+    resolve to — several markers are satisfied by the best of them for each
+    attribute, and the counts below say how many claims that was.
+
+    A claim with no marker cites nothing and asserts nothing about
+    citations; it is counted apart and left out of the share. A marker with
+    no entry behind it is a citation that does not resolve, and counts
+    against the claim that made it."""
+    cl = claims(body)
+    filenames = sorted({m.group(0) for m in _FILENAME.finditer(body or "")})
+    per, unresolved = [], set()
+    for i, c in enumerate(cl, start=1):
+        markers = [int(m) for m in _MARKER.findall(c)]
+        seen = [entries[m] for m in markers if m in entries]
+        missing = sorted({m for m in markers if m not in entries})
+        unresolved.update(missing)
+        per.append({
+            "claim": i,
+            "markers": markers,
+            "unresolved": missing,
+            "kinds": sorted({e["kind"] for e in seen}),
+            "name": any(e["title"] for e in seen),
+            "number": any(e["number"] for e in seen),
+            "date": any(e["date"] for e in seen),
+            "year": any(e["year"] for e in seen),
+            "ecli": any(e["ecli"] for e in seen),
+            "para": any(e["locators"] for e in seen),
+            "complete": any(e["complete"] for e in seen),
+        })
+    cited = [p for p in per if p["markers"]]
+    complete = sum(1 for p in cited if p["complete"])
+    share = complete / len(cited) if cited else 0.0
+    # The thresholds are stricter than the inline check's 0.8/0.3 because
+    # what they measure is easier to satisfy: completeness is now judged per
+    # source class — a commentary article needs a title and a date, not a
+    # case number — so "complete throughout" should mean nearly all of them.
+    # A filename anywhere is still the hard failure it always was.
+    if filenames:
+        cap = 0 if share < 0.5 else 1
+    else:
+        cap = 2 if share >= 0.9 else 1 if share >= 0.5 else 0
+    kinds: dict[str, int] = {}
+    for e in entries.values():
+        kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+    return {
+        "format": "authorities",
+        "claims": len(per),
+        "authorities": len(entries),
+        "authorities_by_kind": kinds,
+        "authorities_incomplete": sorted(m for m, e in entries.items()
+                                         if not e["complete"]),
+        "filename_citations": filenames,
+        "claims_with_citation": len(cited),
+        "claims_without_citation": len(per) - len(cited),
+        "unresolved_markers": sorted(unresolved),
+        "with_name_and_number": sum(1 for p in cited if p["name"] and p["number"]),
+        "with_date": sum(1 for p in cited if p["date"]),
+        "with_year_only": sum(1 for p in cited if p["year"] and not p["date"]),
+        "with_ecli": sum(1 for p in cited if p["ecli"]),
+        "with_paragraph": sum(1 for p in cited if p["para"]),
+        "complete_citations": complete,
         "cap": cap,
         "per_claim": per,
     }

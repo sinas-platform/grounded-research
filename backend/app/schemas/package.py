@@ -44,6 +44,14 @@ class PackagePropertyEntry(_Strict):
     schema_version: int = 1
 
 
+class PackageDeclaredProperty(_Strict):
+    """One header key a class reads directly instead of asking a model."""
+
+    key: str
+    property: str
+    on_conflict: Literal["replace", "fill_only"] = "fill_only"
+
+
 class PackageDocumentClassEntry(_Strict):
     name: str
     slug: str | None = None
@@ -69,6 +77,18 @@ class PackageDocumentClassEntry(_Strict):
     # may be identified by number and never named in words, or the reverse.
     name_property: str | None = None
     attribution_cues: list[str] = Field(default_factory=list)
+    # Properties whose value a document of this class states about itself, in
+    # its front matter. Each entry is {key, property, on_conflict}: which
+    # header key feeds which declared property, and whether the header is the
+    # source of truth for it or merely one source among others.
+    #
+    # Here rather than in the platform for the same reason the identifier
+    # shape is. What a header key means, and whether a printed date beats an
+    # extracted one, is knowledge about a collection. `on_conflict: replace`
+    # says the document is right and a model that disagreed was wrong;
+    # `fill_only`, the default, says fill a gap and leave what is there.
+    declared_properties: list["PackageDeclaredProperty"] = Field(
+        default_factory=list)
     properties: list[PackagePropertyEntry] = Field(default_factory=list)
     # entity types attached to this document class, by entity-type name
     entity_types: list[str] = Field(default_factory=list)

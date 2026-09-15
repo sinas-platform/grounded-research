@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 import json
 import re
 import uuid
@@ -451,6 +452,71 @@ async def _existing_mention_entity_ids(
     )
 
 
+
+async def _write_declared_properties(
+    session, *, document_id, version_id, class_id, content, class_props,
+    write: bool,
+) -> dict:
+    """Write the properties this document states about itself.
+
+    Split out rather than inlined because the same work has to be available to
+    a script: the 693 disagreements measured on one corpus are in documents
+    already ingested, and a fix that only runs on arrival would never reach
+    one of them. The planning is pure and lives in `declared_properties`; this
+    is the part that reads and writes rows.
+    """
+    from app.services.declared_properties import (
+        Existing, plan_declared_values, replacement_reason)
+    from app.services.front_matter import split_front_matter
+
+    if not class_id or not class_props:
+        return {"mapped": 0}
+    mapping = (await session.execute(
+        select(DocumentClass.declared_properties)
+        .where(DocumentClass.id == class_id))).scalar_one_or_none() or []
+    if not mapping:
+        return {"mapped": 0}
+    header, _body = split_front_matter(content or "")
+    if not header:
+        return {"mapped": len(mapping), "no_front_matter": True}
+
+    by_name = {p["name"]: p for p in class_props}
+    rows = (await session.execute(
+        select(PropertyValue).where(
+            PropertyValue.document_id == document_id))).scalars().all()
+    by_prop_id = {r.property_id: r for r in rows}
+    existing = {}
+    for name, p in by_name.items():
+        r = by_prop_id.get(p["id"])
+        if r is not None:
+            existing[name] = Existing(
+                value=str((r.value or {}).get("_", "")),
+                method=r.method, locked=bool(r.locked))
+
+    plan = plan_declared_values(header, mapping, existing)
+    today = datetime.now(timezone.utc).date().isoformat()
+    for w in plan.write:
+        p = by_name.get(w.property)
+        if p is None:
+            continue
+        if not write:
+            continue
+        row = by_prop_id.get(p["id"])
+        if row is not None:
+            row.value = wrap_property_value(w.value)
+            row.method = w.method
+            row.confidence = w.confidence
+            row.document_version_id = version_id
+            row.reason = replacement_reason(today, w.replaces)
+        else:
+            session.add(PropertyValue(
+                property_id=p["id"], document_id=document_id,
+                document_version_id=version_id,
+                value=wrap_property_value(w.value),
+                method=w.method, confidence=w.confidence,
+                reason=replacement_reason(today, w.replaces)))
+    return {"mapped": len(mapping), **plan.as_dict()}
+
 async def oneshot_ingest_document(
     session: AsyncSession,
     sinas: _Sinas,
@@ -679,6 +745,17 @@ async def oneshot_ingest_document(
         from app.services.toc import derive_toc
 
         doc.toc = {"entries": derive_toc(content)}
+
+    # properties the document states about itself, before anything is asked
+    # of the model's reply. A value read from the header outranks one a model
+    # returned, and a person's decision outranks both, which is what
+    # `plan_declared_values` encodes. Run first so `existing` below sees what
+    # this wrote and the model's answer cannot land on top of it.
+    declared_report = await _write_declared_properties(
+        session, document_id=document_id, version_id=version.id,
+        class_id=known_class_id, content=content, class_props=class_props,
+        write=write)
+    report["declared_properties"] = declared_report
 
     # properties
     written_props = 0

@@ -375,6 +375,62 @@ def test_a_document_is_never_cited_by_its_filename():
     assert "- [1] T-451/20" in md
 
 
+def _cite_only(doc: dict) -> str:
+    """The answer built around a single document, so what its citation says
+    can be read out of the prose and the Authorities list together."""
+    return render_markdown(
+        _answer(),
+        [{"id": "x", "sequence": 1, "section": "analysis", "part_index": 0,
+          "position": 1, "claim_text": "Something."}],
+        [{"claim_id": "x", "document_id": "d9",
+          "span": {"paragraph_ref": "44"}}],
+        {"d9": doc}).markdown
+
+
+def test_a_document_with_no_number_is_cited_by_title_and_date_alone():
+    """The identifier slot used to fall back to `external_ref`, which is the
+    file's name whenever the connector supplied no natural key — so every
+    source without a case number or a CELEX was cited by a storage name a
+    reviewer called useless. It says less instead."""
+    md = _cite_only({
+        "title": "Professional duties: what the deciding body said",
+        "external_ref": "stored-file-9174.md",
+        "filename": "stored-file-9174.md",
+        "class": "Commentary",
+        "properties": {"date": "2010-09-14"}})
+    assert ("- [1] Professional duties: what the deciding body said "
+            "(2010-09-14), para. 44") in md
+    assert ".md" not in md
+    assert "stored-file" not in md
+
+
+def test_a_document_with_a_case_number_is_cited_as_it_always_was():
+    md = _cite_only(DOCS["d1"])
+    assert ("- [1] Kestrel Holdings v Northmoor Authority (T-100/20, "
+            "ECLI:XX:YY:2021:1, 2021-05-04), para. 44") in md
+
+
+def test_a_document_with_no_title_is_named_by_what_it_is_not_by_its_file():
+    md = _cite_only({"title": None, "external_ref": "storage-name-9174.md",
+                     "filename": "storage-name-9174.md", "class": "Commentary",
+                     "properties": {"date": "2010-09-14"}})
+    assert "- [1] Commentary (2010-09-14), para. 44" in md
+    assert "storage-name-9174" not in md
+
+
+def test_the_assembler_never_reads_a_filename():
+    """The display rule held only while every branch of `citation` remembered
+    it. What the assembler does not hold, it cannot print: the rows it reads
+    carry the declared identity and no file name at all."""
+    import inspect
+
+    from app.services import answer_render
+
+    src = inspect.getsource(answer_render.assemble)
+    assert "Document.filename" not in src
+    assert "Document.external_ref" not in src
+
+
 def test_an_answer_that_cites_nothing_says_so_rather_than_printing_a_heading():
     md = render_markdown(_answer(), _claims(), [], {}).markdown
     assert "(No sources cited.)" in md
@@ -390,6 +446,16 @@ def test_a_citation_is_name_number_ecli_and_date():
 def test_a_citation_with_nothing_to_say_still_names_something():
     assert citation({}) == "Untitled source"
     assert citation(None) == "Untitled source"
+
+
+def test_the_identifier_slot_holds_a_declared_property_or_nothing():
+    """`external_ref` is the source's natural key when a connector supplies
+    one and the file's name when it does not, and the citation cannot tell
+    the two apart. So it holds neither."""
+    assert citation({"title": "A Textbook Chapter", "class": "Commentary",
+                     "external_ref": "chapter-2024.md",
+                     "properties": {"date": "2024-03-01"}}
+                    ) == "A Textbook Chapter (2024-03-01)"
 
 
 def test_a_bare_integer_gets_the_word_and_every_other_label_is_verbatim():

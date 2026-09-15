@@ -98,12 +98,20 @@ def _first(props: dict, keys: tuple[str, ...]) -> str | None:
 
 def citation(doc: dict | None) -> str:
     """`<title> (<case_number or celex>, <ecli if present>, <date>)` — and
-    never a filename. A document with no title is named by its natural key,
-    and one with neither by what it is."""
+    never a filename. A document with no number is cited by title and date
+    alone; one with no title either is named by what it is.
+
+    The identifier slot holds a declared property and nothing else. It used
+    to fall back to `external_ref`, which is the source's natural key when a
+    connector supplies one and the FILE'S NAME when it does not — so every
+    document without a case number or a CELEX was cited by a storage name a
+    reviewer called useless. A citation that cannot say which authority it
+    points at should say less, not say a filename.
+    """
     doc = doc or {}
     props = _props(doc)
     title = _str(doc.get("title")).strip()
-    number = _first(props, _NUMBER_KEYS) or _str(doc.get("external_ref")).strip()
+    number = _first(props, _NUMBER_KEYS)
     ecli = _first(props, _ECLI_KEYS)
     d = document_date(props)
     if not title:
@@ -292,7 +300,7 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
     `answer` carries `question`, `question_parts` and `law_stated_as_at`;
     `claims` are the claim rows as dicts; `evidence` the evidence rows
     (`claim_id`, `document_id`, `span`, optionally `paragraph_ref`);
-    `documents` maps document id → {title, external_ref, class, properties}.
+    `documents` maps document id → {title, class, properties}.
     Ids may be UUIDs or strings; they are compared as strings.
     """
     cites = _Cites()
@@ -437,16 +445,18 @@ async def assemble(session: Any, answer_id: Any,
     doc_ids = {e.document_id for e in ev_rows}
     documents: dict[str, dict] = {}
     if doc_ids:
+        # Neither the filename nor `external_ref` is read: a document is
+        # cited by its declared identity — title, number, ECLI, date — and
+        # `external_ref` is the file's name whenever the connector supplied
+        # no natural key. What the assembler never holds, it cannot print.
         rows = (await session.execute(
-            select(Document.id, Document.filename, Document.external_ref,
-                   DocumentClass.name, document_title_subquery())
+            select(Document.id, DocumentClass.name, document_title_subquery())
             .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
             .where(Document.id.in_(doc_ids))
         )).all()
-        for did, filename, external_ref, class_name, title in rows:
+        for did, class_name, title in rows:
             documents[str(did)] = {
-                "title": title, "external_ref": external_ref,
-                "class": class_name, "filename": filename, "properties": {}}
+                "title": title, "class": class_name, "properties": {}}
         prop_rows = (await session.execute(
             select(PropertyValue.document_id, DocumentClassProperty.name,
                    PropertyValue.value)

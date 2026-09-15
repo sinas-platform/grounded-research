@@ -273,6 +273,19 @@ async def outstanding(run_id: uuid.UUID) -> list[dict[str, Any]]:
     return [e for e in entries.values() if e.get("state") == ANSWERED]
 
 
+@_best_effort(list)
+async def open_points(run_id: uuid.UUID) -> list[dict[str, Any]]:
+    """Requests put to the drafter and not yet answered, oldest first.
+
+    The other side of `outstanding`, and the one the drafter is shown. A
+    request reached it buried in the prose of one feedback line among ten,
+    inside a call with no memory of ever having been asked; the reply it was
+    entitled to make was never made once. This is the list a round presents on
+    its own, each entry with the id that names it.
+    """
+    return [e for e in await ledger(run_id) if e.get("state") == OPEN]
+
+
 @_best_effort(None)
 async def rule(run_id: uuid.UUID, oid: str, ruling: str, added: str = "",
                cycle: int = 0) -> None:

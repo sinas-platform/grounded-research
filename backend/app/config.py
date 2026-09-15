@@ -78,6 +78,16 @@ class Settings(BaseSettings):
     sgr_draft_mode: Literal["extract"] = Field(
         default="extract", validation_alias="SGR_DRAFT_MODE"
     )
+    # How many feedback exchanges the drafting conversation carries whole
+    # before the oldest ones are folded into a one-line-per-round summary.
+    # Drafting is one chat per answer: the brief is turn one and every
+    # revision round is a later turn, so the transcript grows with the loop.
+    # At the cap the conversation is restarted from the SAME brief — which
+    # keeps the cached prefix — with a summary turn standing in for the
+    # rounds that were dropped.
+    sgr_draft_chat_exchanges: int = Field(
+        default=4, validation_alias="SGR_DRAFT_CHAT_EXCHANGES"
+    )
     # Hard per-run spend ceiling in USD, summed over the run's LLM usage and
     # checked at every supervision poll. A run that crosses it ends "partial"
     # with whatever it has verified, never mid-write.

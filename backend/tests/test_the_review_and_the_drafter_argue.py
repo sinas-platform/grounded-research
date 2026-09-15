@@ -541,7 +541,11 @@ def reviser(monkeypatch):
         async def get(self, model, ident):
             name = getattr(model, "__name__", "")
             if name == "QueryRun":
-                return SimpleNamespace(parent_result_id=None, telemetry=tele)
+                # `synthesis_chat_id` is the run row's pointer at the drafting
+                # conversation. A revision is a turn in it, so the stub has to
+                # carry one or `_revise_answer` has no chat to speak into.
+                return SimpleNamespace(parent_result_id=None, telemetry=tele,
+                                       synthesis_chat_id="chat-1")
             if name == "Answer":
                 return SimpleNamespace(question_parts=PARTS)
             return by_id.get(ident)
@@ -569,7 +573,12 @@ def reviser(monkeypatch):
         tele.setdefault(stage, {}).update(detail)
 
     class _Sinas:
-        async def invoke(self, _agent, _message):
+        """The conversation's half of the client: a revision is one turn."""
+
+        async def chat_create(self, _agent, _title):
+            return "chat-1"
+
+        async def chat_send(self, _chat_id, _content, _agent=""):
             return reply["text"]
 
     async def _none(*_a, **_k):
@@ -596,7 +605,7 @@ def reviser(monkeypatch):
     async def run(patch: dict) -> int:
         reply["text"] = json.dumps(patch)
         return await qr._revise_answer(
-            _Sinas(), RUN, uuid.uuid4(), "Does it apply?",
+            _Sinas(), RUN, uuid.uuid4(),
             ["Claim 1: the named source is more direct."])
 
     return SimpleNamespace(run=run, tele=tele, claims=claims,

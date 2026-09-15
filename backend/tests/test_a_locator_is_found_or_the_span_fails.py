@@ -129,10 +129,16 @@ def test_the_drafter_is_asked_for_the_locator_and_told_not_to_invent_one():
 
 def test_the_reviser_is_asked_for_it_too():
     """The reviser writes claims and evidence rows the same way the drafter
-    does, and the same check runs over them."""
-    src = _prompt(qr._revise_answer)
-    assert '"locator"' in src
-    assert "Never derive one and never count paragraphs" in src
+    does, and the same check runs over them.
+
+    It is asked once, not twice: drafting and revising are one conversation,
+    so the rule is stated in the brief and the patch schema asks for the
+    field. A second copy on every round would be the same sentence paid for
+    ten times.
+    """
+    assert '"locator"' in qr._PATCH_SCHEMA
+    brief = _prompt(qr._draft_from_extracts)
+    assert "Never derive one, never count paragraphs" in brief
 
 
 def test_the_extractor_is_told_to_keep_the_label_on_the_front_of_the_quote():

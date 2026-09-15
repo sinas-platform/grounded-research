@@ -2,11 +2,16 @@
 
 The choreography of a question — retrieve, synthesize, validate, publish —
 lives HERE, in code, with per-stage state checkpointed on the QueryRun row.
-Agents are consulted only for judgment, via stateless one-shot invokes:
+Agents are consulted for judgment only. Every consultation but one is a
+stateless one-shot invoke; the exception is drafting, which is a single
+conversation per answer (see `services/drafting_chat`), because a drafter
+that cannot remember what it wrote cannot defend it and cannot reuse a
+cached prefix.
 
   retrieve    the retrieval-first engine (app/retrieval_first): schema-aware
               plan + deterministic channels, in-process
-  synthesize  sgr/retrieval-planner-agent (argument plan, draft, revisions)
+  synthesize  sgr/retrieval-planner-agent — the argument plan as a one-shot,
+              then ONE chat carrying the draft and every revision of it —
               and sgr/passage-extractor-agent (verbatim grounding extracts)
   verdicts    the stateless evidence-check fan-out (services/faithfulness),
               then sgr/answer-gate-agent judging the surviving answer
@@ -29,6 +34,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.auth import CallerIdentity
 from app.config import get_settings
@@ -47,6 +53,7 @@ from app.services import (
     answer_render,
     answer_structure,
     claim_naming,
+    drafting_chat,
     objections,
     obligations,
     supersession,
@@ -73,6 +80,19 @@ MIN_CLAIMS = 6
 # one answer reached 29 claims. Additions stop here; the gate can still have
 # claims dropped or rewritten when it objects.
 MAX_CLAIMS = 14
+
+#: The agent that drafts and revises. Named once because the drafting
+#: conversation is one chat belonging to it, and a second name here would be a
+#: second chat.
+DRAFTER_AGENT = "sgr/retrieval-planner-agent"
+
+#: Where the drafting conversation's bookkeeping lives inside `telemetry`.
+#: The chat ID ALSO lives in its own column (`query_run.synthesis_chat_id`),
+#: which is the column the activity endpoint already reads; this carries what
+#: a column cannot, which is how many rounds the conversation has run and what
+#: each of them settled.
+DRAFT_CHAT_KEY = "draft_chat"
+
 # Hard per-run spend ceiling in USD, summed over the run's synthesis chat
 # (which also carries remediation traffic — empirically where runaway spend
 # lives; one observed run burned $23.81 there hunting unanchorable evidence).
@@ -263,6 +283,26 @@ class _Sinas:
 
         asyncio.create_task(_fire())
 
+    async def chat_send(self, chat_id: str, content: str,
+                        agent: str = "") -> str:
+        """One turn of an existing conversation, and the reply to it.
+
+        The counterpart of `invoke` for a chat that outlives the call. Sinas
+        replays the chat's stored history on every message, so the provider
+        underneath sees a growing message list whose prefix does not change —
+        which is the whole point: its rolling cache breakpoint sits on the
+        last message, so each turn reads back the prefix the previous turn
+        wrote instead of paying for it again.
+
+        `agent` is passed for the retry telemetry only; the chat already
+        knows which agent it belongs to.
+        """
+        return await self._retrying(
+            agent or "chat",
+            lambda c: c.post(f"{self.base}/chats/{chat_id}/messages",
+                             headers=self.headers, json={"content": content}),
+            reply_key="content")
+
     async def invoke(self, agent: str, message: str) -> str:
         """One agent call, retried past a transient upstream failure.
 
@@ -278,22 +318,31 @@ class _Sinas:
         `APIStatusError` carrying `overloaded_error`, which is why the attempt
         is recorded: the second cost an hour to recognise as the first.
         """
+        return await self._retrying(
+            agent,
+            lambda c: c.post(f"{self.base}/agents/{agent}/invoke",
+                             headers=self.headers, json={"message": message}),
+            reply_key="reply")
+
+    async def _retrying(self, agent: str, request, reply_key: str) -> str:
+        """One model-bearing POST, retried past a transient upstream failure.
+
+        Shared by `invoke` and `chat_send` so the two cannot drift: both start
+        model work, both cost money, and both have to behave the same way when
+        the provider is overloaded.
+        """
         last: Exception | None = None
         for attempt, wait in enumerate((*INVOKE_RETRY_WAITS, None)):
             try:
                 async with httpx.AsyncClient(timeout=600.0) as c:
-                    r = await c.post(
-                        f"{self.base}/agents/{agent}/invoke",
-                        headers=self.headers,
-                        json={"message": message},
-                    )
+                    r = await request(c)
                     r.raise_for_status()
                     data = r.json()
                 if attempt:
                     await _tele_invoke_retry(self.run_id, agent, attempt,
                                              last, recovered=True)
                 await record_llm_call(self.run_id, data.get("chat_id"), agent)
-                return data.get("reply", "") or ""
+                return data.get(reply_key, "") or ""
             except Exception as exc:  # noqa: BLE001
                 if wait is None or not _is_transient(exc):
                     if attempt:
@@ -452,7 +501,15 @@ def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list
     before the call returned.
     """
     ids: list[str] = []
-    for entry in (telemetry or {}).values():
+    for key, entry in (telemetry or {}).items():
+        # The drafting conversation is excluded by name, and deliberately.
+        # It is the one chat a run is meant to REJOIN: a failed run is
+        # resumable, and the conversation holding the brief, the passages and
+        # every argument the drafter has already made is the most expensive
+        # thing the run owns. Archiving stops no work (see `_teardown_chats`),
+        # so tearing it down could only cost a resume its memory.
+        if key == DRAFT_CHAT_KEY:
+            continue
         if isinstance(entry, dict) and isinstance(entry.get("chat_id"), str):
             ids.append(entry["chat_id"])
     for meta in (searches or {}).values():
@@ -887,6 +944,53 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
 
 
 DRAFT_MODE = get_settings().sgr_draft_mode
+
+
+async def _drafting_chat(run_id: uuid.UUID, sinas: _Sinas) -> drafting_chat.DraftingChat:
+    """The run's drafting conversation, as the run row left it.
+
+    Rebuilt rather than passed down the call stack, because the two stages
+    that talk to the drafter — synthesis and validation — are separate entry
+    points and a resumed run enters at the second one. The chat id lives on
+    the RUN, not the answer: a run is the resumable unit, `run_pipeline` is
+    handed a run id and nothing else, and the column that holds it is the one
+    the activity endpoint already serves a conversation from.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = dict(((run.telemetry or {}).get(DRAFT_CHAT_KEY)) or {}) if run else {}
+        chat_id = (run.synthesis_chat_id if run else None) or stored.get("chat_id")
+    chat = drafting_chat.DraftingChat(
+        client=sinas, agent=DRAFTER_AGENT,
+        max_exchanges=get_settings().sgr_draft_chat_exchanges)
+    chat.restore(stored)
+    chat.chat_id = chat_id
+    return chat
+
+
+async def _save_drafting_chat(run_id: uuid.UUID,
+                              chat: drafting_chat.DraftingChat) -> None:
+    """Write the conversation back, id and rounds together.
+
+    Best-effort in the same sense as the rest of the bookkeeping: a write that
+    fails costs the conversation its memory of how many rounds it has run,
+    which degrades to the behaviour this replaces rather than failing a run
+    that has an answer in it.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            run = await session.get(QueryRun, run_id)
+            if run is None:
+                return
+            tel = dict(run.telemetry or {})
+            tel[DRAFT_CHAT_KEY] = chat.state()
+            run.telemetry = tel
+            flag_modified(run, "telemetry")
+            run.synthesis_chat_id = (chat.chat_id or "")[:64] or None
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        _log.warning("could not record the drafting conversation for run %s",
+                     run_id, exc_info=True)
 
 
 # Upper bound, in characters, on one unit of numbered text handed to the
@@ -2047,19 +2151,164 @@ RETRY_CLAIM_FRACTION = 0.5
 RETRY_MIN_CLAIMS = 4
 
 
-def _shorter_draft_prompt(prompt: str, cap: int) -> str:
-    """The drafting prompt again, with the ask cut down. Pure.
+#: The shape the drafter replies in. Six fields it used to author are gone:
+#: `section`, which follows from `kind`; `authority_label`,
+#: `jurisdiction_note` and `currency_note`, which follow from the cited
+#: document; `position`, which follows from the reply's order; and the `test`
+#: wrapper, whose `conditions` are now flat on the claim. Each was a decision
+#: the engine could make from what it already had, and every one of them was
+#: output the model had to spend before it could emit a single claim.
+_DRAFT_SCHEMA = (
+    '{"claims": [{"n": <1, 2, ...>, "text": "<claim, one sentence>", '
+    '"part": <part number or null>, "kind": '
+    '"legal_principle|factual|procedural|conclusion|test|label|inference", '
+    '"follows_from": [<n of each claim this one reasons from; required '
+    'for inference and conclusion claims>], '
+    '"rationale": "<why this claim rests on this source>", '
+    '"evidence": [{"filename": "...", "line_from": <int>, '
+    '"line_to": <int>, "locator": "<or null>"}], '
+    '"test_name": "<for kind test only: what the test is called>", '
+    '"conditions": [<for kind test only>{"text": "<condition, in the '
+    'source\'s order>", "cumulative": true|false, "evidence": '
+    '{"filename": "...", "line_from": <int>, "line_to": <int>, '
+    '"locator": "<or null>"}}]}]}'
+)
 
-    Deliberately the SAME prompt with a preface, not a summary of it. The
-    passages are what the claims have to come from, so a retry that drops
-    them is a retry that cannot succeed; what it drops is how much the model
-    is asked to produce, which is what ran out.
+
+#: The shape a correction comes back in.
+_PATCH_SCHEMA = (
+    '{"revise": [{"seq": <int>, "text": "<claim>", '
+    '"part": <part number or null>, "kind": "legal_principle|factual|'
+    'procedural|conclusion|test|label|inference", '
+    '"follows_from": [<seq>, ...], '
+    '"rationale": "<why this claim rests on this source>", '
+    '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>, '
+    '"locator": "<or null>"}]}], '
+    '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
+    'and why no passage available can carry it>", '
+    '"objection": "<the id of the request this answers, or omit>"}], '
+    '"keep": [{"seq": <int>, "rationale": "<why the current citation '
+    'stands despite the feedback>", '
+    '"objection": "<the id of the request this answers, or omit>"}], '
+    '"refuse": [{"objection": "<the id from a feedback line>", '
+    '"rationale": "<why this source cannot carry the point asked of it>"}], '
+    '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
+    'its passages, this OWED document does not carry any point this '
+    'answer needs>"}], '
+    '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
+    'procedural|conclusion|test|label|inference", '
+    '"part": <part number or null>, "follows_from": [<seq>, ...], '
+    '"test_name": "<for a test claim only>", '
+    '"conditions": [<for a test claim only>{"text", "cumulative", '
+    '"evidence": {"filename", "line_from", "line_to", "locator"}}], '
+    '"rationale": "<why this claim rests on this source>", '
+    '"evidence": [{"filename": "...", "line_from": <int>, '
+    '"line_to": <int>, "locator": "<or null>"}]}]}'
+)
+
+
+def _revision_contract() -> str:
+    """How every later round is answered — stated once, in the brief. Pure.
+
+    None of this changes between rounds, so none of it belongs on a round.
+    It used to be re-sent in full every time, in a call that could not
+    remember having been told it before; here it sits in the cached prefix and
+    a round carries only what that round found.
+    """
+    return (
+        "HOW THE ROUNDS AFTER THIS ONE WORK (read now; it will not be "
+        "repeated).\n"
+        "Once you have drafted, a review reads the answer and I send you what "
+        "it found — and nothing else. Your own claims are not read back to "
+        "you: they are above, in your own reply, and they are your position. "
+        "What each round carries is the review's findings, the requests "
+        "outstanding against the answer, and the engine's numbering of the "
+        "claims so you can address them.\n\n"
+        "You answer a round with a PATCH, never with the whole answer. Change "
+        "ONLY what the feedback identifies; a claim you do not mention is kept "
+        "exactly as it is. Do not restate, rephrase or return an untouched "
+        "claim.\n\n"
+        "For a claim the feedback does identify: NARROW it if it asserts more "
+        "than its passages establish, REWRITE it if it contradicts another "
+        "claim, and ABANDON it — drop it, with a reason — if no passage "
+        "available can carry it. Abandoning is a normal move and often the "
+        "right one. A claim you wrote in your first reply has no standing "
+        "just because you wrote it: rewording a claim the passages cannot "
+        "support leaves the same defect in different words, and the round "
+        "after this one will find it again. Add a claim only where the answer "
+        "fails to address the question. Every claim you write must be carried "
+        "entirely by passages in this brief, and you may cite only those.\n\n"
+        "Dropping a claim costs a reason, like every other change: say what "
+        "the claim asserted and why no passage available can carry it. A drop "
+        "with no reason is not applied and the claim stays.\n\n"
+        "The structure is part of what is corrected. Where the feedback says "
+        "a part lacks its conclusion, or a conclusion sits in the analysis, "
+        'RESTORE THE ORDER: add or revise a claim of kind "conclusion" for '
+        "that part, never append a conclusion to the end of the analysis. "
+        'Every claim you add or revise states its "part" and "kind", and an '
+        'inference or conclusion its "follows_from". Where the feedback names '
+        "two claims restating one proposition from one source, merge them: "
+        "revise one to carry the point and both citations, drop the other "
+        "with a reason.\n\n"
+        "THERE ARE THREE ANSWERS TO A REQUEST, NOT TWO. Obeying and ignoring "
+        "were the only two moves you used to have, so reasoning that should "
+        "have retired a request went into a dropped claim where nothing read "
+        "it and the same source came back twice more. A feedback line that "
+        "carries an objection id can be REFUSED with a reason, and a refusal "
+        "is a reply: the review must either accept it — the point is then "
+        "settled and never comes back — or press it with something it has not "
+        "said before. Refuse when the source cannot carry what is asked of "
+        "it, in terms of what the source IS and what the point NEEDS, never "
+        "in terms of effort. Where the feedback names a stronger source and "
+        "you judge the current citation to be the better one, say so rather "
+        'than changing nothing: put the claim in "keep" with a rationale '
+        "giving the reason, having actually read the named source's "
+        "passages.\n\n"
+        "A feedback line marked as an OWED source is an obligation, not a "
+        "suggestion: either cite that document in a revised or added claim, "
+        'or list it in "waive" with a rationale you could only give after '
+        "reading its passages, or refuse it. An obligation neither cited nor "
+        "waived nor refused comes back every round.\n\n"
+        "Give a RATIONALE with every claim you revise, add or keep, on the "
+        "same terms as a drafted one.\n\n"
+        "What a source IS — what kind of thing it is, how current it is, "
+        "which jurisdiction it belongs to — is never yours to write: it is "
+        "filled in from the document you cite.\n\n"
+        "A round is answered with JSON and nothing else — no preamble, no "
+        "reasoning outside the JSON. Begin with { and end with }:\n"
+        + _PATCH_SCHEMA + "\n\n"
+    )
+
+
+def _draft_ask() -> str:
+    """Turn two: the work. Pure.
+
+    Short by construction — everything it needs was in the brief. It is a
+    separate turn so that the brief can be replayed into a fresh chat without
+    a whole draft being produced and discarded; see `services/drafting_chat`.
+    """
+    return (
+        "Now draft the claims, following the brief above.\n\n"
+        "Reply ONLY JSON, and nothing else — no preamble, no explanation, no "
+        "reasoning outside the JSON. Begin with { and end with }:\n"
+        + _DRAFT_SCHEMA + "\n"
+        'Omit "test_name" and "conditions" on every claim that is not a test.')
+
+
+def _shorter_draft_ask(cap: int) -> str:
+    """The same ask, smaller, after a reply that never arrived. Pure.
+
+    What it drops is how much the model is asked to produce, which is what ran
+    out. What it does NOT drop is the passages — and it no longer has to carry
+    them, because they are the brief and the brief is still in the
+    conversation.
     """
     n = max(RETRY_MIN_CLAIMS, int(cap * RETRY_CLAIM_FRACTION))
     return (
         "Your previous reply was EMPTY — nothing came back at all. The most "
         "likely reason is that you ran out of room before writing any of it. "
-        "Answer the same task again, smaller:\n"
+        "Answer the same task again, smaller. The brief has not changed and "
+        "the passages are still above; do not ask for them again.\n"
         f"- Write at most {n} claims, not {cap}. Cover the conclusions first "
         "and stop; a short answer is wanted, an absent one is not.\n"
         "- Keep each claim to one sentence and each rationale to one short "
@@ -2068,7 +2317,7 @@ def _shorter_draft_prompt(prompt: str, cap: int) -> str:
         "working. Your first character is { and your last is }.\n"
         "- Do not re-read every passage group. Take the groups that most "
         "directly answer each part and leave the rest.\n\n"
-        "THE TASK, UNCHANGED:\n" + prompt)
+        "The reply shape is unchanged:\n" + _DRAFT_SCHEMA)
 
 
 def _claims_json(reply: str) -> dict:
@@ -2174,14 +2423,18 @@ def _no_text_record(sequence: int, claim: dict) -> dict:
 
 
 async def _draft_from_extracts(
-    run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
+    run_id: uuid.UUID, answer_id: uuid.UUID, chat: drafting_chat.DraftingChat,
     question: str, extracts: list[dict], append: bool = False,
     cap: int | None = None, parts: list[dict] | None = None,
     sources: dict[str, dict] | None = None,
 ) -> int:
-    """Inverted split, writing half: one tool-less Sonnet call drafts all
-    claims from the verified extracts; the runner persists claims and
-    evidence rows itself. No chat loop, no nudges, no wedge surface.
+    """Inverted split, writing half: the drafter writes all claims from the
+    verified extracts; the runner persists claims and evidence rows itself.
+
+    This is turn one and turn two of the conversation that will carry the
+    whole answer. Turn one is the BRIEF — everything that stays true for the
+    life of the answer — and turn two asks for the draft. The split is what
+    makes the brief replayable: see `services/drafting_chat`.
 
     The drafter writes to the structure: it files every claim under a part
     of the question, leads each part with its conclusion, states a
@@ -2236,7 +2489,12 @@ async def _draft_from_extracts(
         blocks.append(f"PASSAGE GROUP {i}{where}\n{heads}\n{ps}")
     if not blocks:
         return 0
-    prompt = (
+    brief = (
+        f"You are drafting the claims of {_domain_article()}answer, and then "
+        "correcting them round by round as a review comes back. This message "
+        "is the BRIEF: everything in it stays true for the whole of our "
+        "conversation and is never repeated. What arrives later is only what "
+        "is new.\n\n"
         f"Draft the claims of {_domain_article()}answer from the VERIFIED "
         "PASSAGES below "
         "— these passages are the ONLY thing you know. Every claim must be "
@@ -2270,31 +2528,6 @@ async def _draft_from_extracts(
         "names it, never by its filename. One claim per proposition per "
         "source: do not restate a point a claim already makes from the same "
         "document.\n\n"
-        # Six fields the drafter used to author are gone from this shape:
-        # `section`, which follows from `kind`; `authority_label`,
-        # `jurisdiction_note` and `currency_note`, which follow from the
-        # cited document; `position`, which follows from the reply's order;
-        # and the `test` wrapper, whose `conditions` are now flat on the
-        # claim. Each was a decision the engine could make from what it
-        # already had, and every one of them was output the model had to
-        # spend before it could emit a single claim.
-        + 'Reply ONLY JSON, and nothing else — no preamble, no explanation, '
-        'no reasoning outside the JSON. Begin with { and end with }:\n'
-        '{"claims": [{"n": <1, 2, ...>, "text": "<claim, one sentence>", '
-        '"part": <part number or null>, "kind": '
-        '"legal_principle|factual|procedural|conclusion|test|label|inference", '
-        '"follows_from": [<n of each claim this one reasons from; required '
-        'for inference and conclusion claims>], '
-        '"rationale": "<why this claim rests on this source>", '
-        '"evidence": [{"filename": "...", "line_from": <int>, '
-        '"line_to": <int>, "locator": "<or null>"}], '
-        '"test_name": "<for kind test only: what the test is called>", '
-        '"conditions": [<for kind test only>{"text": "<condition, in the '
-        'source\'s order>", "cumulative": true|false, "evidence": '
-        '{"filename": "...", "line_from": <int>, "line_to": <int>, '
-        '"locator": "<or null>"}}]}]}\n'
-        'Omit "test_name" and "conditions" on every claim that is not a '
-        "test.\n\n"
         # The locator is the drafter's, because the drafter is the only stage
         # that has both the passage and the proposition in front of it. It is
         # checked deterministically against the passage before anything is
@@ -2307,10 +2540,16 @@ async def _draft_from_extracts(
         "paragraphs, never carry one over from another passage: a locator "
         "that does not appear in the passage it labels is checked and the "
         "citation is thrown away with it.\n\n"
+        # The standing half of every revision round, moved off the round and
+        # into the brief. It never changes, so it belongs in the part of the
+        # conversation that is written to cache once and read back after; what
+        # a round then carries is only what that round found.
+        + _revision_contract()
         + await _synthesis_playbook()
         + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks)
     )
-    reply = await sinas.invoke("sgr/retrieval-planner-agent", prompt)
+    await chat.start(brief)
+    reply = await chat.ask(_draft_ask())
     # Two things can come back that are not claims, and they are different
     # failures. An UNPARSEABLE reply has claims in it and broke on a quote;
     # resending it to be repaired is the right and cheap move. An EMPTY reply
@@ -2321,11 +2560,16 @@ async def _draft_from_extracts(
     # passage supported a claim, which was false: no reply had arrived.
     #
     # So the retry for an empty reply is the WORK again, not a repair of
-    # nothing: the same passages, with the ask cut down to what a shorter
-    # reply can hold. That is also the shape of the cause. The reply was
-    # empty because the model spent its whole output budget before writing
-    # any of it (20,000 completion tokens, zero text blocks, twice), so a
-    # retry that asks for less output is a retry that can finish.
+    # nothing, with the ask cut down to what a shorter reply can hold. That is
+    # also the shape of the cause. The reply was empty because the model spent
+    # its whole output budget before writing any of it (20,000 completion
+    # tokens, zero text blocks, twice), so a retry that asks for less output is
+    # a retry that can finish.
+    #
+    # In a conversation neither retry has to carry anything back: the passages
+    # are the brief, which is still there, and the previous reply is the
+    # previous message. The repair turn used to resend up to 60,000 characters
+    # of broken JSON for the model to read its own words off.
     data: dict | None = None
     try:
         data = _claims_json(reply)
@@ -2335,23 +2579,22 @@ async def _draft_from_extracts(
                     draft_reparse=str(exc)[:200],
                     draft_reply_chars=len(reply or ""),
                     draft_empty_reply=empty,
-                    draft_prompt_chars=len(prompt))
+                    draft_brief_chars=len(brief))
         if empty:
             _log.warning("run %s: the drafter returned an empty reply to a "
-                         "%d-character prompt; retrying with a reduced ask",
-                         run_id, len(prompt))
-            reply = await sinas.invoke("sgr/retrieval-planner-agent",
-                                       _shorter_draft_prompt(prompt, cap))
+                         "%d-character brief; retrying with a reduced ask",
+                         run_id, len(brief))
+            reply = await chat.ask(_shorter_draft_ask(cap))
             await _tele(run_id, "draft",
                         draft_retry="reduced_ask",
                         draft_retry_reply_chars=len(reply or ""))
         else:
-            reply = await sinas.invoke(
-                "sgr/retrieval-planner-agent",
+            reply = await chat.ask(
                 "Your previous reply was not valid JSON: " + str(exc)[:200]
                 + ". Send the same claims again as strictly valid JSON. Escape "
                 'every quotation mark inside a string as \\", and use no line '
-                "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
+                "breaks inside a string. Do not redraft and do not change a "
+                "claim: repair the reply you have just written.")
             await _tele(run_id, "draft", draft_retry="repair_json")
         try:
             data = _claims_json(reply)
@@ -2971,8 +3214,12 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # retrieved set — a superseded status, a later ruling in the same case —
     # and set on the claims whether or not the drafter repeats them.
     sources = _source_context(all_rows)
+    # One conversation for the whole answer, opened here and continued by
+    # validation. A resumed run finds its chat id on the run row and rejoins
+    # rather than starting a second conversation about the same answer.
+    chat = await _drafting_chat(run_id, sinas)
     try:
-        n = await _draft_from_extracts(run_id, answer_id, sinas, question,
+        n = await _draft_from_extracts(run_id, answer_id, chat, question,
                                        extracts, cap=cap, parts=parts,
                                        sources=sources)
     except DrafterSilent as exc:
@@ -2982,6 +3229,12 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
         # afterwards it was indistinguishable from a genuinely thin corpus.
         _log.warning("run %s: %s", run_id, exc)
         raise PartialOutcome(exc.cause, exc.explanation) from exc
+    finally:
+        # In a `finally` because the chat exists the moment the brief is sent,
+        # and a run that dies after that has still spent money in it. An
+        # unrecorded chat id is a conversation nobody can resume, read or
+        # bill.
+        await _save_drafting_chat(run_id, chat)
     if not n:
         raise PartialOutcome(
             "no_progress", "no passage supported a claim well enough to draft")
@@ -4526,8 +4779,7 @@ async def _pre_publish_sweep(
             "after removing claims the final review could not support, the "
             "surviving claims no longer fully answer the question — "
             + (missing or " ".join(fb))[:600])
-    await _revise_answer(sinas, run_id, answer_id, question, fb,
-                         last_attempt=True)
+    await _revise_answer(sinas, run_id, answer_id, fb, last_attempt=True)
     return False
 
 
@@ -5207,22 +5459,6 @@ async def _removal_record(session, claim_ids: list) -> list[dict]:
     return sorted(out.values(), key=lambda d: d["sequence"])
 
 
-def _claim_where(claim: AnswerClaim) -> str:
-    """` [conclusion, part 2, inference]` — how a claim is marked in the
-    reviser's listing, or "" for a row with no structure. Pure."""
-    bits = []
-    if claim.section:
-        bits.append(str(claim.section))
-    if claim.part_index is not None:
-        bits.append(f"part {int(claim.part_index) + 1}")
-    elif claim.section:
-        bits.append("overall")
-    if claim.claim_kind and claim.claim_kind not in ("legal_principle", "factual",
-                                                     "procedural"):
-        bits.append(str(claim.claim_kind))
-    return f" [{', '.join(bits)}]" if bits else ""
-
-
 def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
                      id_by_seq: Mapping[int, uuid.UUID], added: bool = False,
                      sources: Mapping[str, dict] | None = None) -> None:
@@ -5318,11 +5554,12 @@ async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
 
 
 async def _revise_answer(
-    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID, question: str,
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
     feedback: list[str], extra_points: list[str] | None = None,
-    last_attempt: bool = False,
+    last_attempt: bool = False, removed: list[dict] | None = None,
 ) -> int:
-    """Rewrite the whole answer from its evidence and the round's feedback.
+    """One round of the drafting conversation: what the review found, and what
+    the drafter does about it.
 
     One operation replaces what used to be three — narrowing an overreaching
     claim, rebinding a failed one, and appending claims the gate asked for.
@@ -5330,11 +5567,17 @@ async def _revise_answer(
     to 29 claims, could never be made coherent by removing something, and a
     model's reply about the task could land in the answer as a claim.
 
-    Here the reviser is given every current claim with its passages, plus any
-    newly extracted passages for points the gate raised, and returns the
-    corrected claim set as JSON. The set REPLACES the old one, so revising,
-    dropping and adding are the same operation. A reply that is not a claim
-    object is not a claim: no text matching decides it.
+    What this round SENDS is the change. It used to be a fresh one-shot call
+    carrying the passages, the playbook, the structure rules, the standing
+    revision instructions and every current claim with the passages bound to
+    it. All of that now sits in the brief, at the head of a conversation the
+    drafter is still in, so a round carries only what this round found: the
+    feedback, the requests outstanding, the engine's numbering, and anything
+    the engine removed without being asked.
+
+    The drafter answers with a patch. The patch is applied to the rows; a
+    reply that is not a claim object is not a claim, and no text matching
+    decides it.
     """
     if not feedback:
         return 0
@@ -5379,33 +5622,21 @@ async def _revise_answer(
         feedback = list(feedback) + answer_structure.duplicate_feedback(dup_pairs)
         await _tele(run_id, "validate", duplicate_pairs=[list(p) for p in dup_pairs])
 
-    # Current claims — but full passages only for the ones the feedback
-    # names. The reviser is instructed to change only what the feedback
-    # identifies, so untouched claims are context, not work: sending their
-    # passages tripled the prompt and invited re-emitting them, and the
-    # reviser call is where 70% of a run's wall-clock goes. A claim the
-    # patch does not name keeps its row, its spans and its verdicts — it is
-    # never rebuilt, so it is never re-judged.
-    named = {int(m) for f in feedback for m in re.findall(r"[Cc]laims? (\d+)", f)}
-    named |= {int(m) for f in feedback
-              for m in re.findall(r"(?:^|[ ,])(\d+)(?=[ ,.:]|$)", f)}
+    # The answer as it stands, and nothing about it that the drafter can
+    # already see. Its claims are its own turns; its passages are the brief.
+    # What travels is the engine's NUMBERING, because that is the one thing
+    # about its own answer the drafter cannot know: claims are reordered on
+    # the way into the database and renumbered again as rounds drop and add
+    # them, and a patch keys on that number.
+    #
+    # This is what a round used to be made of. Every current claim, with the
+    # passages bound to it, re-sent in a call that had never seen any of it —
+    # the reviser call being where 70% of a run's wall clock went.
     by_claim: dict[int, dict] = {}
-    for claim, ev, fn, content in rows:
-        entry = by_claim.setdefault(claim.sequence, {
-            "text": claim.claim_text, "passages": [],
-            "where": _claim_where(claim)})
-        if ev is None or not content or (ev.span or {}).get("line_from") is None:
-            continue
-        lf, lt = int(ev.span["line_from"]), int(ev.span.get("line_to") or ev.span["line_from"])
-        body = "\n".join(content.splitlines()[max(0, lf - 1):lt])[:1200]
-        entry["passages"].append(f"[{fn} lines {lf}-{lt}]\n{body}")
-
-    current = "\n\n".join(
-        f"CLAIM {seq}{c['where']}: {c['text']}\n"
-        + (("\n".join(c["passages"]) or "(no passage)")
-           if (seq in named or not named) else "(passages withheld — this "
-           "claim is context; do not revise it)")
-        for seq, c in sorted(by_claim.items()))
+    for claim, _ev, _fn, _content in rows:
+        by_claim.setdefault(claim.sequence, {"text": claim.claim_text})
+    numbering = drafting_chat.numbering_key(
+        [(seq, c["text"]) for seq, c in sorted(by_claim.items())])
 
     # passages for anything the gate said was missing
     async def _anchors_for(point: str) -> tuple[list[str], str]:
@@ -5477,69 +5708,39 @@ async def _revise_answer(
                 fresh += (f"\n[{pas['filename']} lines {pas['line_from']}-"
                           f"{pas['line_to']}]\n{pas['text'][:1200]}\n")
 
-    reply = await sinas.invoke(
-        "sgr/retrieval-planner-agent",
-        f"Correct {_domain_article()}answer. Every current claim is listed for "
-        "context, with the passages bound to it. Only some are wrong.\n\n"
-        "Change ONLY what the feedback identifies. Leave every other claim "
-        "alone — do not restate it, do not rephrase it, do not return it. "
-        "A claim you do not mention is kept exactly as it is.\n\n"
-        "Dropping a claim costs a reason, like every other change: say what "
-        "the claim asserted and why no passage available can carry it. A drop "
-        "with no reason is not applied and the claim stays.\n\n"
-        "For each claim you do change: narrow it if it asserts more than its "
-        "passages establish, rewrite it if it contradicts another claim, and "
-        "drop it if no passage can carry it. Add a claim only where the answer "
-        "fails to address the question. Every claim you write must be carried "
-        "entirely by the passages you cite for it, and you may cite only "
-        "passages shown below. "
+    chat = await _drafting_chat(run_id, sinas)
+    if not chat.chat_id:
+        # Drafting opened the conversation. Reaching a revision without one
+        # means the run is resuming across a code change or a lost write, and
+        # a round with no brief behind it would be a model asked to patch an
+        # answer it has never seen.
+        _log.warning("run %s: no drafting conversation to revise in", run_id)
+        return 0
+    chat.brief = chat.brief or "(the brief is the first message of this chat)"
+
+    # New passages arrive as their own turn, before the feedback that needs
+    # them. They are the one thing besides the brief that a round may add to
+    # what the drafter knows, and they are sent once: the brief is not
+    # rewritten and the passages are not repeated next round.
+    if fresh:
+        await chat.ask(
+            "NEW VERIFIED PASSAGES — extracted since the brief, for the "
+            "findings in the next message. They join the passages you already "
+            "have and may be cited on the same terms. Nothing else has "
+            f"changed.\n{fresh}\n\nReply with the single word "
+            f"{drafting_chat.ACK} and wait for the findings.")
+
+    turn = (
+        f"REVIEW FINDINGS — round {chat.rounds}. This is what the review "
+        "found; everything else stands.\n"
+        + numbering
+        + drafting_chat.removed_by_the_engine(removed or [])
+        + "\n"
         + _claim_budget_line(len(by_claim), cap=cap,
                              refused_last_cycle=await _cap_refusals_last_cycle(run_id))
-        + _structure_rules(parts, cap)
-        + "\nThe structure is part of what is corrected. Each claim above is "
-        "marked with its section and part. Where the feedback says a part "
-        "lacks its conclusion, or a conclusion sits in the analysis, RESTORE "
-        'THE ORDER: add or revise a claim of kind "conclusion" for that '
-        "part, never append a conclusion to the end of the analysis — a "
-        "claim's section follows from its kind and is filled in for you. "
-        'Every claim you add or revise states its "part" and "kind", and '
-        'an inference or conclusion its "follows_from" (the sequence numbers '
-        "of the claims it reasons from). Where the feedback names two claims "
-        "restating one proposition from one source, merge them: revise one to "
-        "carry the point and both citations, drop the other with a reason.\n\n"
-        + "Where the feedback names a stronger source and you judge the current "
-        "citation to be the better one, say so instead of changing nothing: "
-        'put the claim in "keep" with a rationale giving the reason. A keep '
-        "changes neither the claim nor its evidence. Use it only when you "
-        "have read the passages from the named source and they do not carry "
-        "the point better — not to avoid the work.\n\n"
-        "A feedback line marked as an OWED source is an obligation, not a "
-        "suggestion: either cite that document in a revised or added claim, "
-        'or list it in "waive" with a rationale you could only give after '
-        "reading its passages. An obligation neither cited nor waived comes "
-        "back every round.\n\n"
-        # The other half of the loop. Obeying and ignoring were the only two
-        # things the reviser could do, so reasoning that should have retired a
-        # request instead went into a dropped claim and the same document came
-        # back twice more.
-        "THERE IS A THIRD ANSWER, AND IT IS A REAL ONE. A feedback line that "
-        'carries an objection id can be REFUSED: put {"objection": "<the id '
-        'from the line>", "rationale": "<why>"} in "refuse". A refusal is a '
-        "reply, not a silence: the review reads your reason next cycle and "
-        "must either accept it — in which case the point is settled and never "
-        "comes back — or press it with something it has not said before. "
-        "Refuse when the source cannot carry what is asked of it and say why "
-        "in terms of what the source IS and what the point NEEDS, not in "
-        "terms of effort. If you are dropping or keeping a claim BECAUSE of "
-        'such a request, put the same id on that "drop" or "keep" entry '
-        "instead and its rationale answers the request.\n\n"
-        "Give a RATIONALE with every claim you revise, add or keep: ONE "
-        "short sentence, at most 20 words — which part of the question it "
-        "answers and why this source settles it. Never restate the claim. "
-        "It is reasoning, not evidence — nothing in it may assert anything "
-        "the passages do not show. Name a source the way the claim names it "
-        "— deciding body and case reference — never by its filename.\n\n"
-        + ("This is the final revision. If the passages available genuinely "
+        + "\n\nFINDINGS:\n- " + "\n- ".join(feedback[:10]) + "\n"
+        + drafting_chat.objections_block(await objections.open_points(run_id))
+        + ("\nThis is the final revision. If the passages available genuinely "
            "cannot settle a point the question asks about, do not stretch a "
            "source to cover it and do not leave the point unmentioned: add a "
            'claim with "type": "abstention" and no evidence, stating plainly '
@@ -5547,52 +5748,10 @@ async def _revise_answer(
            "Say what is missing, not that you are unable — 'The documents "
            "before us do not address X' rather than 'I cannot determine X'. "
            f"At most {MAX_ABSTENTIONS} such claims, and never for the central "
-           "question if the sources do answer it.\n\n" if last_attempt else "")
-        + 'Reply ONLY JSON, and nothing else — no preamble, no reasoning '
-        "outside the JSON. Begin with { and end with }:\n"
-        '{"revise": [{"seq": <int>, "text": "<claim>", '
-        '"part": <part number or '
-        'null>, "kind": "legal_principle|factual|procedural|conclusion|test|'
-        'label|inference", "follows_from": [<seq>, ...], '
-        '"rationale": "<why this claim rests on this source>", '
-        '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>, '
-        '"locator": "<or null>"}]}], '
-        '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
-        'and why no passage available can carry it>", '
-        '"objection": "<the id of the request this answers, or omit>"}], '
-        '"keep": [{"seq": <int>, "rationale": "<why the current citation '
-        'stands despite the feedback>", '
-        '"objection": "<the id of the request this answers, or omit>"}], '
-        '"refuse": [{"objection": "<the id from a feedback line>", '
-        '"rationale": "<why this source cannot carry the point asked of '
-        'it>"}], '
-        '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
-        'its passages, this OWED document does not carry any point this '
-        'answer needs>"}], '
-        '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
-        'procedural|conclusion|test|label|inference", '
-        '"part": <part number or null>, "follows_from": [<seq>, ...], '
-        '"test_name": "<for a test claim only>", '
-        '"conditions": [<for a test claim only>{"text", "cumulative", '
-        '"evidence": {"filename", "line_from", "line_to", "locator"}}], '
-        '"rationale": "<why this claim rests on this '
-        'source>", "evidence": [{"filename": "...", '
-        '"line_from": <int>, "line_to": <int>, "locator": "<or null>"}]}]}\n'
-        "What a source IS — what kind of thing it is, how current it is, "
-        "which jurisdiction it belongs to — is never yours to write: it is "
-        "filled in from the document you cite.\n\n"
-        # Same rule the drafter is given, and for the same reason: the check
-        # is deterministic and runs before any judging, so a label that is
-        # not in the passage costs the citation it was attached to.
-        + 'The "locator" of an evidence entry is the source\'s OWN label for '
-        "the paragraph the passage sits in, copied exactly as the passage "
-        'prints it: "42", "r.o. 4.2", "recital 14" — or null where the '
-        "passage shows none. Never derive one and never count paragraphs.\n\n"
-        + await _synthesis_playbook()
-        + f"\nQUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
-        f"FEEDBACK:\n- " + "\n- ".join(feedback[:10])
-        + (f"\n\nADDITIONAL VERIFIED PASSAGES:{fresh}" if fresh else ""),
+           "question if the sources do answer it.\n" if last_attempt else "")
+        + "\nReply with the patch, as JSON and nothing else."
     )
+    reply = await chat.turn(turn, label=f"round {chat.rounds}")
 
     patch = _parse_patch(reply, allow_abstention=last_attempt)
     refusals = 0
@@ -5641,6 +5800,8 @@ async def _revise_answer(
                 "refusals": refusals,
                 "dropped_unexplained": (patch or {}).get("drop_unexplained")
                 or []}})
+        chat.note(f"{refusals} refusal(s); no claim changed")
+        await _save_drafting_chat(run_id, chat)
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}
@@ -5784,7 +5945,58 @@ async def _revise_answer(
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,
             "feedback_items": len(feedback)}})
+    # What this round settled, in one line, for the summary that will stand in
+    # for it once the conversation reaches its cap. Written from the engine's
+    # own record rather than from the transcript: a patch that parsed is not a
+    # patch that applied, and the difference is exactly what a later round
+    # needs to know.
+    chat.note(
+        f"revised {len(patch['revise'])}, added {len(admitted)}, dropped "
+        f"{len(patch['drop'])}, kept {kept} with a reason, "
+        f"{refusals} refusal(s)")
+    await _save_drafting_chat(run_id, chat)
     return touched
+
+
+def _round_feedback(verdict: dict, seen_before: set[int] | None = None) -> list[str]:
+    """What this round found, in the words the drafter is asked to act on. Pure.
+
+    The wording carries a decision. "Narrow it to what the passages say" is an
+    instruction to adjust, and a model that has just written a claim will
+    adjust it — it will reword the same assertion and send it back, and the
+    next round will find the same defect. On the measured loop that is what
+    ten revision rounds looked like: most touched one or two claims, one
+    touched none.
+
+    So abandoning is named as an option in every finding, and named as the
+    LIKELY one for a claim that has already been raised once and survived.
+    A claim the review has now failed twice is not a wording problem.
+    """
+    seen_before = seen_before or set()
+
+    def _again(seq: Any) -> str:
+        try:
+            repeated = int(seq) in seen_before
+        except (TypeError, ValueError):
+            repeated = False
+        return (" This is the second round that has failed this claim. Do not "
+                "reword it again: unless a passage you have not yet cited "
+                "carries it outright, ABANDON it — drop it with a reason."
+                if repeated else "")
+
+    out = [f"Claim {f['claim_sequence']}: {f['reason']} Rebind it to a passage "
+           "that carries it, or — if no passage available does — ABANDON the "
+           "claim: drop it with a reason. Do not reword it and keep the same "
+           "citation." + _again(f.get("claim_sequence"))
+           for f in verdict.get("failed") or []]
+    out += [f"Claim {o.get('claim_sequence')} asserts more than its "
+            f"passages establish: {o.get('uncovered')}. Narrow it to what "
+            "the passages say, or bind evidence that carries the rest — and "
+            "where what is left after narrowing would say nothing worth "
+            "claiming, ABANDON it instead of shrinking it to a truism."
+            + _again(o.get("claim_sequence"))
+            for o in verdict.get("overreaching") or []]
+    return out
 
 
 def _overreach_seqs(verdict: dict) -> set[int]:
@@ -5927,7 +6139,6 @@ async def _stage_validate_publish(
         run = await session.get(QueryRun, run_id)
         answer_id = run.answer_id
         caller = _runner_caller(run)
-        question_text = run.question
         if gate_cycles is None:
             gate_cycles = EFFORT_GATE_CYCLES.get(
                 run.effort or "medium", ANSWER_GATE_CYCLES)
@@ -6047,7 +6258,7 @@ async def _stage_validate_publish(
                         await _amend_gate_cycle(run_id, bonus_cycle=True)
                         await _record_fed(run_id, key, bonus=True)
                         await _revise_answer(
-                            sinas, run_id, answer_id, question,
+                            sinas, run_id, answer_id,
                             correctness + issues,
                             points or ([missing] if missing else []),
                             last_attempt=True)
@@ -6088,20 +6299,19 @@ async def _stage_validate_publish(
                 repeated = not await _gate_point_is_new(run_id, key)
                 await _record_fed(run_id, key)
                 await _revise_answer(
-                    sinas, run_id, answer_id, question,
+                    sinas, run_id, answer_id,
                     correctness + issues,
                     points or ([missing] if missing else []),
                     last_attempt=gate_cycles <= 1 or repeated)
                 return await _stage_validate_publish(
                     run_id, sinas, gate_cycles - 1)
-        # One revision per round, over everything this round found.
-        fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
-              for f in verdict["failed"]]
-        fb += [f"Claim {o.get('claim_sequence')} asserts more than its "
-               f"passages establish: {o.get('uncovered')}. Narrow it to what "
-               f"the passages say, or bind evidence that carries the rest."
-               for o in over]
-        if fb and await _revise_answer(sinas, run_id, answer_id, question_text, fb):
+        # One revision per round, over everything this round found. A claim
+        # this round names for the second time gets the harder sentence: see
+        # `_round_feedback`.
+        seen_before = set().union(*overreach_history[:-1], *pending_seq_history[:-1]) \
+            if len(overreach_history) > 1 else set()
+        fb = _round_feedback(verdict, seen_before)
+        if fb and await _revise_answer(sinas, run_id, answer_id, fb):
             continue
         break  # revision produced nothing usable; drop below
 
@@ -6174,10 +6384,10 @@ async def _stage_validate_publish(
                         gate_issues=issues, bonus_cycle=True)
             await _amend_gate_cycle(run_id, bonus_cycle=True)
             await _record_fed(run_id, key, bonus=True)
-            await _revise_answer(sinas, run_id, answer_id, question,
+            await _revise_answer(sinas, run_id, answer_id,
                                  correctness + issues,
                                  points or ([missing] if missing else []),
-                                 last_attempt=True)
+                                 last_attempt=True, removed=dropped)
             return await _stage_validate_publish(run_id, sinas, 0)
         if not ok and gate_cause == "holistic":
             raise PartialOutcome(
@@ -6197,10 +6407,10 @@ async def _stage_validate_publish(
     )
     await _amend_gate_cycle(run_id, dropped_claims=len(failing_ids))
     await _record_fed(run_id, key)
-    await _revise_answer(sinas, run_id, answer_id, question,
+    await _revise_answer(sinas, run_id, answer_id,
                          correctness + issues,
                          points or ([missing] if missing else []),
-                         last_attempt=gate_cycles <= 1)
+                         last_attempt=gate_cycles <= 1, removed=dropped)
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 
 

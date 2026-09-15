@@ -41,6 +41,7 @@ import textwrap
 
 import pytest
 from app.services import answer_structure as st
+from app.services import drafting_chat as dc
 from app.services import query_runner as qr
 
 PARTS = [
@@ -197,8 +198,16 @@ def test_the_locator_the_drafter_read_off_the_passage_is_kept():
 
 # ── the prompt and the parser agree ──────────────────────────────────────────
 
+def _everything_the_drafter_is_told() -> str:
+    """The brief and both asks — everything the drafting side of the
+    conversation puts in front of the model, wherever in the source it is
+    assembled."""
+    return (_prompt_text(qr._draft_from_extracts) + qr._revision_contract()
+            + qr._draft_ask() + qr._shorter_draft_ask(12))
+
+
 def test_the_prompt_asks_for_exactly_the_fields_the_engine_reads():
-    prompt = _prompt_text(qr._draft_from_extracts)
+    prompt = _everything_the_drafter_is_told()
     for field in ('"n"', '"text"', '"part"', '"kind"', '"follows_from"',
                   '"rationale"', '"evidence"', '"conditions"', '"locator"'):
         assert field in prompt, field
@@ -207,19 +216,24 @@ def test_the_prompt_asks_for_exactly_the_fields_the_engine_reads():
 def test_the_prompt_no_longer_asks_for_what_the_engine_derives():
     """Every one of these was a decision the engine could already make, and
     output the drafter had to spend before it could write a claim."""
-    prompt = _prompt_text(qr._draft_from_extracts)
+    prompt = _everything_the_drafter_is_told()
     for field in ('"section"', '"authority_label"', '"jurisdiction_note"',
                   '"currency_note"', '"position"'):
         assert field not in prompt, field
 
 
 def test_the_reviser_is_asked_for_the_same_shape_as_the_drafter():
-    """Two prompts that disagree ask for one answer in two shapes, and the
-    revision path writes the same columns the drafting path does."""
-    prompt = _prompt_text(qr._revise_answer)
+    """Two shapes for one answer is a contract with itself. The revision path
+    writes the same columns the drafting path does, so it asks for the same
+    fields — and it asks in the same conversation, so the ask is stated once,
+    in the brief."""
+    prompt = qr._revision_contract() + _prompt_text(qr._revise_answer)
     for field in ('"section"', '"authority_label"', '"jurisdiction_note"',
                   '"currency_note"'):
         assert field not in prompt, field
+    for field in ('"revise"', '"drop"', '"keep"', '"refuse"', '"waive"',
+                  '"add"', '"locator"'):
+        assert field in prompt, field
 
 
 def test_the_structure_rules_no_longer_dictate_a_section():
@@ -280,17 +294,37 @@ def test_no_note_where_every_source_is_in_the_same_jurisdiction():
 # ── a silent drafter is a named failure ──────────────────────────────────────
 
 class _Sinas:
-    """Enough of the client for the drafting call: it records what it was
-    asked and returns what the test tells it to."""
+    """Enough of the client for the drafting conversation: it records every
+    turn it was sent and returns what the test tells it to.
+
+    The brief is turn one and is answered with an acknowledgement, so the
+    scripted replies line up with the turns that actually ask for work.
+    """
 
     def __init__(self, *replies: str):
         self.replies = list(replies)
-        self.prompts: list[str] = []
+        #: every message sent, the brief included
+        self.turns: list[str] = []
+        #: the ones that asked for work — the brief is not one of them
+        self.asks: list[str] = []
+        self.chats: list[str] = []
 
-    async def invoke(self, agent: str, message: str) -> str:
-        self.prompts.append(message)
-        return self.replies[len(self.prompts) - 1] if (
-            len(self.prompts) <= len(self.replies)) else ""
+    async def chat_create(self, agent: str, title: str) -> str:
+        self.chats.append(f"chat-{len(self.chats) + 1}")
+        return self.chats[-1]
+
+    async def chat_send(self, chat_id: str, content: str,
+                        agent: str = "") -> str:
+        self.turns.append(content)
+        if content.endswith(dc.ACK_INSTRUCTION):
+            return dc.ACK
+        self.asks.append(content)
+        return self.replies[len(self.asks) - 1] if (
+            len(self.asks) <= len(self.replies)) else ""
+
+    @property
+    def brief(self) -> str:
+        return self.turns[0]
 
 
 EXTRACTS = [{"part": 0, "passages": [
@@ -300,7 +334,7 @@ SOURCES = {"a.md": {"line": "title: A; class: Court Decision", "label": None,
                     "tier": 1, "jurisdiction": None, "currency": None}}
 
 
-def _draft(sinas, monkeypatch, telemetry: dict):
+def _draft(sinas, monkeypatch, telemetry: dict, chat=None):
     async def _tele(run_id, stage, **detail):
         telemetry.setdefault(stage, {}).update(detail)
 
@@ -310,23 +344,38 @@ def _draft(sinas, monkeypatch, telemetry: dict):
     monkeypatch.setattr(qr, "_tele", _tele)
     monkeypatch.setattr(qr, "_synthesis_playbook", _playbook)
     return asyncio.run(qr._draft_from_extracts(
-        None, None, sinas, "A question?", EXTRACTS, cap=12, parts=PARTS,
-        sources=SOURCES))
+        None, None, chat or dc.DraftingChat(client=sinas, agent="a"),
+        "A question?", EXTRACTS, cap=12, parts=PARTS, sources=SOURCES))
 
 
-def test_an_empty_reply_is_retried_with_the_work_not_with_nothing(monkeypatch):
-    """The old repair prompt was 250 characters and carried an empty
-    PREVIOUS REPLY. The retry has to carry the passages, or there is nothing
-    for the model to draft from."""
+def test_the_brief_carries_the_passages_and_the_ask_does_not(monkeypatch):
+    """The split that makes the rest of it work. Turn one is the passages and
+    everything else durable; turn two is four lines asking for the draft."""
+    sinas = _Sinas("", "")
+    with pytest.raises(qr.DrafterSilent):
+        _draft(sinas, monkeypatch, {})
+    assert "The passage." in sinas.brief
+    ask = sinas.asks[0]
+    assert "The passage." not in ask
+    assert len(ask) < len(sinas.brief)
+
+
+def test_an_empty_reply_is_retried_without_carrying_the_work_back(monkeypatch):
+    """The retry has to reach a model that still has the passages. It does —
+    they are the brief, and the brief is the first message of the conversation
+    the retry is sent into — so the retry itself carries only the smaller ask.
+    """
     sinas = _Sinas("", "")
     tele: dict = {}
     with pytest.raises(qr.DrafterSilent):
         _draft(sinas, monkeypatch, tele)
-    assert len(sinas.prompts) == 2
-    retry = sinas.prompts[1]
-    assert "The passage." in retry, "the retry must carry the passages again"
+    assert len(sinas.asks) == 2
+    retry = sinas.asks[1]
     assert "at most 6 claims, not 12" in retry
-    assert len(retry) > len(sinas.prompts[0])
+    assert "The passage." not in retry, "the passages are the brief, not the retry"
+    # one brief, sent once, with both asks after it
+    assert sinas.turns.count(sinas.brief) == 1
+    assert len(sinas.chats) == 1
 
 
 def test_an_empty_reply_is_recorded_as_one(monkeypatch):
@@ -338,19 +387,22 @@ def test_an_empty_reply_is_recorded_as_one(monkeypatch):
     assert tele["draft"]["draft_empty_reply"] is True
     assert tele["draft"]["draft_reply_chars"] == 0
     assert tele["draft"]["draft_retry"] == "reduced_ask"
-    assert tele["draft"]["draft_prompt_chars"] > 0
+    assert tele["draft"]["draft_brief_chars"] > 0
     assert tele["draft"]["draft_retry_empty"] is True
 
 
 def test_a_malformed_reply_is_still_repaired_rather_than_redrafted(monkeypatch):
     """The two failures are different and get different retries. A reply
-    with claims in it that broke on a quote is worth repairing."""
+    with claims in it that broke on a quote is worth repairing — and the
+    repair no longer has to hand the model its own words back, because they
+    are the previous message."""
     sinas = _Sinas('{"claims": [{"text": "He said "yes".", "evidence": []}]}',
                    "")
     tele: dict = {}
     with pytest.raises(qr.DrafterSilent):
         _draft(sinas, monkeypatch, tele)
-    assert "was not valid JSON" in sinas.prompts[1]
+    assert "was not valid JSON" in sinas.asks[1]
+    assert "PREVIOUS REPLY" not in sinas.asks[1]
     assert tele["draft"]["draft_retry"] == "repair_json"
     assert tele["draft"]["draft_empty_reply"] is False
 
@@ -382,8 +434,12 @@ def test_an_empty_claim_list_is_its_own_cause():
 def test_the_reduced_ask_keeps_a_floor_under_the_claim_count():
     """Halving a small cap must not ask for an answer with no room for a
     conclusion per part."""
-    assert "at most 4 claims" in qr._shorter_draft_prompt("...", 2)
-    assert "at most 4 claims" in qr._shorter_draft_prompt("...", 8)
-    assert "at most 12 claims" in qr._shorter_draft_prompt("...", 24)
-    # and it is the same task, not a summary of it
-    assert qr._shorter_draft_prompt("THE ORIGINAL", 12).endswith("THE ORIGINAL")
+    assert "at most 4 claims" in qr._shorter_draft_ask(2)
+    assert "at most 4 claims" in qr._shorter_draft_ask(8)
+    assert "at most 12 claims" in qr._shorter_draft_ask(24)
+    # and it is the same task in the same conversation, not a new one: it
+    # points at the brief rather than reprinting it, and asks for the same
+    # reply shape.
+    smaller = qr._shorter_draft_ask(12)
+    assert "The brief has not changed" in smaller
+    assert qr._DRAFT_SCHEMA in smaller

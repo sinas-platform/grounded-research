@@ -77,7 +77,7 @@ def identified(rows: list[dict]) -> list[dict]:
     """Keep the rows whose superseded authority is named by an identifier.
 
     A supersession edge is only worth telling a reader about if the thing
-    superseded can be recognised. "Brown Shoe Co. v. United States" can;
+    superseded can be recognised. "Case T-451/20 Kestrel Holdings v Northmoor Authority" can;
     "Decision", "2014 Decision" and "2002 decision" cannot, and those are real
     entries in this relationship carrying most of its weight.
 

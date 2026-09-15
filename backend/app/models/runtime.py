@@ -548,10 +548,15 @@ class ClaimEvidence(Base, TimestampMixin):
     #: Null on rows written before it existed, and on the reviser's rows,
     #: which carry the coordinates a model reports and no quote.
     quote: Mapped[str | None] = mapped_column(String(2000))
-    #: The source's own number for the paragraph the span starts in, found
-    #: with the document class's `paragraph_pattern`. Null when the class
-    #: declares no pattern, when no numbered paragraph precedes the span, or
-    #: on rows written before it existed.
+    #: The source's own LABEL for the paragraph the span sits in — "42",
+    #: "r.o. 4.2", "recital 14" — as the drafter read it off the passage and
+    #: the faithfulness check found in the span's own lines. Never derived:
+    #: nothing here knows how a given source numbers itself, and a number
+    #: this system counted out would be a number the source never wrote. A
+    #: label the span does not carry fails the span and is discarded, so a
+    #: value here has been checked. Null when the drafter offered none and
+    #: on rows written before it existed. The unchecked proposal lives on
+    #: in `span["locator"]`; this is the accepted one.
     paragraph_ref: Mapped[str | None] = mapped_column(String(50))
 
 

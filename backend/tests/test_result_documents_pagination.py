@@ -70,7 +70,19 @@ def _row(rank=None):
 @pytest.mark.asyncio
 async def test_default_call_returns_full_rows_unpaged():
     rows = [_row(rank=1), _row(rank=2)]
-    session = _FakeSession([_ExecResult(scalar=object()), _ExecResult(rows=rows)])
+    # Third result: the class's declared property values, one row per
+    # (document, property). The endpoint loads them in one query for the
+    # whole page, so a caller assembling a citation never pays a call per
+    # document.
+    props = [
+        (rows[0][0].document_id, "case_number", {"_": "C-1/20"}),
+        (rows[0][0].document_id, "ecli", {"_": "ECLI:EU:C:2021:1"}),
+        (rows[0][0].document_id, "unset", None),
+    ]
+    session = _FakeSession([
+        _ExecResult(scalar=object()), _ExecResult(rows=rows),
+        _ExecResult(rows=props),
+    ])
     out = await get_result_documents(
         uuid.uuid4(), session=session, caller=_FakeCaller()
     )
@@ -83,6 +95,13 @@ async def test_default_call_returns_full_rows_unpaged():
     # left citing the storage filename, which is often a bare numeric id.
     assert out[0].title == "A Readable Title"
     assert out[0].external_ref == "AT.40795"
+    # The declared properties, unwrapped — the rest of a citation. A null
+    # value is absence, not a property whose value is None.
+    assert out[0].properties == {"case_number": "C-1/20",
+                                 "ecli": "ECLI:EU:C:2021:1"}
+    # A document with no property values gets an empty dict, not null: the
+    # read ran and found nothing, which is a different fact from not asking.
+    assert out[1].properties == {}
     # unpaged: the statement carries no LIMIT and no OFFSET
     stmt = session.statements[1]
     assert stmt._limit_clause is None

@@ -190,6 +190,58 @@ def _front_matter_extent(content: str) -> int:
     return 0
 
 
+def _fold(text: str) -> str:
+    """Letters and digits, lower-cased, everything else gone.
+
+    What a paragraph label survives being copied through: a source printing
+    "42." and a drafter writing "42", "r.o. 4.2" and "R.O. 4.2", a label
+    that picked up a trailing space. Punctuation and spacing are the part
+    that varies; the characters that identify the paragraph are the part
+    that does not. Pure.
+    """
+    return "".join(ch.lower() for ch in (text or "") if ch.isalnum())
+
+
+def _span_lines(content: str, span: dict[str, Any]) -> str:
+    """The span's own lines, without the judging margin. The margin exists
+    so a judge can read around a passage; a locator has to be IN the passage
+    it labels, so it is checked against exactly those lines. Empty when the
+    coordinates do not name lines that exist. Pure."""
+    lines = (content or "").splitlines()
+    try:
+        lf = int(span.get("line_from") or 0)
+        lt = int(span.get("line_to") or lf)
+    except (TypeError, ValueError):
+        return ""
+    if lf < 1 or lt < lf or lt > len(lines):
+        return ""
+    return "\n".join(lines[lf - 1:lt])
+
+
+def locator_holds(locator: str | None, span_text: str) -> bool | None:
+    """Does the claimed paragraph label actually appear in the span?
+
+    True, False, or None when there is nothing to check. Deterministic and
+    total — no model is asked, and no pattern says what a paragraph label
+    looks like in a given corpus, because nothing here can know that. The
+    drafter proposes the label it read off the passage and this says whether
+    the passage shows it; a label the passage does not show is a citation
+    pointing somewhere a reader cannot follow, which is worse than a
+    citation with no paragraph at all.
+
+    A substring match, on the folded forms, because a label is a short token
+    and the ways a faithful copy of one differs from the source are exactly
+    what folding removes. It is a floor and not a proof: a bare "42" can
+    match digits that are not a paragraph number. A weak check that refuses
+    an invented "recital 99" and lets an ambiguous "42" through is the right
+    trade for a check whose failure throws a citation away. Pure.
+    """
+    want = _fold(locator)
+    if not want:
+        return None
+    return want in _fold(span_text)
+
+
 def _span_section(toc: list[dict], line_from: int, line_to: int) -> str:
     """The innermost TOC section containing the span, with its parent —
     computed from the document's own headings. Position inside a document's
@@ -391,6 +443,30 @@ async def validate_answer_evidence(
                     "reasoning — it cannot support a claim"),
             })
             continue
+        # Deterministic, and before any judging call: the paragraph label the
+        # drafter attached to this span has to be IN the span. It is the one
+        # part of a citation a reader uses to find the passage in the source,
+        # and it is the one part nothing downstream can verify — so it is
+        # verified here, against the lines the span actually names, or the
+        # span is failed and the label discarded. A span that claims no
+        # label is untouched: the check is on what was asserted, and
+        # asserting nothing is not a defect.
+        held = locator_holds((ev.span or {}).get("locator"),
+                             _span_lines(content, ev.span or {}))
+        if held is False:
+            ev.paragraph_ref = None
+            pre_verdicts.append({
+                "evidence_id": ev.id, "validated": False,
+                "reasoning": (
+                    f"the paragraph label \"{(ev.span or {}).get('locator')}\" "
+                    f"does not appear in the cited lines "
+                    f"{s_lf}-{s_lt} — a citation must point at a passage the "
+                    "reader can find, and this one points at a label the "
+                    "passage does not carry"),
+            })
+            continue
+        if held is True:
+            ev.paragraph_ref = str((ev.span or {}).get("locator"))[:50]
         # The span's position in the document's own structure, from the
         # deterministic TOC — cached per content object, not per row.
         ck = id(content)

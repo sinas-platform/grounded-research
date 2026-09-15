@@ -1723,7 +1723,21 @@ async def _extract_passages(
                         "Where a sentence needs the one before it to mean what "
                         "it says, take both: a fragment that cannot be read on "
                         "its own is worse than a long quote, and the length is "
-                        "the target rather than the rule.\n\n"
+                        "the target rather than the rule.\n"
+                        # The source's own label for the paragraph is the only
+                        # thing that lets a reader find the passage again, and
+                        # "quote the sentence, not the paragraph" was trimming
+                        # it off the front of every quote. Nothing downstream
+                        # can put it back: this system does not know how a
+                        # given source numbers itself, and a number it derived
+                        # would be a number the source never wrote.
+                        + "Where the passage shows the source's own label for "
+                        "the paragraph the sentence sits in — a bare number, "
+                        '"r.o. 4.2", "recital 14" — begin the quote with that '
+                        "label, exactly as printed. It is how a reader finds "
+                        "the passage again, and trimming it loses it for "
+                        "good. Where the passage shows none, do not invent "
+                        "one: begin at the sentence.\n\n"
                         + doc_blob,
                     )
                     cleaned = reply.strip().strip("`").removeprefix("json").strip()
@@ -2016,6 +2030,24 @@ def _verified_quote(verified: dict, filename: str, evidence: dict) -> str:
     return overlapping[0] if len(overlapping) == 1 else ""
 
 
+def _locator_of(evidence: dict) -> str | None:
+    """The paragraph label an evidence entry claims, or None.
+
+    A label, never a number this system worked out: it is whatever the
+    source prints — "42", "r.o. 4.2", "recital 14" — and it is stored
+    unchecked, because the check belongs where the span text is (the
+    faithfulness pass), not where the model's reply is read. Capped at the
+    column width; a "locator" that is a sentence is not a locator. Pure.
+    """
+    raw = evidence.get("locator")
+    if raw is None or isinstance(raw, bool) or isinstance(raw, (list, dict)):
+        return None
+    s = str(raw).strip()
+    if not s or s.lower() in ("null", "none", "n/a"):
+        return None
+    return s[:50]
+
+
 def _evidence_entries(claim: dict, limit: int = 4) -> list[dict]:
     """The evidence entries that are objects, which is all a caller can read a
     filename off.
@@ -2185,10 +2217,24 @@ async def _draft_from_extracts(
         '"test": <null, or for kind test: {"name": "<the test>", "conditions": '
         '[{"text": "<condition, in the source\'s order>", "cumulative": '
         'true|false, "evidence": {"filename": "...", "line_from": <int>, '
-        '"line_to": <int>}}], "source_para": "<paragraph number if the passage '
+        '"line_to": <int>, "locator": "<or null>"}}], '
+        '"source_para": "<paragraph label if the passage '
         'shows one, else null>"}>, '
         '"rationale": "<why this claim rests on this source>", "evidence": '
-        '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
+        '[{"filename": "...", "line_from": <int>, "line_to": <int>, '
+        '"locator": "<or null>"}]}]}\n\n'
+        # The locator is the drafter's, because the drafter is the only stage
+        # that has both the passage and the proposition in front of it. It is
+        # checked deterministically against the passage before anything is
+        # judged, so a label that is not there costs the citation — which is
+        # the whole reason it is safe to print one at all.
+        + 'The "locator" of an evidence entry is the source\'s OWN label for '
+        "the paragraph the passage sits in, copied from the passage exactly "
+        'as it prints it: "42", "r.o. 4.2", "recital 14". Where the passage '
+        "shows no such label, write null. Never derive one, never count "
+        "paragraphs, never carry one over from another passage: a locator "
+        "that does not appear in the passage it labels is checked and the "
+        "citation is thrown away with it.\n\n"
         + await _synthesis_playbook()
         + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
     )
@@ -2306,7 +2352,12 @@ async def _draft_from_extracts(
                 span = {"line_from": ev_.get("line_from"),
                         "line_to": ev_.get("line_to"),
                         "char_from": None, "char_to": None,
-                        "note": ev_.get("note")}
+                        "note": ev_.get("note"),
+                        # As the drafter read it off the passage, unchecked.
+                        # The faithfulness check finds it in the span text or
+                        # fails the span, and only then does it become the
+                        # row's `paragraph_ref`.
+                        "locator": _locator_of(ev_)}
                 quote = _verified_quote(verified, fn_, ev_)
                 if quote:
                     ver = await session.get(DocumentVersion,
@@ -4325,7 +4376,8 @@ def _spans_of(obj: dict) -> list[dict]:
     """Citable spans only: a filename and a line number, or it is not one."""
     return [
         {"filename": str(e["filename"]), "line_from": int(e["line_from"]),
-         "line_to": int(e.get("line_to") or e["line_from"])}
+         "line_to": int(e.get("line_to") or e["line_from"]),
+         "locator": _locator_of(e)}
         for e in (obj.get("evidence") or [])
         if isinstance(e, dict) and e.get("filename")
         and str(e.get("line_from", "")).lstrip("-").isdigit()
@@ -4569,7 +4621,8 @@ async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
             claim_id=claim_id, document_id=doc.id,
             document_version_id=doc.current_version_id,
             span={"line_from": sp["line_from"], "line_to": sp["line_to"],
-                  "char_from": None, "char_to": None, "note": None},
+                  "char_from": None, "char_to": None, "note": None,
+                  "locator": sp.get("locator")},
             validated=False))
 
 
@@ -4927,7 +4980,8 @@ async def _revise_answer(
         'null>, "kind": "legal_principle|factual|procedural|conclusion|test|'
         'label|inference", "follows_from": [<seq>, ...], '
         '"rationale": "<why this claim rests on this source>", '
-        '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
+        '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>, '
+        '"locator": "<or null>"}]}], '
         '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
         'and why no passage available can carry it>"}], '
         '"keep": [{"seq": <int>, "rationale": "<why the current citation '
@@ -4943,11 +4997,19 @@ async def _revise_answer(
         'regulator_decision|legislation|commentary|party_submission|other", '
         '"jurisdiction_note": <null or one line>, "currency_note": <null or one '
         'line>, "test": <null, or {"name", "conditions": [{"text", '
-        '"cumulative", "evidence": {"filename", "line_from", "line_to"}}], '
+        '"cumulative", "evidence": {"filename", "line_from", "line_to", '
+        '"locator"}}], '
         '"source_para"}>, '
         '"rationale": "<why this claim rests on this '
         'source>", "evidence": [{"filename": "...", '
-        '"line_from": <int>, "line_to": <int>}]}]}\n\n'
+        '"line_from": <int>, "line_to": <int>, "locator": "<or null>"}]}]}\n\n'
+        # Same rule the drafter is given, and for the same reason: the check
+        # is deterministic and runs before any judging, so a label that is
+        # not in the passage costs the citation it was attached to.
+        + 'The "locator" of an evidence entry is the source\'s OWN label for '
+        "the paragraph the passage sits in, copied exactly as the passage "
+        'prints it: "42", "r.o. 4.2", "recital 14" — or null where the '
+        "passage shows none. Never derive one and never count paragraphs.\n\n"
         + await _synthesis_playbook()
         + f"\nQUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
         f"FEEDBACK:\n- " + "\n- ".join(feedback[:10])

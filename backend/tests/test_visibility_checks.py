@@ -203,7 +203,10 @@ async def test_get_result_documents_returns_rows_when_visible():
     # (row, filename, class_name, summary_preview, external_ref, title) — the
     # identity join from #14, widened with the human identities.
     docs = [(rd, "doc.md", "Some Class", "a summary", None, None)]
-    session = _FakeSession([_ExecResult(scalar=object()), _ExecResult(rows=docs)])
+    # Third read: the class's declared property values for the page, one
+    # query for every row rather than one call per document.
+    session = _FakeSession([_ExecResult(scalar=object()), _ExecResult(rows=docs),
+                            _ExecResult(rows=[])])
     out = await get_result_documents(uuid.uuid4(), session=session, caller=_FakeCaller())
     assert [d.document_id for d in out] == [rd.document_id]
     assert out[0].filename == "doc.md"

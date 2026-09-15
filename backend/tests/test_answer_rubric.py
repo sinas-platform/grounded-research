@@ -47,10 +47,10 @@ GOOD_ANSWER = """\
 
 FILENAME_ANSWER = """\
 **1.** A decision may be annulled in part.
-    62009TJ0135.md
+    a-judgment.md
 
 **2.** Material gathered outside the surviving scope may not be used.
-    62009TJ0135.md, digest--p10.md
+    a-judgment.md, digest--p10.md
 """
 
 # The current format: a marker in the claim, the citation once at the end.
@@ -163,13 +163,13 @@ def test_complete_citations_leave_the_judge_free():
 
 def test_filename_stems_cap_the_score_at_zero_when_nothing_is_named():
     c = citation_precheck(FILENAME_ANSWER)
-    assert c["filename_citations"] == ["62009TJ0135.md", "digest--p10.md"]
+    assert c["filename_citations"] == ["a-judgment.md", "digest--p10.md"]
     assert c["with_name_and_number"] == 0
     assert c["cap"] == 0
 
 
 def test_filenames_beside_named_citations_cap_at_one():
-    mixed = GOOD_ANSWER + "\n    62009TJ0135.md\n"
+    mixed = GOOD_ANSWER + "\n    a-judgment.md\n"
     assert citation_precheck(mixed)["cap"] == 1
 
 

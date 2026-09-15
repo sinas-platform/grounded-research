@@ -1,0 +1,240 @@
+{
+ "question": "Can an inspection decision be annulled in part where the Commission's evidence supports only some of the suspected infringement period it covers, and what then happens to material already gathered?",
+ "question_parts": [
+  "Can an inspection decision be annulled in part where the Commission's evidence supports only some of the suspected infringement period it covers?",
+  "What then happens to material already gathered?"
+ ],
+ "criteria": {
+  "conclusion_first": {
+   "score": 0,
+   "reason": "Answer opens with the general legal test (claim 1) rather than a direct conclusion answering both parts of the question."
+  },
+  "parts_answered": {
+   "score": 2,
+   "reason": "Partial annulment is substantively covered (claims 4, 11, 13, 14) and the fate of gathered material is substantively covered (claims 5, 6, 7, 8, 9, 10)."
+  },
+  "tests_as_conditions": {
+   "score": 0,
+   "reason": "The reasonable-grounds/scope test (claim 1) and the copy-retention conditions (claim 9) are dissolved into prose rather than set out as ordered, labelled-cumulative conditions."
+  },
+  "authorities_labelled": {
+   "score": 1,
+   "reason": "AG Opinions are labelled in claims 8-9, but the Belgian Markets Court ruling (claim 10) is not explicitly flagged as non-binding/other-jurisdiction material."
+  },
+  "citations_complete": {
+   "score": 0,
+   "reason": "Per pre-check, sources are cited via filenames with no dates, ECLI or paragraph numbers throughout (e.g. claims 3-14)."
+  },
+  "no_duplicate_authorities": {
+   "score": 1,
+   "reason": "Claims 4 and 11 restate the same T-135/09 disposition almost verbatim."
+  },
+  "no_off_topic": {
+   "score": 2,
+   "reason": "All claims (1-14) bear directly on partial annulment or the treatment of gathered evidence."
+  },
+  "no_contradictions": {
+   "score": 2,
+   "reason": "Claims on partial vs full annulment (e.g. 4 vs 12) are distinguished by facts, not contradictory."
+  },
+  "currency_flagged": {
+   "score": 0,
+   "reason": "No date is given for the state of the law and the Belgian Proximus decision (claim 10) is not flagged as a different jurisdiction; 'set aside' events in claim 6 are not dated."
+  }
+ },
+ "parts_answered": [
+  {
+   "part": "Can an inspection decision be annulled in part where the Commission's evidence supports only some of the suspected infringement period it covers?",
+   "score": 2,
+   "reason": "Claims 4, 11, 13, 14 directly confirm and illustrate partial annulment based on scope of evidence."
+  },
+  {
+   "part": "What then happens to material already gathered?",
+   "score": 2,
+   "reason": "Claims 5, 6, 7, 8, 9, 10 address restriction of use, deletion, and evidentiary consequences for gathered material."
+  }
+ ],
+ "prechecks": {
+  "citations": {
+   "claims": 14,
+   "filename_citations": [
+    "62009TJ0135.md",
+    "62011TJ0289.md",
+    "62013CJ0583.md",
+    "62016TJ0325.md",
+    "62017TJ0249.md",
+    "62018CC0606.md",
+    "62018CJ0606.md",
+    "62020CJ0690.md",
+    "competition-case-law-digest-5th--p10.md",
+    "inspections-eu-law-2nd--3_chapter_1_-_inspections_upon_decision_regulation_1_2003_article_20_4.md",
+    "judicial-review-competition-cases--6_european_union_-_judicial_review_of_inspection_decisions.md"
+   ],
+   "with_name_and_number": 8,
+   "with_date": 0,
+   "with_year_only": 1,
+   "with_ecli": 0,
+   "with_paragraph": 0,
+   "cap": 1,
+   "per_claim": [
+    {
+     "claim": 1,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 2,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 3,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 4,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 5,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 6,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 7,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 8,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 9,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 10,
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": true,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 11,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 12,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 13,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    },
+    {
+     "claim": 14,
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false
+    }
+   ]
+  },
+  "duplicates": {
+   "near_duplicate_pairs": [
+    {
+     "claims": [
+      4,
+      11
+     ],
+     "overlap": 0.66
+    }
+   ],
+   "authorities_cited_thrice_or_more": {
+    "T-135/09": [
+     3,
+     4,
+     11
+    ]
+   },
+   "cap": 1
+  },
+  "currency": {
+   "markers": [
+    "set aside"
+   ],
+   "dated": false
+  }
+ },
+ "total": 8,
+ "max": 18,
+ "verdict": "8/18 — Substantively covers both parts with relevant case law but lacks a clear upfront conclusion, proper citation detail, ordered test structure, and jurisdiction/currency flagging.",
+ "judge": {
+  "agent": "sgr/retrieval-planner-agent"
+ }
+}

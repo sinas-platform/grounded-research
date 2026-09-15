@@ -2816,15 +2816,16 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
 
 
 async def _fix_question_parts(
-    run_id: uuid.UUID, answer_id: uuid.UUID, texts: list[str]
+    run_id: uuid.UUID, answer_id: uuid.UUID, split: list[dict]
 ) -> list[dict]:
     """The run's decomposition as the structure uses it: [{index, label,
     text}], written on the answer row and under `draft` in telemetry.
 
     The split itself is `_question_parts`: one call on the question alone,
-    stable across cycles, and the gate judges the same list. This only gives
-    each part an index and a heading, and records it where the drafter and
-    the API read it. A resumed run reads what the first one wrote.
+    stable across cycles, and the gate judges the same list. The heading is
+    the splitter's; this only numbers the parts and records them where the
+    drafter, the renderer and the API read them. A resumed run reads what the
+    first one wrote.
     """
     from app.models import Answer
 
@@ -2834,7 +2835,7 @@ async def _fix_question_parts(
     if isinstance(stored, list) and stored:
         return [p for p in stored if isinstance(p, dict)]
     parts = answer_structure.parse_parts(
-        {"parts": [{"text": t} for t in texts if str(t or "").strip()]})
+        {"parts": [p for p in (_split_part(x) for x in split) if p]})
     await _tele(run_id, "draft", question_parts=parts,
                 claim_cap=answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS)
     if parts:
@@ -3275,8 +3276,44 @@ def _gate_json(reply: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("gate verdict was not an object")
     return data
-async def _split_question(sinas: _Sinas, question: str) -> list[str]:
+
+
+def _split_part(x: Any) -> dict | None:
+    """One element of the splitter's reply as `{label, text}`, or None when it
+    is not a part at all.
+
+    `text` is the thing the question asks, in full; `label` is the heading it
+    is printed under. A bare string is a part that came back without a
+    heading — the shape the splitter used to answer in, and the one a model
+    falls back to — and its heading is derived from its text. Pure.
+    """
+    if isinstance(x, str):
+        text, label = x.strip(), ""
+    elif isinstance(x, dict):
+        text = str(x.get("text") or "").strip()
+        label = str(x.get("label") or "").strip()
+    else:
+        return None
+    if not text:
+        return None
+    return {"label": answer_structure.part_heading(label, text), "text": text}
+
+
+def _part_text(part: Any) -> str:
+    """What a part asks, from either shape. A run stored before the splitter
+    wrote headings holds the text alone."""
+    return str((part or {}).get("text") if isinstance(part, dict) else part or "")
+
+
+async def _split_question(sinas: _Sinas, question: str) -> list[dict]:
     """The distinct things the question asks, or [] if that cannot be read.
+
+    Each part comes back as `{label, text}`: the full thing asked, and a
+    short heading for it. The heading is asked of the splitter rather than
+    derived here because only the splitter has read the question — the
+    engine's own attempt was the part's first ten words and an ellipsis,
+    which printed as a sentence cut off mid-phrase over every section of
+    every published answer.
 
     Its own call, on the question alone. The gate used to do this inside its
     verdict, where the question is a fraction of a percent of a prompt whose
@@ -3305,7 +3342,13 @@ async def _split_question(sinas: _Sinas, question: str) -> list[str]:
         "what is asked, not on how the sentence is punctuated: one sentence "
         "can ask two things, and two sentences can ask one. Do not answer "
         "any of them, and do not add anything the question does not ask."
-        '\n\nReply ONLY JSON: {"parts": ["<one thing the question asks>", ...]}'
+        "\n\nGive each part a heading as well as its text. The text is the "
+        "whole thing the question asks, in one sentence. The heading is what "
+        "a reader scans a section by: a phrase of three to seven words, no "
+        "trailing punctuation, and never the text cut short — write the "
+        "subject of the part, not its opening words."
+        '\n\nReply ONLY JSON: {"parts": [{"label": "<the heading>", '
+        '"text": "<one thing the question asks, in full>"}, ...]}'
     )
     reply = await sinas.invoke("sgr/answer-gate-agent", prompt)
     for attempt in (0, 1):
@@ -3317,15 +3360,14 @@ async def _split_question(sinas: _Sinas, question: str) -> list[str]:
             raw = json.loads(cleaned[start:end + 1]).get("parts")
             if not isinstance(raw, list) or not raw:
                 raise ValueError("no parts in reply")
-            # Only strings. str() on a dict is a non-empty string, so without
-            # this an object in the list becomes a question part that binds
-            # every later cycle. Dropping it silently would be worse: a lost
-            # part is the defect this whole change exists to stop, so an
-            # element that is not a part makes the reply unusable and the
-            # repair below runs.
-            got = [x.strip() for x in raw if isinstance(x, str) and x.strip()]
+            # An element that is not a part — an object with no text, a
+            # number, a null — makes the whole reply unusable rather than
+            # being dropped. Dropping it silently would be worse: a lost part
+            # is the defect this whole change exists to stop, so the repair
+            # below runs instead.
+            got = [p for p in (_split_part(x) for x in raw) if p]
             if len(got) != len(raw):
-                raise ValueError("a part was not a non-empty string")
+                raise ValueError("a part carried no text")
             return got[:8]
         except Exception as exc:  # noqa: BLE001
             if attempt:
@@ -3341,7 +3383,7 @@ async def _split_question(sinas: _Sinas, question: str) -> list[str]:
 
 async def _question_parts(
     sinas: _Sinas, run_id: uuid.UUID, question: str
-) -> list[str]:
+) -> list[dict]:
     """The run's decomposition, split once and reused by every later cycle.
 
     Computed on the first gate cycle rather than as a pipeline stage: all
@@ -3349,12 +3391,16 @@ async def _question_parts(
     resumed run reads what the first one wrote. State lives in telemetry,
     the obligation ledger's precedent: no migration, survives a restart,
     one writer per run.
+
+    A run recorded before the splitter wrote headings stored its parts as
+    plain strings; they are read back as parts with a derived heading, so a
+    resumed run is not held to a shape its record predates.
     """
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         stored = ((run.telemetry or {}).get("validate") or {}).get("question_parts")
     if isinstance(stored, list) and stored:
-        return [str(x) for x in stored]
+        return [p for p in (_split_part(x) for x in stored) if p]
     parts = await _split_question(sinas, question)
     if parts:
         await _tele(run_id, "validate", question_parts=parts)
@@ -3384,7 +3430,7 @@ def _themes_from_reply(reply: str) -> list[str]:
 
 async def _uncovered_themes(
     sinas: _Sinas, run_id: uuid.UUID, question: str,
-    parts: list[str], working_set: str,
+    parts: list[dict], working_set: str,
 ) -> list[str]:
     """Themes the retrieved material carries that no part of the question asks.
 
@@ -3433,7 +3479,7 @@ async def _uncovered_themes(
         "sgr/answer-gate-agent",
         "QUESTION:\n" + question
         + "\n\nTHE THINGS IT ASKS, as already read:\n"
-        + "\n".join(f"- {p}" for p in parts)
+        + "\n".join(f"- {_part_text(p)}" for p in parts)
         + "\n\nRETRIEVED MATERIAL:\n" + working_set[:40000]
         + "\n\nName any subject the retrieved material covers substantially "
         "that none of the things above asks about. A lawyer reading this "
@@ -3723,7 +3769,7 @@ async def _gate_answer(
         + (('\n\nPARTS OF THE QUESTION (fixed for this run; judge'
             ' each against the claims, and do not add, merge or drop'
             ' one):\n'
-            + "\n".join(f'  {i}. {a}' for i, a in enumerate(fixed, 1)))
+            + "\n".join(f'  {i}. {_part_text(a)}' for i, a in enumerate(fixed, 1)))
            if fixed else
            '\n\nFirst split the QUESTION into the distinct things it asks: '
            'a question asking what the conditions are, whether a regulation '
@@ -3847,7 +3893,8 @@ async def _gate_answer(
             if 1 <= n <= len(fixed):
                 seen.setdefault(n, x)
         parts = [
-            {"asks": a, "covered": bool((seen.get(n) or {}).get("covered")),
+            {"asks": _part_text(a),
+             "covered": bool((seen.get(n) or {}).get("covered")),
              "gap": str((seen.get(n) or {}).get("gap") or "").strip()
                     or ("" if n in seen else
                         "the review returned no verdict for this part"),

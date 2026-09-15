@@ -49,6 +49,10 @@ HARD_MAX_CLAIMS = 24
 MIN_CLAIMS_PER_PART = 2
 #: A decomposition longer than this is the model listing sentences.
 MAX_PARTS = 8
+#: Words a part's heading may run to. The splitter is asked for three to
+#: seven; past this a label is a sentence rather than a heading, and is
+#: shortened before it is printed under a `##`.
+HEADING_MAX_WORDS = 12
 
 # ── vocabularies ─────────────────────────────────────────────────────────────
 
@@ -98,8 +102,9 @@ def parse_parts(data: Any) -> list[dict]:
     Strict on shape: an element that is not an object with a non-empty
     `text` makes the whole reply unusable rather than being dropped, because
     a lost part is the defect the decomposition exists to stop — the caller
-    repairs once and then falls back. A missing label is derived from the
-    text, since a heading is a convenience and a part is not.
+    repairs once and then falls back. The label is the heading the splitter
+    wrote; a missing one is derived from the text, since a heading is a
+    convenience and a part is not.
     """
     if not isinstance(data, dict):
         return []
@@ -113,17 +118,57 @@ def parse_parts(data: Any) -> list[dict]:
         text = str(x.get("text") or "").strip()
         if not text:
             return []
-        label = str(x.get("label") or "").strip() or _label_from(text)
+        label = part_heading(x.get("label"), text)
         out.append({"index": len(out), "label": label[:300], "text": text[:1000]})
         if len(out) >= MAX_PARTS:
             break
     return out
 
 
-def _label_from(text: str) -> str:
-    words = text.split()
-    head = " ".join(words[:10])
-    return head + ("…" if len(words) > 10 else "")
+#: Where a sentence's opening clause ends. A heading derived from a sentence
+#: stops here rather than at a word count, so what is printed is a phrase and
+#: not a fragment.
+_CLAUSE_BREAK = re.compile(r"\s*[,;:(\[–—]|\s+-\s+")
+
+
+def part_heading(label: Any, text: Any = "") -> str:
+    """A part's heading: a short phrase a reader scans. Pure.
+
+    The splitter writes a heading and the part's full text separately, so the
+    ordinary case is the label printed exactly as it stands. What this is for
+    is the label that is really a sentence — every row written before the
+    splitter wrote headings carries the part's first ten words and an
+    ellipsis, which renders under a `##` as a sentence cut off mid-phrase.
+    Such a label falls back to the clause it opens with, whole, and never to
+    an ellipsis: a heading that trails off tells the reader nothing about
+    where it was going.
+
+    `text` is used only when there is no label at all, so a decomposition
+    that lost its headings still gets a phrase rather than a number.
+    """
+    s = _tidy(label) or _tidy(text)
+    if not s or len(s.split()) <= HEADING_MAX_WORDS:
+        return s
+    words = (_tidy(_CLAUSE_BREAK.split(s, maxsplit=1)[0]) or s).split()
+    if len(words) > HEADING_MAX_WORDS:
+        # One long clause and no break to stop at. Cutting is the last
+        # resort, so the cut does not also leave the heading hanging on a
+        # joining word — dropped by length rather than by a list of words, so
+        # that no language's vocabulary ends up in engine code.
+        words = words[:HEADING_MAX_WORDS]
+        while len(words) > 3 and len(words[-1]) <= 4:
+            words.pop()
+    return _tidy(" ".join(words))
+
+
+#: Trailing marks a heading does not carry: the sentence punctuation and the
+#: ellipsis of a label that was cut short. A question mark is left alone — a
+#: heading that asks something means to.
+_HEADING_TAIL = re.compile(r"[\s.,;:…—–-]+$")
+
+
+def _tidy(value: Any) -> str:
+    return _HEADING_TAIL.sub("", str(value or "").strip())
 
 
 def part_index_of(raw: Any, n_parts: int) -> int | None:

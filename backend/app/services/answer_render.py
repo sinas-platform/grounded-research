@@ -38,6 +38,7 @@ from typing import Any
 from app.services.answer_structure import (
     UNCLASSIFIED_HEADING,
     document_date,
+    part_heading,
     unwrap,
 )
 
@@ -325,11 +326,16 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
                           if c.get("part_index") is not None}
                          | {int(p["index"]) for p in parts if "index" in p})
         for idx in indices:
-            label = next((p.get("label") for p in parts if p.get("index") == idx), None)
-            label = label or next((c.get("part_label") for c in analysis
-                                   if c.get("part_index") == idx and c.get("part_label")),
-                                  None) or f"Part {idx + 1}"
-            out += [f"## {label}", ""]
+            part = next((p for p in parts if p.get("index") == idx), {})
+            label = part.get("label") or next(
+                (c.get("part_label") for c in analysis
+                 if c.get("part_index") == idx and c.get("part_label")), None)
+            # A heading, not the part restated: the label is printed as it
+            # stands when it is already short, and a label that is really a
+            # sentence — every row written before the splitter wrote
+            # headings — is shortened to its opening clause.
+            heading = part_heading(label, part.get("text")) or f"Part {idx + 1}"
+            out += [f"## {heading}", ""]
             mine = sorted([c for c in analysis if c.get("part_index") == idx], key=_sort_key)
             paras = _paragraphs(mine, ev_by_claim, cites)
             for p in paras:

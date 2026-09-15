@@ -30,8 +30,13 @@ import pytest
 from app.services import query_runner as qr
 
 SPLIT_CALL = "Split the question into the distinct things"
-DEFAULT_SPLIT = json.dumps({"parts": ["whether it applies", "whether it is mandatory"]})
-SPLIT_ONE = json.dumps({"parts": ["whether it applies"]})
+#: The splitter answers with a heading and the full text of each part.
+DEFAULT_SPLIT = json.dumps({"parts": [
+    {"label": "Whether it applies", "text": "whether it applies"},
+    {"label": "Whether it is mandatory", "text": "whether it is mandatory"},
+]})
+SPLIT_ONE = json.dumps({"parts": [
+    {"label": "Whether it applies", "text": "whether it applies"}]})
 
 
 class _FakeSinas:
@@ -603,8 +608,8 @@ async def test_the_split_is_stored_for_later_cycles(gate_env):
     )
     await _run(sinas)
     assert gate_env["validate"]["question_parts"] == [
-        "whether it applies",
-        "whether it is mandatory",
+        {"label": "Whether it applies", "text": "whether it applies"},
+        {"label": "Whether it is mandatory", "text": "whether it is mandatory"},
     ]
 
 
@@ -624,6 +629,37 @@ async def test_the_split_call_is_not_given_the_claims(gate_env):
     await _run(sinas)
     assert "CLAIMS OF THE DRAFT ANSWER" not in sinas.calls[0]
     assert "WORKING DOCUMENT SET" not in sinas.calls[0]
+
+
+@pytest.mark.asyncio
+async def test_the_split_call_asks_for_a_heading_as_well_as_the_text(gate_env):
+    """A part is printed under a heading, and only the reader that has seen
+    the question can write one. The engine's own attempt was the part's first
+    ten words and an ellipsis, which rendered as a sentence cut off mid-phrase
+    over every section of every published answer."""
+    sinas = _ScriptedSinas(
+        DEFAULT_SPLIT,
+        json.dumps({"publishable": True, "parts": [{"n": 1, "covered": True},
+                                                   {"n": 2, "covered": True}]}),
+    )
+    await _run(sinas)
+    prompt = sinas.calls[0]
+    assert "three to seven words" in prompt
+    assert '"label"' in prompt and '"text"' in prompt
+    assert "never the text cut short" in prompt
+
+
+def test_a_part_keeps_the_heading_the_splitter_wrote():
+    """The heading reaches the answer row as the splitter wrote it: the
+    structure numbers the parts and writes down what it was given."""
+    from app.services import answer_structure
+
+    parts = answer_structure.parse_parts({"parts": [
+        {"label": "Privilege of the adviser",
+         "text": "whether the adviser is covered, and from what moment"}]})
+    assert parts == [{"index": 0, "label": "Privilege of the adviser",
+                      "text": "whether the adviser is covered, and from what "
+                              "moment"}]
 
 
 # -- what makes the fixed list binding ----------------------------------------
@@ -734,18 +770,34 @@ async def test_the_split_is_repaired_once(gate_env):
 
 
 @pytest.mark.asyncio
-async def test_a_part_that_is_not_a_string_makes_the_split_unusable(gate_env):
-    """str() on a dict is a non-empty string, so without a type check an
-    object in the list becomes a question part that binds every later cycle.
-    Dropping it quietly would lose a part, which is the defect this change
-    exists to stop, so it goes to the repair instead."""
+async def test_an_element_that_carries_no_text_makes_the_split_unusable(gate_env):
+    """An object with no text is not a part. str() on it is a non-empty
+    string, so without the check it becomes a question part that binds every
+    later cycle. Dropping it quietly would lose a part, which is the defect
+    this change exists to stop, so it goes to the repair instead."""
     sinas = _ScriptedSinas(
-        json.dumps({"parts": ["whether it applies", {"asks": "smuggled"}]}),
+        json.dumps({"parts": [{"label": "It applies", "text": "whether it applies"},
+                              {"asks": "smuggled"}]}),
         SPLIT_ONE,
         json.dumps({"publishable": True, "parts": [{"n": 1, "covered": True}]}),
     )
     await _run(sinas)
-    assert gate_env["validate"]["question_parts"] == ["whether it applies"]
+    assert gate_env["validate"]["question_parts"] == [
+        {"label": "Whether it applies", "text": "whether it applies"}]
+
+
+@pytest.mark.asyncio
+async def test_a_part_that_comes_back_as_a_bare_string_still_lands(gate_env):
+    """The shape the splitter used to answer in. A part with no heading of
+    its own is still a part: the heading is derived from its text rather than
+    the split being thrown away."""
+    sinas = _ScriptedSinas(
+        json.dumps({"parts": ["whether it applies"]}),
+        json.dumps({"publishable": True, "parts": [{"n": 1, "covered": True}]}),
+    )
+    await _run(sinas)
+    assert gate_env["validate"]["question_parts"] == [
+        {"label": "whether it applies", "text": "whether it applies"}]
 
 
 @pytest.mark.asyncio

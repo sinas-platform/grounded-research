@@ -155,6 +155,63 @@ def test_each_part_gets_its_own_section_under_its_own_label():
             < md.index("## Authorities"))
 
 
+def test_a_short_label_is_the_heading_exactly_as_it_stands():
+    """A heading is scanned, not read. The splitter writes one of three to
+    seven words and the renderer prints it verbatim — no shortening, no
+    trailing punctuation added or taken away."""
+    md = render_markdown(
+        _answer(question_parts=[{"index": 0, "label": "Privilege of the adviser",
+                                 "text": "whether the adviser is covered, and "
+                                         "from what moment"}]),
+        [{"id": "x", "sequence": 1, "section": "analysis", "part_index": 0,
+          "position": 1, "claim_text": "Something."}],
+        [], {}).markdown
+    assert "## Privilege of the adviser\n" in md
+
+
+def test_a_legacy_sentence_label_falls_back_to_its_first_clause():
+    """Rows written before the splitter wrote headings carry the part's first
+    ten words and an ellipsis, which renders as a sentence cut off mid-phrase.
+    Such a label is shortened to the clause it opens with, whole."""
+    legacy = ("Whether the obligation applies to an undertaking in the "
+              "respondent's position, and from what moment it binds…")
+    md = render_markdown(
+        _answer(question_parts=[{"index": 0, "label": legacy, "text": legacy}]),
+        [{"id": "x", "sequence": 1, "section": "analysis", "part_index": 0,
+          "position": 1, "claim_text": "Something."}],
+        [], {}).markdown
+    assert ("## Whether the obligation applies to an undertaking in the "
+            "respondent's position\n") in md
+    assert "…" not in md
+    assert "..." not in md
+
+
+def test_a_heading_is_never_a_truncated_sentence():
+    """The defect, pinned on the helper the renderer and the splitter share:
+    a label that is a sentence is shortened, and what comes back is a phrase
+    that ends where a phrase ends rather than trailing off."""
+    from app.services.answer_structure import part_heading
+
+    assert part_heading("Privilege of the adviser") == "Privilege of the adviser"
+    # Trailing punctuation and a trailing ellipsis are not part of a heading.
+    assert part_heading("During an inspection.") == "During an inspection"
+    assert part_heading("How the courts drew the line…") == "How the courts drew the line"
+    # A sentence: the clause it opens with, whole, and nothing trails off.
+    assert part_heading(
+        "Whether the duty binds the respondent from the moment of "
+        "notification, and what follows if it does"
+    ) == "Whether the duty binds the respondent from the moment of notification"
+    # One long clause and no break to stop at: cut, but never left hanging on
+    # a joining word, and never with an ellipsis.
+    got = part_heading("Whether the obligation applies to an undertaking that "
+                       "has not yet been told of the decision")
+    assert got == "Whether the obligation applies to an undertaking"
+    # No label at all: the part's own text stands in, so a decomposition that
+    # lost its headings still gets a phrase rather than a number.
+    assert part_heading(None, "whether it is mandatory") == "whether it is mandatory"
+    assert part_heading(None, None) == ""
+
+
 def test_a_part_with_no_label_anywhere_is_still_a_section():
     """A decomposition that lost its labels must not lose its parts: the
     heading falls back to the part's number rather than to nothing."""

@@ -16,7 +16,7 @@ from app.models import Document, DocumentClass, Result, ResultDocument, ResultTr
 from app.schemas.common import TraceOut
 from app.schemas.runtime import ResultDocumentCompactOut, ResultDocumentOut, ResultOut
 from app.services.annotations import annotations_for_documents
-from app.services.document_identity import document_title_subquery
+from app.services.document_identity import document_title_subquery, properties_for_documents
 from app.services.introspect import SUMMARY_PREVIEW_CHARS
 from app.services.result_filter import load_visible_result
 from app.services.visibility import visible_clause
@@ -113,6 +113,16 @@ async def get_result_documents(
             session, [rd.document_id for rd, *_ in rows], definitions
         )
 
+    # What the class says about each document — case number, CELEX, ECLI,
+    # date, status. A caller assembling a citation needs every one of them,
+    # and a per-document property-values call to get them is what left
+    # answers citing filename stems. The compact projection stays identity
+    # only: it exists to be small.
+    props_by_doc: dict[uuid.UUID, dict] = {}
+    if rows and not compact:
+        props_by_doc = await properties_for_documents(
+            session, [rd.document_id for rd, *_ in rows])
+
     if compact:
         return [
             ResultDocumentCompactOut(
@@ -134,6 +144,7 @@ async def get_result_documents(
                     "annotations",
                     "title",
                     "external_ref",
+                    "properties",
                 }
             ),
             filename=filename,
@@ -141,6 +152,7 @@ async def get_result_documents(
             summary=summary,
             title=title,
             external_ref=external_ref,
+            properties=props_by_doc.get(rd.document_id, {}),
             annotations=annotations_by_doc.get(rd.document_id),
         )
         for rd, filename, class_name, summary, external_ref, title in rows

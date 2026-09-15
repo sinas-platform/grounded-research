@@ -13,21 +13,22 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 
-from fastapi import Response, APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
+from app.models import Answer
 from app.models._common import now_utc
 from app.models.query import QueryRun
 from app.schemas.common import OwnedOut
-from app.services.query_runner import _Sinas, run_pipeline
 from app.services import run_export
+from app.services.query_runner import _Sinas, run_pipeline
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/query-runs", tags=["query-runs"])
@@ -78,6 +79,13 @@ class QueryRunOut(OwnedOut):
     parent_result_id: uuid.UUID | None = None
     answer_id: uuid.UUID | None = None
     error: str | None = None
+    # Carried over from the answer row, so a consumer that follows a run to
+    # its answer does not have to fetch the answer to learn how the question
+    # was read and how current the law is. Null until the run has an answer,
+    # and on runs from before either existed. Served on the single-run read;
+    # the list read stays one query.
+    law_stated_as_at: date | None = None
+    question_parts: list[dict[str, Any]] | None = None
     telemetry: dict[str, Any] = {}
     # wall-clock bounds of the run itself — the only reliable elapsed time for
     # outcomes that write no closing stage telemetry (e.g. partial)
@@ -215,7 +223,18 @@ async def get_query_run(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    return await _visible_run_or_404(run_id, session, caller)
+    """One run, with the two answer-level facts a downstream consumer reads
+    off the run: the decomposition the answer was written to, and the date
+    the law is stated as at. Both also sit on the answer row; they are here
+    because the run is what a caller holds."""
+    run = await _visible_run_or_404(run_id, session, caller)
+    out = QueryRunOut.model_validate(run)
+    if run.answer_id is not None:
+        answer = await session.get(Answer, run.answer_id)
+        if answer is not None:
+            out.law_stated_as_at = answer.law_stated_as_at
+            out.question_parts = answer.question_parts
+    return out
 
 
 @router.post(

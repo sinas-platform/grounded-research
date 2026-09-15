@@ -65,12 +65,14 @@ ACK_INSTRUCTION = (
 
 
 class _Client(Protocol):
-    """The two calls this needs from the Sinas client, and no more."""
+    """The three calls this needs from the Sinas client, and no more."""
 
     async def chat_create(self, agent: str, title: str) -> str: ...
 
     async def chat_send(self, chat_id: str, content: str,
                         agent: str = "") -> str: ...
+
+    async def chat_messages(self, chat_id: str) -> list[dict]: ...
 
 
 @dataclass
@@ -98,8 +100,11 @@ class DraftingChat:
     chat_id: str | None = None
     title: str = "[query-run] drafting"
     max_exchanges: int = 4
-    #: Turn one, verbatim, kept so a rollover can replay it byte-for-byte.
-    brief: str = ""
+    #: Turn one AS SENT, byte for byte, so a restart can replay it exactly —
+    #: an identical prefix is the whole of what makes the cache hit. Empty on
+    #: an object that rejoined an existing chat without composing a brief; it
+    #: is then read back off the chat itself, where it is the first message.
+    opening: str = ""
     exchanges: list[Exchange] = field(default_factory=list)
     #: Rounds already folded into a summary turn, oldest first.
     summarised: list[Exchange] = field(default_factory=list)
@@ -122,7 +127,7 @@ class DraftingChat:
         cached prefix and invite the drafter to start over. Returns the chat
         id the caller must persist.
         """
-        self.brief = brief
+        self.opening = brief + ACK_INSTRUCTION
         chat_id = chat_id or self.chat_id
         if chat_id:
             self.chat_id = chat_id
@@ -133,11 +138,35 @@ class DraftingChat:
         return self.chat_id or ""
 
     async def _open(self) -> None:
-        """A fresh chat carrying the brief and nothing else."""
+        """A fresh chat carrying turn one and nothing else."""
         self.chat_id = await self.client.chat_create(self.agent, self.title)
         self.chats += 1
-        await self.client.chat_send(self.chat_id, self.brief + ACK_INSTRUCTION,
-                                    self.agent)
+        await self.client.chat_send(self.chat_id, self.opening, self.agent)
+
+    async def _opening_message(self) -> str:
+        """Turn one as it was actually sent.
+
+        Composed here when this object opened the chat, and otherwise read
+        back off the chat, where it is the first message. A later stage joins
+        the conversation to send a round and has no reason to rebuild a brief
+        it is not going to send — until the cap is reached, and then the exact
+        bytes are the one thing that matters.
+        """
+        if self.opening:
+            return self.opening
+        if not self.chat_id:
+            return ""
+        try:
+            messages = await self.client.chat_messages(self.chat_id)
+        except Exception:  # noqa: BLE001
+            _log.warning("could not read the brief back from chat %s",
+                         self.chat_id, exc_info=True)
+            return ""
+        for m in messages or []:
+            if isinstance(m, dict) and m.get("role") == "user" and m.get("content"):
+                self.opening = str(m["content"])
+                return self.opening
+        return ""
 
     # ── turns ────────────────────────────────────────────────────────────────
 
@@ -147,6 +176,17 @@ class DraftingChat:
         """
         return await self._send(content)
 
+    async def prepare(self) -> None:
+        """Make room for the round about to be sent, if the cap is spent.
+
+        Separate from `turn` because a round is not always one message: new
+        passages go first, in a turn of their own, and compacting after them
+        would open a chat the passages had never reached. Idempotent — after a
+        compaction there are no rounds left to fold.
+        """
+        if len(self.exchanges) >= self.max_exchanges:
+            await self._compact()
+
     async def turn(self, content: str, label: str = "") -> str:
         """One feedback round, and the drafter's reply to it.
 
@@ -154,8 +194,7 @@ class DraftingChat:
         `max_exchanges` rounds whole, it is restarted from the same brief with
         a summary turn in their place, and only then is this round sent.
         """
-        if len(self.exchanges) >= self.max_exchanges:
-            await self._compact()
+        await self.prepare()
         self.exchanges.append(Exchange(label=label or f"round {self.rounds}"))
         return await self._send(content)
 
@@ -198,6 +237,7 @@ class DraftingChat:
         them the cap counts from zero every time a stage rebuilds the object,
         and the conversation grows without bound."""
         state = state or {}
+        self.chat_id = str(state.get("chat_id") or "") or self.chat_id
         self.chats = int(state.get("chats") or 0)
         self.exchanges = [Exchange(str(e.get("label") or ""),
                                    str(e.get("note") or ""))
@@ -222,6 +262,14 @@ class DraftingChat:
         rounds, the patches, the arguments — is what gets dropped, and those
         are the cheap part of the transcript.
         """
+        if not await self._opening_message():
+            # Without the exact bytes there is no prefix to restart on, and a
+            # restart that paraphrases the brief would be a drafter asked to
+            # patch an answer it can no longer see. Carrying the rounds whole
+            # costs tokens; this would cost the answer.
+            _log.warning("drafting conversation cannot be compacted: turn one "
+                         "is not recoverable from chat %s", self.chat_id)
+            return
         folded = list(self.exchanges)
         self.summarised.extend(folded)
         self.exchanges = []

@@ -5716,7 +5716,11 @@ async def _revise_answer(
         # answer it has never seen.
         _log.warning("run %s: no drafting conversation to revise in", run_id)
         return 0
-    chat.brief = chat.brief or "(the brief is the first message of this chat)"
+
+    # Room for this round is made BEFORE any of it is sent. The new passages
+    # below are part of the round, and compacting after them would open a
+    # chat they had never reached.
+    await chat.prepare()
 
     # New passages arrive as their own turn, before the feedback that needs
     # them. They are the one thing besides the brief that a round may add to
@@ -6308,8 +6312,9 @@ async def _stage_validate_publish(
         # One revision per round, over everything this round found. A claim
         # this round names for the second time gets the harder sentence: see
         # `_round_feedback`.
-        seen_before = set().union(*overreach_history[:-1], *pending_seq_history[:-1]) \
-            if len(overreach_history) > 1 else set()
+        seen_before: set[int] = set()
+        for earlier in overreach_history[:-1] + pending_seq_history[:-1]:
+            seen_before |= earlier
         fb = _round_feedback(verdict, seen_before)
         if fb and await _revise_answer(sinas, run_id, answer_id, fb):
             continue

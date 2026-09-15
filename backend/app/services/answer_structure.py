@@ -1,0 +1,713 @@
+"""The shape of an answer: parts, sections, budgets, source trust.
+
+Pure helpers behind the structured answer. The query runner decides WHEN to
+decompose, plan, draft and revise; everything here is arithmetic and string
+work over what came back, so each rule is testable without a model, a
+database or a run.
+
+The rules, as the drafting contract states them:
+
+  1. The question is decomposed into parts BEFORE planning, and claims are
+     budgeted per part: at least two each, and a total that grows with the
+     number of parts (12 for one part, +4 per extra part, never above 24).
+  2. Sections render conclusion first — one claim per part and one overall —
+     then analysis per part, then the authorities.
+  3. A test a source states as two or more conditions is one claim of kind
+     `test`, its conditions in the order the source states them.
+  4. Every passage the drafter sees carries what its document IS: title,
+     class, tier, issuing body, date, jurisdiction. Commentary, advisory
+     opinions, party submissions, regulator decisions and other-jurisdiction
+     sources are labelled and never carry a rule alone.
+  5. Planned claims that answer no part are dropped before extraction;
+     claims restating one proposition from one source are merged.
+  6. A superseded instrument, or a decision with a later one in the same
+     case retrieved beside it, carries a currency note.
+  7. Within a part the reasoning is a chain — rule, application, inference,
+     conclusion — and a step that rests on earlier claims rather than on a
+     passage says which claims it follows from.
+
+Nothing here knows a deployment's vocabulary: which annotation says the tier,
+which property says the date, is read from what the deployment declared.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import date, datetime
+from typing import Any
+
+# ── budgets ──────────────────────────────────────────────────────────────────
+
+#: Claims a one-part question may hold.
+BASE_CLAIM_CAP = 12
+#: Each part beyond the first buys this many more.
+CLAIMS_PER_EXTRA_PART = 4
+#: And no question buys more than this.
+HARD_MAX_CLAIMS = 24
+#: A part answered by fewer claims than this is thin, whatever the total.
+MIN_CLAIMS_PER_PART = 2
+#: A decomposition longer than this is the model listing sentences.
+MAX_PARTS = 8
+
+# ── vocabularies ─────────────────────────────────────────────────────────────
+
+SECTIONS = ("conclusion", "analysis", "authority")
+#: Render order of the sections; a claim with no section sorts last.
+_SECTION_RANK = {s: i for i, s in enumerate(SECTIONS)}
+#: claim_type's values, plus the three the structure adds: a test stated as
+#: conditions, a label, and an inference — a reasoning step that rests on
+#: other claims rather than on a passage.
+CLAIM_KINDS = ("legal_principle", "factual", "procedural", "conclusion",
+               "abstention", "test", "label", "inference")
+#: Kinds that may stand without a span of their own, resting on the claims
+#: they follow from. An abstention rests on nothing, by design.
+DERIVED_KINDS = ("inference", "conclusion")
+AUTHORITY_LABELS = ("court_judgment", "court_order", "ag_opinion",
+                    "regulator_decision", "legislation", "commentary",
+                    "party_submission", "other")
+#: Sources that may never carry a rule on their own.
+SECONDARY_LABELS = ("ag_opinion", "regulator_decision", "commentary",
+                    "party_submission")
+#: A legislation `status` value in this set means the instrument is not
+#: current law. Declared by the deployment on the class as a property; these
+#: two words are the contract's, not a deployment's.
+STALE_STATUSES = ("repealed", "superseded")
+
+#: The annotation whose value carries the authority tier, and the shape of
+#: that value: `{"depth": n}` from a `length` reducer over the hierarchy
+#: path, or a bare integer. The name is the contract's; a deployment that
+#: declares no such annotation yields no tier, which is the null the column
+#: allows.
+TIER_ANNOTATION = "authority_tier"
+ISSUING_BODY_ANNOTATION = "issuing_body"
+
+
+def claim_cap(n_parts: int) -> int:
+    """How many claims a question with `n_parts` parts may hold. Pure."""
+    n = max(1, int(n_parts or 0))
+    return min(HARD_MAX_CLAIMS, BASE_CLAIM_CAP + CLAIMS_PER_EXTRA_PART * (n - 1))
+
+
+# ── question parts ───────────────────────────────────────────────────────────
+
+def parse_parts(data: Any) -> list[dict]:
+    """The decomposition reply as [{index, label, text}], or [] if unusable.
+
+    Strict on shape: an element that is not an object with a non-empty
+    `text` makes the whole reply unusable rather than being dropped, because
+    a lost part is the defect the decomposition exists to stop — the caller
+    repairs once and then falls back. A missing label is derived from the
+    text, since a heading is a convenience and a part is not.
+    """
+    if not isinstance(data, dict):
+        return []
+    raw = data.get("parts")
+    if not isinstance(raw, list) or not raw:
+        return []
+    out: list[dict] = []
+    for x in raw:
+        if not isinstance(x, dict):
+            return []
+        text = str(x.get("text") or "").strip()
+        if not text:
+            return []
+        label = str(x.get("label") or "").strip() or _label_from(text)
+        out.append({"index": len(out), "label": label[:300], "text": text[:1000]})
+        if len(out) >= MAX_PARTS:
+            break
+    return out
+
+
+def _label_from(text: str) -> str:
+    words = text.split()
+    head = " ".join(words[:10])
+    return head + ("…" if len(words) > 10 else "")
+
+
+def part_index_of(raw: Any, n_parts: int) -> int | None:
+    """A model's `part` field as a 0-based index into the parts, or None.
+
+    Accepts the 1-based number the prompts print ("part 2"), a numeric
+    string, or an explicit null/"overall"/"all" for the whole question. A
+    number outside the range names no part. Pure.
+    """
+    if n_parts <= 0 or raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, str):
+        s = raw.strip().lower()
+        if s in ("", "null", "none", "overall", "all", "whole"):
+            return None
+        m = re.search(r"\d+", s)
+        if not m:
+            return None
+        raw = m.group(0)
+    try:
+        n = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    if 1 <= n <= n_parts:
+        return n - 1
+    return None
+
+
+def parts_block(parts: list[dict]) -> str:
+    """The parts as a prompt lists them: numbered from 1, label then text."""
+    return "\n".join(
+        f"  part {p['index'] + 1}: {p['label']} — {p['text']}" for p in parts)
+
+
+# ── planned claims ───────────────────────────────────────────────────────────
+
+def filter_plan_to_parts(plan_claims: list[dict], parts: list[dict]
+                         ) -> tuple[list[dict], list[dict]]:
+    """Keep the planned claims that answer a part; return (kept, dropped).
+
+    Each kept claim gets `part` normalised to a 0-based index (None for the
+    overall conclusion). A claim that names no valid part and is not marked
+    as the overall conclusion answers nothing the question asks — reading
+    its anchors would be extraction spent on material the answer cannot
+    use. With no decomposition nothing is judged and everything is kept:
+    the filter cannot be stricter than what it knows. Pure.
+    """
+    if not parts:
+        for c in plan_claims:
+            c["part"] = None
+        return list(plan_claims), []
+    kept, dropped = [], []
+    for c in plan_claims:
+        idx = part_index_of(c.get("part"), len(parts))
+        overall = _is_overall(c)
+        if idx is None and not overall:
+            dropped.append(c)
+            continue
+        c["part"] = idx
+        c["conclusion"] = bool(overall or c.get("conclusion"))
+        kept.append(c)
+    return kept, dropped
+
+
+def _is_overall(c: dict) -> bool:
+    raw = c.get("part")
+    if isinstance(raw, str) and raw.strip().lower() in ("overall", "all", "whole"):
+        return True
+    return str(c.get("kind") or c.get("section") or "").strip().lower() == "conclusion"
+
+
+def part_counts(claims: list[dict], n_parts: int, key: str = "part") -> list[int]:
+    """How many claims each part has, by 0-based index. Pure."""
+    counts = [0] * max(0, n_parts)
+    for c in claims:
+        idx = c.get(key)
+        if isinstance(idx, int) and not isinstance(idx, bool) and 0 <= idx < n_parts:
+            counts[idx] += 1
+    return counts
+
+
+def thin_parts(claims: list[dict], parts: list[dict], key: str = "part") -> list[dict]:
+    """The parts held by fewer than MIN_CLAIMS_PER_PART claims. Pure."""
+    counts = part_counts(claims, len(parts), key)
+    return [p for p in parts if counts[p["index"]] < MIN_CLAIMS_PER_PART]
+
+
+# ── drafted claims ───────────────────────────────────────────────────────────
+
+def normalise_claim(c: dict, parts: list[dict]) -> dict | None:
+    """One drafted claim as the columns it will be stored with, or None.
+
+    Reads the drafter's fields leniently — `kind` or `type`, `part` as a
+    number or a word — and writes them strictly: every enum value is one the
+    contract names or it is dropped to its default. A test claim keeps its
+    conditions only when there are at least two with text; a "test" of one
+    condition is a rule, and is stored as one. Pure.
+    """
+    text = str(c.get("text") or "").strip()
+    if not text:
+        return None
+    kind = str(c.get("kind") or c.get("type") or "legal_principle").strip().lower()
+    if kind not in CLAIM_KINDS:
+        kind = "legal_principle"
+    section = str(c.get("section") or "").strip().lower()
+    if section not in SECTIONS:
+        section = "conclusion" if kind == "conclusion" else "analysis"
+    if section == "conclusion" and kind not in ("conclusion", "abstention"):
+        kind = "conclusion"
+    idx = part_index_of(c.get("part"), len(parts))
+    label = parts[idx]["label"] if idx is not None else None
+    test = normalise_test(c.get("test")) if kind == "test" else None
+    if kind == "test" and test is None:
+        kind = "legal_principle"
+    auth = str(c.get("authority_label") or "").strip().lower() or None
+    if auth is not None and auth not in AUTHORITY_LABELS:
+        auth = "other"
+    return {
+        "claim_text": text[:4000],
+        "claim_type": _claim_type_of(kind),
+        "claim_kind": kind,
+        "section": section,
+        "part_index": idx,
+        "part_label": label,
+        "test": test,
+        "authority_label": auth,
+        "jurisdiction_note": _note(c.get("jurisdiction_note"), 300),
+        "currency_note": _note(c.get("currency_note"), 500),
+        "rationale": _note(c.get("rationale"), 2000),
+        # The numbers the model used for the claims this one follows from;
+        # the caller maps them onto ids once the rows exist.
+        "follows_from_refs": ref_list(c.get("follows_from")),
+    }
+
+
+def ref_list(raw: Any) -> list[int]:
+    """Claim numbers out of a `follows_from` field: ints only, order kept,
+    duplicates dropped, bools and fractions refused. Pure."""
+    if raw is None:
+        return []
+    if isinstance(raw, str | bytes) or not isinstance(raw, list | tuple | set):
+        raw = [raw]
+    out: list[int] = []
+    for x in raw:
+        if isinstance(x, bool):
+            continue
+        if isinstance(x, str):
+            m = re.search(r"\d+", x)
+            if not m:
+                continue
+            x = m.group(0)
+        try:
+            f = float(x)
+        except (TypeError, ValueError):
+            continue
+        if not f.is_integer():
+            continue
+        n = int(f)
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def is_derived(kind: str | None, has_evidence: bool, follows_from: Any) -> bool:
+    """Does this claim rest on other claims rather than on passages? An
+    inference always; a conclusion when it cites nothing and names what it
+    follows from. Pure."""
+    if kind == "inference":
+        return True
+    return kind == "conclusion" and not has_evidence and bool(follows_from)
+
+
+# An identifier is a token carrying a digit and joined by a separator. The
+# shape is structural, not legal: it knows nothing about courts or articles.
+# Same pattern the runner's citation-loss accounting uses; kept here so the
+# inference check can run without importing the runner.
+_IDENTIFIER = re.compile(r"\b(?=[^\s]*\d)[A-Za-z0-9]+(?:[-/.]\w+|\(\w+\))+")
+
+
+def named_identifiers(text: str) -> set[str]:
+    return {m.group(0).rstrip(".,;:") for m in _IDENTIFIER.finditer(text or "")}
+
+
+def inference_gaps(claims: list[dict]) -> list[str]:
+    """Which inference claims rest on nothing, as findings for the reviser.
+
+    Each claim is `{"sequence", "id", "claim_kind", "follows_from",
+    "claim_text", "supported"}` — `supported` meaning it carries at least one
+    evidence row. An inference must name at least one claim that is in the
+    answer and supported, and may not name an authority (an identifier in
+    its prose) that none of the claims it follows from carries: a reasoning
+    step that introduces a source is a citation wearing the wrong kind.
+    Pure.
+    """
+    by_id = {str(c.get("id")): c for c in claims if c.get("id") is not None}
+    out = []
+    for c in claims:
+        if c.get("claim_kind") != "inference":
+            continue
+        refs = [by_id.get(str(r)) for r in (c.get("follows_from") or [])]
+        refs = [r for r in refs if r is not None]
+        seq = c.get("sequence")
+        if not any(r.get("supported") for r in refs):
+            out.append(
+                f"Claim {seq} is an inference that follows from no supported claim: "
+                'set "follows_from" to the claims it reasons from (each must be in '
+                "the answer and carry evidence), or revise it into an evidenced "
+                "claim, or drop it.")
+            continue
+        carried: set[str] = set()
+        for r in refs:
+            carried |= named_identifiers(str(r.get("claim_text") or ""))
+        introduced = named_identifiers(str(c.get("claim_text") or "")) - carried
+        if introduced:
+            out.append(
+                f"Claim {seq} is an inference but names {', '.join(sorted(introduced))}, "
+                "which none of the claims it follows from carries: an inference "
+                "reasons from claims already made and introduces no authority of "
+                "its own. Move the citation into an evidenced claim it follows from.")
+    return out
+
+
+def _claim_type_of(kind: str) -> str:
+    """claim_type keeps its old vocabulary for the readers that have it; the
+    new kinds map onto the nearest old value."""
+    return {"test": "legal_principle", "label": "factual",
+            "inference": "legal_principle"}.get(kind, kind)
+
+
+def _note(raw: Any, cap: int) -> str | None:
+    s = str(raw or "").strip()
+    if not s or s.lower() in ("null", "none", "n/a"):
+        return None
+    return s[:cap]
+
+
+def normalise_test(raw: Any) -> dict | None:
+    """A test as the contract stores it, or None if it is not one.
+
+    `{"name", "conditions": [{"text", "cumulative"}], "source_para"}`, the
+    conditions in the order given, which the prompt says is the source's.
+    Per-condition evidence the drafter attaches is not kept here: it
+    becomes the claim's evidence rows, one span per condition, so the
+    validator judges each condition as it judges any other span. Pure.
+    """
+    if not isinstance(raw, dict):
+        return None
+    conds = []
+    for x in raw.get("conditions") or []:
+        if isinstance(x, str):
+            x = {"text": x}
+        if not isinstance(x, dict):
+            continue
+        text = str(x.get("text") or "").strip()
+        if not text:
+            continue
+        conds.append({"text": text[:1000], "cumulative": _truthy(x.get("cumulative", True))})
+    if len(conds) < 2:
+        return None
+    para = _note(raw.get("source_para"), 50)
+    return {"name": _note(raw.get("name"), 300) or "", "conditions": conds,
+            "source_para": para}
+
+
+def _truthy(v: Any) -> bool:
+    if isinstance(v, str):
+        return v.strip().lower() not in ("false", "no", "0", "alternative", "any", "")
+    return bool(v)
+
+
+def condition_spans(raw_test: Any) -> list[dict]:
+    """The passages the drafter pinned to each condition, in condition order,
+    as evidence dicts carrying the condition's number in `note`. Pure."""
+    if not isinstance(raw_test, dict):
+        return []
+    out = []
+    for i, x in enumerate(raw_test.get("conditions") or [], start=1):
+        if not isinstance(x, dict):
+            continue
+        ev = x.get("evidence")
+        if isinstance(ev, list):
+            ev = ev[0] if ev else None
+        if isinstance(ev, dict) and ev.get("filename"):
+            out.append({**ev, "note": f"condition {i}"})
+    return out
+
+
+def order_claims(claims: list[dict]) -> list[dict]:
+    """The claims in render order, each with `position` set within its
+    section and part.
+
+    Conclusion first: the overall conclusion (no part) leads, then one per
+    part in part order. Then analysis, part by part, unassigned last. Then
+    the authorities. Within a group the drafter's order stands. A claim with
+    no section at all — an older row — sorts after the structured ones and
+    keeps its relative order. Stable, so `sequence` can be assigned from the
+    returned order. Pure.
+    """
+    def key(item: tuple[int, dict]) -> tuple:
+        i, c = item
+        section = c.get("section")
+        rank = _SECTION_RANK.get(section, len(SECTIONS))
+        part = c.get("part_index")
+        if section == "conclusion":
+            part_key = -1 if part is None else part
+        else:
+            part_key = 10_000 if part is None else part
+        return (rank, part_key, i)
+
+    ordered = [c for _, c in sorted(enumerate(claims), key=key)]
+    counters: dict[tuple, int] = {}
+    for c in ordered:
+        group = (c.get("section"), c.get("part_index"))
+        counters[group] = counters.get(group, 0) + 1
+        c["position"] = counters[group]
+    return ordered
+
+
+def conclusion_gaps(claims: list[dict], parts: list[dict]) -> list[str]:
+    """Which conclusions the answer lacks, as findings for the reviser.
+
+    One conclusion-section claim per part and one for the whole question.
+    Judged only over an answer that carries sections at all: rows from
+    before the structure existed have none, and judging them would fail
+    every older answer for a rule it never heard. Pure.
+    """
+    if not parts or not any(c.get("section") for c in claims):
+        return []
+    concl = [c for c in claims if c.get("section") == "conclusion"]
+    out = []
+    have = {c.get("part_index") for c in concl}
+    for p in parts:
+        if p["index"] not in have:
+            out.append(
+                f"Part {p['index'] + 1} ({p['label']}) has no conclusion: add one "
+                f'claim with "section": "conclusion" and "part": {p["index"] + 1} '
+                "stating the answer to that part, carried by evidence already "
+                "cited or newly bound.")
+    if None not in have:
+        out.append(
+            'The answer has no overall conclusion: add one claim with "section": '
+            '"conclusion" and "part": null that states the answer to the question '
+            "as a whole.")
+    # A conclusion written into the analysis is the old defect wearing a new
+    # label: the reader meets it last. It is named so the reviser moves it
+    # rather than writes a second one.
+    misplaced = [c for c in claims
+                 if c.get("section") != "conclusion"
+                 and str(c.get("claim_kind") or c.get("claim_type") or "") == "conclusion"]
+    for c in misplaced:
+        if c.get("sequence") is not None:
+            out.append(
+                f"Claim {c['sequence']} draws a conclusion but sits in the "
+                f"{c.get('section') or 'unsectioned'} section: revise it with "
+                '"section": "conclusion" so it leads its part.')
+    return out
+
+
+# ── duplicates ───────────────────────────────────────────────────────────────
+
+_WORD = re.compile(r"[a-z0-9]{3,}")
+DUPLICATE_THRESHOLD = 0.6
+
+
+def _tokens(text: str) -> set[str]:
+    return set(_WORD.findall((text or "").lower()))
+
+
+def duplicate_pairs(claims: list[dict], threshold: float = DUPLICATE_THRESHOLD
+                    ) -> list[tuple[int, int]]:
+    """Pairs of claim sequences that restate one proposition from one source.
+
+    Two claims are candidates when they cite a document in common; they are
+    duplicates when their word sets overlap past the threshold (Jaccard).
+    Word overlap is a blunt instrument, so the threshold is high and the
+    finding is fed to the reviser as a merge to judge, never applied. Each
+    claim is `{"sequence", "text", "docs"}`. Pure.
+    """
+    out = []
+    items = sorted(claims, key=lambda c: c["sequence"])
+    for i, a in enumerate(items):
+        for b in items[i + 1:]:
+            if not (set(a.get("docs") or ()) & set(b.get("docs") or ())):
+                continue
+            ta, tb = _tokens(a.get("text", "")), _tokens(b.get("text", ""))
+            if not ta or not tb:
+                continue
+            if len(ta & tb) / len(ta | tb) >= threshold:
+                out.append((a["sequence"], b["sequence"]))
+    return out
+
+
+def duplicate_feedback(pairs: list[tuple[int, int]]) -> list[str]:
+    return [
+        f"Claims {a} and {b} restate the same proposition from the same source: "
+        f"merge them into one claim (revise {a} to carry both citations, drop "
+        f"{b} with a rationale), unless they make different points."
+        for a, b in pairs
+    ]
+
+
+# ── source context ───────────────────────────────────────────────────────────
+
+_DATE_KEY = re.compile(r"date", re.IGNORECASE)
+_JURISDICTION_KEY = re.compile(r"jurisdiction|country|member_?state", re.IGNORECASE)
+
+
+def unwrap(value: Any) -> Any:
+    """A stored property value as the scalar it wraps. `{"_": x}` is the
+    one-shot's shape; `{"value": x}` and `{"name": x}` are reducer outputs."""
+    if isinstance(value, dict):
+        if "_" in value and len(value) == 1:
+            return unwrap(value["_"])
+        if "value" in value and len(value) == 1:
+            return unwrap(value["value"])
+        if "name" in value:
+            return value["name"]
+    return value
+
+
+def tier_of(annotations: dict | None) -> int | None:
+    """The authority tier out of a document's annotation values, or None."""
+    if not isinstance(annotations, dict):
+        return None
+    v = annotations.get(TIER_ANNOTATION)
+    if isinstance(v, dict):
+        v = v.get("depth", v.get("value"))
+    if isinstance(v, bool) or v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
+def issuing_body_of(annotations: dict | None) -> str | None:
+    if not isinstance(annotations, dict):
+        return None
+    v = unwrap(annotations.get(ISSUING_BODY_ANNOTATION))
+    return str(v) if v not in (None, "") else None
+
+
+def parse_date(value: Any) -> date | None:
+    """A date out of a property value, or None. ISO first, then a plain
+    year-month-day with any separator, then a bare year as 1 January."""
+    v = unwrap(value)
+    if isinstance(v, datetime):
+        return v.date()
+    if isinstance(v, date):
+        return v
+    s = str(v or "").strip()
+    if not s:
+        return None
+    m = re.match(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+    if m:
+        try:
+            return date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.match(r"(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", s)
+    if m:
+        try:
+            return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
+        except ValueError:
+            return None
+    m = re.fullmatch(r"(\d{4})", s)
+    if m:
+        return date(int(m.group(1)), 1, 1)
+    return None
+
+
+def document_date(props: dict | None) -> date | None:
+    """The document's own date: the latest parsable value among properties
+    whose name mentions a date. Latest, because a decision's `date` and a
+    consolidated instrument's `date_of_effect` both count and the later is
+    the one a currency question turns on."""
+    best = None
+    for name, value in (props or {}).items():
+        if not _DATE_KEY.search(str(name)):
+            continue
+        d = parse_date(value)
+        if d and (best is None or d > best):
+            best = d
+    return best
+
+
+def jurisdiction_of(props: dict | None) -> str | None:
+    for name, value in (props or {}).items():
+        if _JURISDICTION_KEY.search(str(name)):
+            v = unwrap(value)
+            if v not in (None, ""):
+                return str(v)
+    return None
+
+
+def currency_notes(rows: list[dict]) -> dict[str, str]:
+    """Per filename, why the document is not current law — or absent.
+
+    Two rules, both from the retrieved set alone. A document whose `status`
+    property is repealed or superseded is stale, and `superseded_by` names
+    what replaced it. A document that shares its class's identifier with a
+    later-dated document in the set is a decision with a later ruling in the
+    same case beside it. Rows are `_manifest_rows` rows carrying `props`
+    (unwrapped property dict) and `identifier` (the class's identifier
+    property value, or None). Pure.
+    """
+    out: dict[str, str] = {}
+    by_case: dict[tuple[str, str], list[dict]] = {}
+    for r in rows:
+        fn = r.get("filename")
+        if not fn:
+            continue
+        props = r.get("props") or {}
+        status = str(unwrap(props.get("status")) or "").strip().lower()
+        if status in STALE_STATUSES:
+            note = f"{status}"
+            by = unwrap(props.get("superseded_by"))
+            if by:
+                note += f"; superseded by {by}"
+            out[fn] = note[:500]
+        ident = r.get("identifier")
+        if ident:
+            by_case.setdefault((str(r.get("class") or ""), str(ident)), []).append(r)
+    for (_cls, ident), group in by_case.items():
+        dated = [(document_date(r.get("props")), r) for r in group]
+        dated = [(d, r) for d, r in dated if d is not None]
+        if len(dated) < 2:
+            continue
+        latest_d, latest_r = max(dated, key=lambda x: x[0])
+        for d, r in dated:
+            if r is latest_r or d >= latest_d:
+                continue
+            fn = r["filename"]
+            note = (f"a later decision in the same case ({ident}) is in the "
+                    f"retrieved set: {latest_r['filename']}, {latest_d.isoformat()}")
+            out[fn] = (out[fn] + "; " + note if fn in out else note)[:500]
+    return out
+
+
+def source_context_line(r: dict, currency: str | None = None) -> str:
+    """One document as the drafter sees it above its passages: what it IS,
+    never what it says. Title, class, tier, issuing body, date, jurisdiction,
+    and a currency note when there is one."""
+    props = r.get("props") or {}
+    ann = r.get("annotation_values") or {}
+    bits = [f"title: {r.get('title') or r.get('filename')}",
+            f"class: {r.get('class') or 'unclassified'}"]
+    tier = tier_of(ann)
+    if tier is not None:
+        bits.append(f"authority tier: {tier}")
+    body = issuing_body_of(ann)
+    if body:
+        bits.append(f"issuing body: {body}")
+    d = document_date(props)
+    if d:
+        bits.append(f"date: {d.isoformat()}")
+    j = jurisdiction_of(props)
+    if j:
+        bits.append(f"jurisdiction: {j}")
+    if currency:
+        bits.append(f"CURRENCY: {currency}")
+    return "; ".join(bits)
+
+
+def latest_source_date(rows: list[dict]) -> date | None:
+    """The latest date any of these documents carries, or None."""
+    best = None
+    for r in rows:
+        d = document_date(r.get("props"))
+        if d and (best is None or d > best):
+            best = d
+    return best
+
+
+# ── validation ───────────────────────────────────────────────────────────────
+
+def judged_text(claim_text: str, test: dict | None) -> str:
+    """What the validator reads for a claim: its text, and for a test claim
+    its conditions numbered in order, so a span pinned to condition 2 is
+    judged against condition 2 and not against the sentence around it."""
+    if not isinstance(test, dict) or not test.get("conditions"):
+        return claim_text
+    lines = [claim_text.rstrip(), "The conditions, in the source's order"
+             + (" (cumulative)" if all(c.get("cumulative") for c in test["conditions"])
+                else "") + ":"]
+    for i, c in enumerate(test["conditions"], start=1):
+        lines.append(f"  {i}. {c.get('text', '')}")
+    return "\n".join(lines)

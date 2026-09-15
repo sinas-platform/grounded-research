@@ -26,7 +26,7 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 
-from sqlalchemy import String, bindparam, text
+from sqlalchemy import String, bindparam, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from collections.abc import Sequence

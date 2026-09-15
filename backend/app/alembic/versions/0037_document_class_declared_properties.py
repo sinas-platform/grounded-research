@@ -10,16 +10,20 @@ the one it gets wrong, and it is the field recency is decided on.
 JSONB and nullable, holding a list of {key, property, on_conflict}. A class
 that declares nothing behaves exactly as it does today.
 
-Revision ID: 0036
-Revises: 0035
+Renumbered from 0036 when it met the merged claim_evidence.quote revision of
+the same number: two revisions cannot share an id, and this one had not been
+applied anywhere yet.
+
+Revision ID: 0037
+Revises: 0036
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0036"
-down_revision = "0035"
+revision = "0037"
+down_revision = "0036"
 branch_labels = None
 depends_on = None
 

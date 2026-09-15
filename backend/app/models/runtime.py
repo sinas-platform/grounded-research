@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -458,6 +459,20 @@ class Answer(Base, TimestampMixin, OwnedMixin):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The date the answer states the law as at: the latest date carried by
+    #: a cited source, or the run date when no source carries one. Set on
+    #: publish; null on rows written before it existed.
+    law_stated_as_at: Mapped[date | None] = mapped_column(Date)
+    #: The decomposition the drafter worked from — a list of
+    #: {index, label, text}, one per distinct thing the question asks. Fixed
+    #: before planning so the planner, the drafter and the gate share one
+    #: reading of the question. Null when the run predates it or the split
+    #: could not be read.
+    question_parts: Mapped[list | None] = mapped_column(JSONB)
+    #: The answer as prose, assembled from its rows at publish by
+    #: services/answer_render. Regenerable; null before publish and on
+    #: answers from before it existed.
+    rendered_markdown: Mapped[str | None] = mapped_column(Text)
 
 
 class AnswerClaim(Base, TimestampMixin):
@@ -476,6 +491,38 @@ class AnswerClaim(Base, TimestampMixin):
     # sentence. This is the forward argument, and it is also where a
     # deliberate choice between two sources gets recorded.
     rationale: Mapped[str | None] = mapped_column(Text)
+    # Where the claim belongs in the answer and what it is. A flat list of
+    # rows rendered one paragraph each is how the conclusion ended up last
+    # and the second part of a question ended up thin; these say where a
+    # renderer puts the row. All nullable: a row without them is an answer
+    # drafted before the structure existed, and renders as it always did.
+    #: `conclusion` | `analysis` | `authority`
+    section: Mapped[str | None] = mapped_column(String(20))
+    #: 0-based index into Answer.question_parts; null = the whole question.
+    part_index: Mapped[int | None] = mapped_column(Integer)
+    part_label: Mapped[str | None] = mapped_column(String(300))
+    #: Render order within section + part.
+    position: Mapped[int | None] = mapped_column(Integer)
+    #: claim_type's values plus `test` and `label`.
+    claim_kind: Mapped[str | None] = mapped_column(String(50))
+    #: For a test: {"name", "conditions": [{"text", "cumulative"}],
+    #: "source_para"} — the conditions in the order the source states them.
+    test: Mapped[dict | None] = mapped_column(JSONB)
+    # How far the source can be trusted for the proposition. The drafter's
+    # classification of the source, its tier in the deployment's authority
+    # hierarchy (1 = highest), and two notes that are null unless something
+    # is off: the source's jurisdiction differs from the question's, or the
+    # instrument is no longer current.
+    authority_label: Mapped[str | None] = mapped_column(String(40))
+    authority_tier: Mapped[int | None] = mapped_column(Integer)
+    jurisdiction_note: Mapped[str | None] = mapped_column(String(300))
+    currency_note: Mapped[str | None] = mapped_column(String(500))
+    #: The claims this one reasons from, as a list of claim ids. An
+    #: `inference` claim states a step ("because X and Y, Z follows") and
+    #: carries no span of its own; it rests on these, and the gate refuses
+    #: one that rests on nothing supported. A conclusion names what it
+    #: concludes from. Null on rows that rest on passages alone.
+    follows_from: Mapped[list | None] = mapped_column(JSONB)
 
 
 class ClaimEvidence(Base, TimestampMixin):
@@ -501,6 +548,11 @@ class ClaimEvidence(Base, TimestampMixin):
     #: Null on rows written before it existed, and on the reviser's rows,
     #: which carry the coordinates a model reports and no quote.
     quote: Mapped[str | None] = mapped_column(String(2000))
+    #: The source's own number for the paragraph the span starts in, found
+    #: with the document class's `paragraph_pattern`. Null when the class
+    #: declares no pattern, when no numbered paragraph precedes the span, or
+    #: on rows written before it existed.
+    paragraph_ref: Mapped[str | None] = mapped_column(String(50))
 
 
 # ─────────────────────────────────────────────────────────────

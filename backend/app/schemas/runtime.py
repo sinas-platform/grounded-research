@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -245,6 +245,14 @@ class AnswerOut(OwnedOut):
     question: str
     status: str
     published_at: datetime | None = None
+    # The date the answer states the law as at (latest cited source date,
+    # else the run date), and the decomposition the drafter worked from:
+    # [{index, label, text}]. Both null on answers from before they existed.
+    law_stated_as_at: date | None = None
+    question_parts: list[dict[str, Any]] | None = None
+    # The assembled prose, set at publish; GET /answers/{id}/markdown
+    # regenerates it from the rows on demand.
+    rendered_markdown: str | None = None
 
 
 class ClaimOut(TimestampedOut):
@@ -259,6 +267,22 @@ class ClaimOut(TimestampedOut):
     # the evidence rows answers the opposite question — whether the passage
     # carries the sentence — so a reader needs both to follow the argument.
     rationale: str | None = None
+    # Where the claim belongs and what it is — see AnswerClaim. A renderer
+    # orders by (section, part_index, position); rows from before the
+    # structure existed carry null everywhere and render as a flat list.
+    section: str | None = None
+    part_index: int | None = None
+    part_label: str | None = None
+    position: int | None = None
+    claim_kind: str | None = None
+    test: dict[str, Any] | None = None
+    authority_label: str | None = None
+    authority_tier: int | None = None
+    jurisdiction_note: str | None = None
+    currency_note: str | None = None
+    # Claim ids this claim reasons from; set on inference and conclusion
+    # claims, null on claims that rest on passages alone.
+    follows_from: list[uuid.UUID] | None = None
 
 
 class ClaimEvidenceIn(BaseModel):
@@ -278,6 +302,9 @@ class ClaimEvidenceOut(TimestampedOut):
     relevance: float | None = None
     validated: bool
     validation_reasoning: str | None = None
+    # The source's own paragraph number for the span, from the document
+    # class's paragraph_pattern; null when the class declares none.
+    paragraph_ref: str | None = None
     # Present only when the read asked for it (?annotate=): derived graph
     # fields for the case entity the evidence document is the full text of
     # — same shape as on result-documents reads.

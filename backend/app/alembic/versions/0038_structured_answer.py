@@ -25,16 +25,16 @@ law is stated as at. An evidence span carries the source paragraph it pins.
 All nullable and additive: rows written before this keep working and render as
 before, and nothing downstream requires any of them.
 
-Revision ID: 0037
-Revises: 0036
+Revision ID: 0038
+Revises: 0037
 """
 
 import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects.postgresql import JSONB
 
-revision = "0037"
-down_revision = "0036"
+revision = "0038"
+down_revision = "0037"
 branch_labels = None
 depends_on = None
 

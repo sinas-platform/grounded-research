@@ -1,5 +1,7 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { api } from '@/lib/api';
 import { PageHeader } from '@/components/PageHeader';
 import { DocumentModal, EvidenceSpan } from '@/components/DocumentViewer';
@@ -68,6 +70,15 @@ interface ClaimWithEvidence {
   // opposite: whether the passage carries the sentence.
   rationale: string | null;
   evidence: Evidence[];
+}
+
+// The answer as the engine assembled it, with the marker → document mapping
+// beside it. `citations` is unused here — the page links evidence through the
+// claim rows — but it is what the endpoint returns and a reader of this type
+// should not have to go and look.
+interface AnswerMarkdown {
+  markdown: string;
+  citations: { n: number; document_id: string }[];
 }
 
 interface RetrievalPlan {
@@ -440,6 +451,17 @@ export default function RunsPage() {
     enabled: !!answerId,
     refetchInterval: isLive(run.data) ? 5000 : false,
   });
+  // The answer as the engine assembled it — conclusion first, the parts as
+  // sections, the authorities grouped and cited in full. The claim rows
+  // below it stay: they are where the evidence hangs. 404 until there is
+  // something to render, which is not an error worth showing.
+  const answerMarkdown = useQuery({
+    queryKey: ['answer-markdown', answerId],
+    queryFn: () => api<AnswerMarkdown>(`/answers/${answerId}/markdown`),
+    enabled: !!answerId,
+    retry: false,
+    refetchInterval: isLive(run.data) ? 5000 : false,
+  });
 
   const ask = useMutation({
     mutationFn: () =>
@@ -519,6 +541,9 @@ export default function RunsPage() {
     }
     return { run: run.data ?? undefined, activity: activity.data, docs: docs.data, claims: claims.data };
   }, [run.data, activity.data, docs.data, claims.data, replayT, timeline]);
+  // Outside the replay mask on purpose: the assembled prose is the finished
+  // answer, and a replay is about how the run got there.
+  const markdown = replayT !== null && replayT < 1 ? undefined : answerMarkdown.data?.markdown;
 
   const plan = result.data?.filter?.plan;
   const graph = useMemo(
@@ -712,6 +737,7 @@ export default function RunsPage() {
               activity={view.activity}
               docs={view.docs}
               claims={view.claims}
+              markdown={markdown}
               plan={plan}
               inspected={inspected}
               onResume={() => resume.mutate()}
@@ -962,12 +988,13 @@ function exField(ex: any, field: string): number | undefined {
 }
 
 function Inspector({
-  run, activity, docs, claims, plan, inspected, onResume, resuming, onPreviewDoc,
+  run, activity, docs, claims, markdown, plan, inspected, onResume, resuming, onPreviewDoc,
 }: {
   run: QueryRun;
   activity?: RunActivity;
   docs?: ResultDoc[];
   claims?: ClaimWithEvidence[];
+  markdown?: string;
   plan?: RetrievalPlan;
   inspected: string | null;
   onResume: () => void;
@@ -1233,6 +1260,19 @@ function Inspector({
     body = (
       <>
         {isPartial && <PartialNote tel={tel} />}
+        {/* The answer as prose, above the rows it was assembled from. The
+            rows are still the record — they carry the evidence and the
+            verification state — but a reader wants the answer first, and
+            reading one paragraph per claim is what the assembler exists to
+            replace. */}
+        {markdown && (
+          <>
+            <Label>The answer</Label>
+            <div className="md-body text-[13px] leading-relaxed text-stone-800 border border-stone-200 rounded p-3 bg-stone-50/60">
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{markdown}</ReactMarkdown>
+            </div>
+          </>
+        )}
         <Label>
           {isPartial
             ? `Claims kept · ${claims?.length ?? 0} drafted · ${verified.length} fully verified`

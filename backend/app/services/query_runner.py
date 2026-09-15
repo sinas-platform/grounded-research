@@ -43,7 +43,7 @@ from app.models import (
     ResultDocument,
 )
 from app.models.query import QueryRun
-from app.services import answer_structure, claim_naming, obligations, supersession
+from app.services import answer_render, answer_structure, claim_naming, obligations, supersession
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -4272,6 +4272,27 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
         row.published_at = _now()
         await _compact_claim_sequences(session, answer_id)
         await session.commit()
+        # The prose, written once the claim numbering is final. Stored rather
+        # than rendered on every read so the published text is a fact about
+        # the answer and not about whatever the renderer does next month; the
+        # endpoint re-assembles on demand for anything that changes after.
+        # A failure here must not unpublish an answer that is otherwise
+        # complete: the rows are the record and the text is regenerable.
+        try:
+            rendered = await answer_render.assemble(
+                session, answer_id, fallback_as_at=_now().date())
+            if rendered is not None:
+                row.rendered_markdown = rendered.markdown
+                if row.law_stated_as_at is None:
+                    row.law_stated_as_at = rendered.law_stated_as_at
+                await session.commit()
+                tele = {**tele, "rendered_chars": len(rendered.markdown),
+                        "rendered_citations": len(rendered.citations)}
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            _log.warning("run %s: could not render the answer markdown: %s",
+                         run_id, exc)
+            tele = {**tele, "render_error": str(exc)[:200]}
         # Read after the commit, and only here. "Last" is a claim about the
         # finished answer: during revision a document can lose its last
         # citation and get another one two cycles later, so the same

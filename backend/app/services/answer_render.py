@@ -70,6 +70,10 @@ class Rendered:
     markdown: str
     #: [{"n": 1, "document_id": "..."}] in marker order.
     citations: list[dict] = field(default_factory=list)
+    #: The date the closing line states, so a caller that is about to store
+    #: the text can store the same date on the row rather than deriving it
+    #: a second time and disagreeing with the prose.
+    law_stated_as_at: date | None = None
 
 
 class _Cites:
@@ -356,7 +360,8 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
                 ""]
     return Rendered(markdown="\n".join(out).rstrip() + "\n",
                     citations=[{"n": i + 1, "document_id": did}
-                               for i, did in enumerate(cites.order)])
+                               for i, did in enumerate(cites.order)],
+                    law_stated_as_at=as_at if isinstance(as_at, date) else None)
 
 
 def latest_document_date(documents: dict[str, dict]) -> date | None:
@@ -371,7 +376,8 @@ def latest_document_date(documents: dict[str, dict]) -> date | None:
     return best
 
 
-async def assemble(session: Any, answer_id: Any) -> Rendered | None:
+async def assemble(session: Any, answer_id: Any,
+                   fallback_as_at: date | None = None) -> Rendered | None:
     """The answer at `answer_id` as prose, read out of the database.
 
     The one function here that touches a session. The publish path and
@@ -381,6 +387,12 @@ async def assemble(session: Any, answer_id: Any) -> Rendered | None:
     the defect this exists to avoid. Returns None when the answer is not
     there; an answer with no claims still renders (as its question and an
     empty Authorities list), and the caller decides what that means.
+
+    The date the law is stated as at is the row's own if it has one, else
+    the latest date any cited source carries. `fallback_as_at` is what the
+    publish path passes for a corpus whose sources are all undated — the run
+    date — so the answer still says how current it is. A read passes none:
+    a reader must not be handed a date nothing in the answer supports.
     """
     from sqlalchemy import select
 
@@ -435,10 +447,12 @@ async def assemble(session: Any, answer_id: Any) -> Rendered | None:
             if entry is not None and value is not None:
                 entry["properties"][str(name)] = value
 
+    as_at = (answer.law_stated_as_at
+             or latest_document_date(documents) or fallback_as_at)
     return render_markdown(
         {"question": answer.question,
          "question_parts": answer.question_parts,
-         "law_stated_as_at": answer.law_stated_as_at},
+         "law_stated_as_at": as_at},
         [_claim_dict(c) for c in claim_rows],
         [{"claim_id": str(e.claim_id), "document_id": str(e.document_id),
           "span": e.span or {}, "paragraph_ref": e.paragraph_ref}

@@ -33,6 +33,10 @@ class DocumentClass(Base, TimestampMixin):
     identifier_property: Mapped[str | None] = mapped_column(String(200))
     identifier_pattern: Mapped[str | None] = mapped_column(String(500))
     name_property: Mapped[str | None] = mapped_column(String(200))
+    #: What a claim citing a document of this class says about the source, in
+    #: the words a reader needs. Null means the class needs no label, which
+    #: is also what says the class may carry a rule on its own.
+    authority_label: Mapped[str | None] = mapped_column(String(40))
     #: Which front-matter keys this class reads directly, as a list of
     #: {key, property, on_conflict}. Empty or null means every property is
     #: extracted, which is what every class did before this existed.

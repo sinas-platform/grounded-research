@@ -308,6 +308,7 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "identifier_property": dc.identifier_property,
                 "identifier_pattern": dc.identifier_pattern,
                 "name_property": dc.name_property,
+                "authority_label": dc.authority_label,
                 "declared_properties": [d.model_dump()
                                         for d in dc.declared_properties] or None,
                 "attribution_cues": list(dc.attribution_cues) or None,
@@ -857,7 +858,7 @@ async def export_package(
                     "identifier_property": dc.identifier_property,
                     "identifier_pattern": dc.identifier_pattern,
                     "name_property": dc.name_property,
-                "name_property": dc.name_property,
+                    "authority_label": dc.authority_label,
                     "attribution_cues": list(dc.attribution_cues or []),
                     "properties": [_export_property(p) for p in props],
                     "entity_types": [et.name for et in links],

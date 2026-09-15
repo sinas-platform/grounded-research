@@ -76,6 +76,17 @@ class PackageDocumentClassEntry(_Strict):
     # in prose rather than by its identifier. Optional and separate: a class
     # may be identified by number and never named in words, or the reverse.
     name_property: str | None = None
+    # What a claim citing a document of this class says about the source, in
+    # the words a reader needs — "commentary", "not binding", whatever this
+    # collection calls it. SGR prints it after the sentence and never invents
+    # it: which kinds of source have to be flagged, and in what words, is
+    # knowledge about a collection, exactly as the identifier shape is.
+    #
+    # Declaring a label is also what says a class may not carry a rule alone:
+    # the drafter is shown the label above the passages and told that a
+    # labelled source states what it says rather than what the law is. A
+    # class that declares none is unlabelled and carries rules.
+    authority_label: str | None = Field(default=None, max_length=40)
     attribution_cues: list[str] = Field(default_factory=list)
     # Properties whose value a document of this class states about itself, in
     # its front matter. Each entry is {key, property, on_conflict}: which

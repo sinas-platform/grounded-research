@@ -73,16 +73,25 @@ completeness from data (this query), never from run/unit status.
 
 ### Settings (backend `.env`, read at process start)
 - `SGR_DRAFT_MODE` — `extract` is the only value. Drafting is a plan
-  (strong model) → verbatim passage extraction (cheap model, quotes
-  string-verified against document lines) → one drafting call, all
-  stateless. **Grounding is on raw source text only**: the document
-  manifest (summaries, classes, annotations) decides what to READ and
-  never reaches a drafting prompt, because it is interpretation produced
-  at ingestion and verified against nothing.
-- `SGR_RUN_COST_CAP_USD` is currently inert. It measured one Sinas chat
-  and drafting no longer opens one; llm_usage carries no run id, so spend
-  cannot be attributed to a run without over-counting concurrent ones. A
-  run is bounded by its validation rounds and gate cycles instead.
+  (strong model, one-shot) → verbatim passage extraction (cheap model,
+  quotes string-verified against document lines) → ONE CONVERSATION that
+  writes the answer and every revision of it. **Grounding is on raw source
+  text only**: the document manifest (summaries, classes, annotations)
+  decides what to READ and never reaches a drafting prompt, because it is
+  interpretation produced at ingestion and verified against nothing.
+- The drafting conversation is one Sinas chat per answer, its id on
+  `query_run.synthesis_chat_id` and its round bookkeeping under
+  `telemetry.draft_chat`. Turn one is the brief — the task, the structure
+  rules, the revision contract, the playbook, the question and the verified
+  passages — and is sent once; every later turn carries only what is new.
+  A resumed run rejoins it, and teardown deliberately leaves it alone. It is
+  also what `GET /query-runs/{id}/activity` now serves as `synthesis`.
+- `SGR_DRAFT_CHAT_EXCHANGES` (default 4) — how many revision rounds that
+  conversation carries whole. At the cap it restarts from the same brief,
+  byte for byte so the provider's prompt cache still hits, with a
+  one-line-per-round summary standing in for the rounds it drops.
+- `SGR_RUN_COST_CAP_USD` measures the chats a run recorded in
+  `run_llm_call`, the drafting conversation included.
 - `SGR_BENCH_DIR` — regression benchmark folder for retrieval_first.
 - Effort buys persistence as well as breadth: retrieval depth (low 1, medium
   2, high 3) and the number of times a run may act on the answer gate's

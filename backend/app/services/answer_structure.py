@@ -15,9 +15,10 @@ The rules, as the drafting contract states them:
   3. A test a source states as two or more conditions is one claim of kind
      `test`, its conditions in the order the source states them.
   4. Every passage the drafter sees carries what its document IS: title,
-     class, tier, issuing body, date, jurisdiction. Commentary, advisory
-     opinions, party submissions, regulator decisions and other-jurisdiction
-     sources are labelled and never carry a rule alone.
+     class, and the label its class declares. A source whose class declares
+     a label is labelled in the answer and never carries a rule alone; the
+     label, the tier, the jurisdiction note and the currency note are all
+     derived here from the document, never asked of the model.
   5. Planned claims that answer no part are dropped before extraction;
      claims restating one proposition from one source are merged.
   6. A superseded instrument, or a decision with a later one in the same
@@ -62,12 +63,13 @@ CLAIM_KINDS = ("legal_principle", "factual", "procedural", "conclusion",
 #: Kinds that may stand without a span of their own, resting on the claims
 #: they follow from. An abstention rests on nothing, by design.
 DERIVED_KINDS = ("inference", "conclusion")
-AUTHORITY_LABELS = ("court_judgment", "court_order", "ag_opinion",
-                    "regulator_decision", "legislation", "commentary",
-                    "party_submission", "other")
-#: Sources that may never carry a rule on their own.
-SECONDARY_LABELS = ("ag_opinion", "regulator_decision", "commentary",
-                    "party_submission")
+#: Kinds whose claim leads its part rather than reasons within it, and the
+#: kind that only says what a source is. Everything else is the analysis.
+_CONCLUDING_KINDS = ("conclusion", "abstention")
+_LABELLING_KINDS = ("label",)
+#: Heading for cited documents whose class is unknown. The only source name
+#: in this module, and it names the absence of one.
+UNCLASSIFIED_HEADING = "Unclassified"
 #: A legislation `status` value in this set means the instrument is not
 #: current law. Declared by the deployment on the class as a property; these
 #: two words are the contract's, not a deployment's.
@@ -211,6 +213,23 @@ def thin_parts(claims: list[dict], parts: list[dict], key: str = "part") -> list
 
 # ── drafted claims ───────────────────────────────────────────────────────────
 
+def section_of(kind: str | None) -> str:
+    """Which section a claim of this kind belongs to. Pure.
+
+    Derived rather than asked for. The drafter used to author `section`
+    beside `kind`, which is the same decision twice and could disagree with
+    itself — a claim of kind `conclusion` filed under `analysis` was a gate
+    finding the reviser then had to spend a call on. One field decides, and
+    the other follows from it.
+    """
+    k = str(kind or "").strip().lower()
+    if k in _CONCLUDING_KINDS:
+        return "conclusion"
+    if k in _LABELLING_KINDS:
+        return "authority"
+    return "analysis"
+
+
 def normalise_claim(c: dict, parts: list[dict]) -> dict | None:
     """One drafted claim as the columns it will be stored with, or None.
 
@@ -219,6 +238,14 @@ def normalise_claim(c: dict, parts: list[dict]) -> dict | None:
     contract names or it is dropped to its default. A test claim keeps its
     conditions only when there are at least two with text; a "test" of one
     condition is a rule, and is stored as one. Pure.
+
+    Four columns the drafter used to author are left null here and filled by
+    the caller from the cited document: the section follows from the kind,
+    and the authority label, the jurisdiction note and the currency note
+    follow from what the document IS, which the engine already knows and the
+    model had to be told in order to repeat back. `conditions` is read off
+    the claim itself as well as out of a nested `test`, because the flat
+    shape is what the drafter is now asked for.
     """
     text = str(c.get("text") or "").strip()
     if not text:
@@ -226,35 +253,50 @@ def normalise_claim(c: dict, parts: list[dict]) -> dict | None:
     kind = str(c.get("kind") or c.get("type") or "legal_principle").strip().lower()
     if kind not in CLAIM_KINDS:
         kind = "legal_principle"
-    section = str(c.get("section") or "").strip().lower()
-    if section not in SECTIONS:
-        section = "conclusion" if kind == "conclusion" else "analysis"
-    if section == "conclusion" and kind not in ("conclusion", "abstention"):
-        kind = "conclusion"
     idx = part_index_of(c.get("part"), len(parts))
     label = parts[idx]["label"] if idx is not None else None
-    test = normalise_test(c.get("test")) if kind == "test" else None
+    test = normalise_test(raw_test(c)) if kind == "test" else None
     if kind == "test" and test is None:
         kind = "legal_principle"
-    auth = str(c.get("authority_label") or "").strip().lower() or None
-    if auth is not None and auth not in AUTHORITY_LABELS:
-        auth = "other"
     return {
         "claim_text": text[:4000],
         "claim_type": _claim_type_of(kind),
         "claim_kind": kind,
-        "section": section,
+        "section": section_of(kind),
         "part_index": idx,
         "part_label": label,
         "test": test,
-        "authority_label": auth,
-        "jurisdiction_note": _note(c.get("jurisdiction_note"), 300),
-        "currency_note": _note(c.get("currency_note"), 500),
+        # Filled by the caller from the document the claim cites. Present and
+        # null here so the column set does not depend on who filled it.
+        "authority_label": None,
+        "jurisdiction_note": None,
+        "currency_note": None,
         "rationale": _note(c.get("rationale"), 2000),
         # The numbers the model used for the claims this one follows from;
         # the caller maps them onto ids once the rows exist.
         "follows_from_refs": ref_list(c.get("follows_from")),
     }
+
+
+def raw_test(c: Any) -> dict | None:
+    """A claim's test as the drafter sent it, whichever shape it used.
+
+    The prompt asks for `conditions` (and an optional `test_name`) flat on
+    the claim, one nesting level fewer than the `{"test": {...}}` object it
+    used to ask for. Both are read: a model that nests it anyway is not a
+    malformed reply, and older replies replayed through this code are not
+    either. Pure.
+    """
+    if not isinstance(c, dict):
+        return None
+    nested = c.get("test")
+    if isinstance(nested, dict):
+        return nested
+    conds = c.get("conditions")
+    if isinstance(conds, list | tuple) and conds:
+        return {"name": c.get("test_name") or c.get("name") or "",
+                "conditions": list(conds)}
+    return None
 
 
 def ref_list(raw: Any) -> list[int]:
@@ -457,14 +499,14 @@ def conclusion_gaps(claims: list[dict], parts: list[dict]) -> list[str]:
         if p["index"] not in have:
             out.append(
                 f"Part {p['index'] + 1} ({p['label']}) has no conclusion: add one "
-                f'claim with "section": "conclusion" and "part": {p["index"] + 1} '
+                f'claim of kind "conclusion" with "part": {p["index"] + 1} '
                 "stating the answer to that part, carried by evidence already "
                 "cited or newly bound.")
     if None not in have:
         out.append(
-            'The answer has no overall conclusion: add one claim with "section": '
-            '"conclusion" and "part": null that states the answer to the question '
-            "as a whole.")
+            'The answer has no overall conclusion: add one claim of kind '
+            '"conclusion" with "part": null that states the answer to the '
+            "question as a whole.")
     # A conclusion written into the analysis is the old defect wearing a new
     # label: the reader meets it last. It is named so the reviser moves it
     # rather than writes a second one.
@@ -476,7 +518,7 @@ def conclusion_gaps(claims: list[dict], parts: list[dict]) -> list[str]:
             out.append(
                 f"Claim {c['sequence']} draws a conclusion but sits in the "
                 f"{c.get('section') or 'unsectioned'} section: revise it with "
-                '"section": "conclusion" so it leads its part.')
+                '"kind": "conclusion" so it leads its part.')
     return out
 
 
@@ -662,28 +704,55 @@ def currency_notes(rows: list[dict]) -> dict[str, str]:
     return out
 
 
-def source_context_line(r: dict, currency: str | None = None) -> str:
+def jurisdiction_notes(rows: list[dict]) -> dict[str, str]:
+    """Per filename, a note where the document is not in the jurisdiction the
+    retrieved set is mostly in — or absent.
+
+    A question states no scope, so the scope is taken from the sources it is
+    answered out of: the jurisdiction most of them carry. A document outside
+    that majority is the one a reader has to be told about, and the note
+    names the jurisdiction it IS in rather than saying that it differs, so
+    the sentence reads the same whatever the majority turned out to be.
+
+    Silent where fewer than two documents carry a jurisdiction at all, and
+    where they all carry the same one: a note every claim gets is a note that
+    says nothing. Pure.
+    """
+    seen: dict[str, str] = {}
+    for r in rows:
+        fn = r.get("filename")
+        j = jurisdiction_of(r.get("props"))
+        if fn and j:
+            seen[str(fn)] = str(j)
+    if len(seen) < 2:
+        return {}
+    counts: dict[str, int] = {}
+    for j in seen.values():
+        counts[j] = counts.get(j, 0) + 1
+    if len(counts) < 2:
+        return {}
+    # Ties broken by name so the same set always yields the same majority.
+    modal = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[0][0]
+    return {fn: f"jurisdiction: {j}"[:300]
+            for fn, j in seen.items() if j != modal}
+
+
+def source_context_line(r: dict, label: str | None = None) -> str:
     """One document as the drafter sees it above its passages: what it IS,
-    never what it says. Title, class, tier, issuing body, date, jurisdiction,
-    and a currency note when there is one."""
-    props = r.get("props") or {}
-    ann = r.get("annotation_values") or {}
+    never what it says.
+
+    Title, class, and the label its class declares where it has one. It used
+    to carry the tier, the issuing body, the date, the jurisdiction and a
+    currency note as well, because the drafter was asked to write those back
+    out as fields of every claim. The engine fills those fields itself now,
+    from the same rows this line was built from, so what remains is what the
+    model actually reads with: which document this is and what kind of thing
+    it is.
+    """
     bits = [f"title: {r.get('title') or r.get('filename')}",
             f"class: {r.get('class') or 'unclassified'}"]
-    tier = tier_of(ann)
-    if tier is not None:
-        bits.append(f"authority tier: {tier}")
-    body = issuing_body_of(ann)
-    if body:
-        bits.append(f"issuing body: {body}")
-    d = document_date(props)
-    if d:
-        bits.append(f"date: {d.isoformat()}")
-    j = jurisdiction_of(props)
-    if j:
-        bits.append(f"jurisdiction: {j}")
-    if currency:
-        bits.append(f"CURRENCY: {currency}")
+    if label:
+        bits.append(f"labelled: {label}")
     return "; ".join(bits)
 
 

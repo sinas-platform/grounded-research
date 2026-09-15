@@ -36,30 +36,20 @@ from datetime import date
 from typing import Any
 
 from app.services.answer_structure import (
-    AUTHORITY_LABELS,
-    SECONDARY_LABELS,
+    UNCLASSIFIED_HEADING,
     document_date,
     unwrap,
 )
 
-#: How the labels read in prose.
-LABEL_TEXT = {
-    "ag_opinion": "AG Opinion, not binding",
-    "commentary": "commentary",
-    "party_submission": "party submission",
-    "regulator_decision": "regulator decision",
-}
-#: Headings for the Authorities groups, in the contract's order.
-GROUP_HEADINGS = {
-    "court_judgment": "Court judgments",
-    "court_order": "Court orders",
-    "ag_opinion": "Advocate General opinions",
-    "regulator_decision": "Regulator decisions",
-    "legislation": "Legislation",
-    "commentary": "Commentary",
-    "party_submission": "Party submissions",
-    "other": "Other sources",
-}
+# The eight labels this module used to name — what a judgment, an order, an
+# advisory opinion, a regulator's decision, legislation, commentary and a
+# party's submission are called — were a vocabulary for one collection
+# sitting in engine code, printed as headings and as the words after a
+# sentence. They are gone. A claim's label is the one its document's CLASS
+# declares, and the Authorities are grouped under the class's own name, so a
+# deployment that files its sources differently gets its own words without
+# SGR learning any of them.
+
 #: Property names a citation is built from, in order of preference.
 _NUMBER_KEYS = ("case_number", "celex", "reference", "number")
 _ECLI_KEYS = ("ecli",)
@@ -141,11 +131,17 @@ def paragraph_label(ref: str | None) -> str | None:
 
 
 def _labels(c: dict) -> str:
-    """The bracketed labels a claim's sentence ends with, or ""."""
+    """The bracketed labels a claim's sentence ends with, or "".
+
+    The label is printed exactly as it is stored, because it is the words the
+    deployment declared on the document's class. A claim whose source needs
+    no label carries none, which is the same thing as the class declaring
+    none.
+    """
     out = []
-    lab = c.get("authority_label")
-    if lab in SECONDARY_LABELS:
-        out.append(LABEL_TEXT[lab])
+    lab = _str(c.get("authority_label")).strip()
+    if lab:
+        out.append(lab)
     if c.get("jurisdiction_note"):
         out.append(_str(c["jurisdiction_note"]).strip())
     if c.get("currency_note"):
@@ -218,10 +214,16 @@ def _sort_key(c: dict) -> tuple:
 
 def _authorities(claims: list[dict], evidence: list[dict], documents: dict,
                  cites: _Cites) -> list[str]:
-    """The Authorities section: every cited document once, grouped by the
-    label its citing claims gave it (in the contract's order), then by tier,
-    then by date; each entry numbered by its marker and cited in full, with
-    the paragraphs the answer pins in it."""
+    """The Authorities section: every cited document once, grouped under the
+    name of its own CLASS, the groups ordered by the highest authority any
+    document in them carries and then by name; each entry numbered by its
+    marker and cited in full, with the paragraphs the answer pins in it.
+
+    Grouping used to be by an eight-value label the drafter picked per claim,
+    which put the same document in different groups on different runs and put
+    a vocabulary for one collection in this file. The class is already stored
+    on the document, is the same on every run, and is the deployment's word
+    for what the thing is."""
     by_doc: dict[str, dict] = {}
     claims_by_id = {str(c.get("id")): c for c in claims}
     for e in evidence:
@@ -229,9 +231,7 @@ def _authorities(claims: list[dict], evidence: list[dict], documents: dict,
         if not did:
             continue
         c = claims_by_id.get(str(e.get("claim_id"))) or {}
-        entry = by_doc.setdefault(did, {"labels": [], "tiers": [], "refs": []})
-        if c.get("authority_label"):
-            entry["labels"].append(c["authority_label"])
+        entry = by_doc.setdefault(did, {"tiers": [], "refs": []})
         if isinstance(c.get("authority_tier"), int):
             entry["tiers"].append(c["authority_tier"])
         ref = (e.get("span") or {}).get("paragraph_ref") or e.get("paragraph_ref")
@@ -248,29 +248,35 @@ def _authorities(claims: list[dict], evidence: list[dict], documents: dict,
         cites.n(did)
     rows = []
     for did, entry in by_doc.items():
-        labels = entry["labels"]
-        label = max(set(labels), key=labels.count) if labels else "other"
-        if label not in AUTHORITY_LABELS:
-            label = "other"
+        heading = (_str((documents.get(did) or {}).get("class")).strip()
+                   or UNCLASSIFIED_HEADING)
         tier = min(entry["tiers"]) if entry["tiers"] else None
         d = document_date(_props(documents.get(did)))
-        rows.append((label, tier, d, did, entry["refs"]))
-    order = {lab: i for i, lab in enumerate(AUTHORITY_LABELS)}
-    rows.sort(key=lambda r: (order[r[0]], r[1] if r[1] is not None else 99,
+        rows.append((heading, tier, d, did, entry["refs"]))
+    # A group sorts by the highest authority it holds, so the classes a
+    # deployment treats as authoritative lead without SGR being told which
+    # they are. Ties go alphabetically, which is arbitrary and stable —
+    # the two properties an order like this needs.
+    group_tier: dict[str, int] = {}
+    for heading, tier, _d, _did, _refs in rows:
+        t = tier if tier is not None else 99
+        group_tier[heading] = min(group_tier.get(heading, 99), t)
+    rows.sort(key=lambda r: (group_tier[r[0]], r[0],
+                             r[1] if r[1] is not None else 99,
                              r[2] or date.min, cites.n(r[3])))
     lines: list[str] = []
     current = None
-    for label, _tier, _d, did, refs in rows:
-        if label != current:
+    for heading, _tier, _d, did, refs in rows:
+        if heading != current:
             # The blank line is load-bearing: without it the next group's
             # heading is a lazy continuation of the previous group's last
             # list item, and every group after the first disappears into a
             # bullet.
             if current is not None:
                 lines.append("")
-            lines.append(f"**{GROUP_HEADINGS[label]}**")
+            lines.append(f"**{heading}**")
             lines.append("")
-            current = label
+            current = heading
         entry = f"[{cites.n(did)}] " + citation(documents.get(did))
         if refs:
             entry += ", " + ", ".join(refs)

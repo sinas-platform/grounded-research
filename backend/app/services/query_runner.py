@@ -90,6 +90,33 @@ class PartialOutcome(Exception):
         super().__init__(f"{cause}: {explanation}")
 
 
+class DrafterSilent(Exception):
+    """The drafting call delivered no claims, and WHICH way it delivered none
+    is the whole point of the class.
+
+    A run whose drafter returned an empty reply used to end with "no passage
+    supported a claim well enough to draft" — a verdict about the corpus,
+    reported on behalf of a model that had never spoken. Two runs were lost
+    to that reading, with fifty documents read and twelve passage groups
+    verified behind it. `cause` says which of the three happened, and the
+    caller turns it into the run's own cause so the record names it.
+    """
+
+    #: The model returned nothing, twice. Not a judgment about anything.
+    SILENT = "drafter_returned_nothing"
+    #: The model replied, in shape, with an empty list of claims. That IS a
+    #: judgment, and a different one from "no passage was good enough".
+    NO_CLAIMS = "drafter_offered_no_claims"
+    #: Claims arrived and none survived normalisation — no text, or not
+    #: objects at all.
+    UNUSABLE = "drafter_claims_unusable"
+
+    def __init__(self, explanation: str, cause: str = SILENT):
+        self.cause = cause
+        self.explanation = explanation
+        super().__init__(f"{cause}: {explanation}")
+
+
 class CancelledOutcome(Exception):
     """A run stopped because someone asked it to stop. Terminal, and not a
     failure: nothing went wrong, so it is neither retryable nor an error to
@@ -534,6 +561,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     ResultDocument.rank,
                     DocumentClass.identifier_property,
                     document_title_subquery(),
+                    DocumentClass.authority_label,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -590,7 +618,8 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         return str(value)
 
     out = []
-    for did, fn, cls, reason, summary, rank, ident_prop, title in rows:
+    for (did, fn, cls, reason, summary, rank, ident_prop, title,
+         class_label) in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -612,6 +641,10 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             "props": raw_props,
             "annotation_values": values,
             "identifier": (raw_props.get(ident_prop) if ident_prop else None),
+            # What a claim citing this document says about the source, as
+            # the class declares it. None for a class that declares none,
+            # which is also what says the class carries rules on its own.
+            "class_authority_label": class_label,
         })
     return out
 
@@ -1999,6 +2032,38 @@ async def _synthesis_playbook(role: str = "drafting") -> str:
             "passages decide that):\n" + content.strip() + "\n")
 
 
+#: What the reduced ask allows itself, as a fraction of the normal cap. The
+#: retry exists because the first reply never arrived; asking for most of the
+#: answer again is asking for the same failure again.
+RETRY_CLAIM_FRACTION = 0.5
+#: And never fewer than this, or the retry cannot carry a conclusion per part.
+RETRY_MIN_CLAIMS = 4
+
+
+def _shorter_draft_prompt(prompt: str, cap: int) -> str:
+    """The drafting prompt again, with the ask cut down. Pure.
+
+    Deliberately the SAME prompt with a preface, not a summary of it. The
+    passages are what the claims have to come from, so a retry that drops
+    them is a retry that cannot succeed; what it drops is how much the model
+    is asked to produce, which is what ran out.
+    """
+    n = max(RETRY_MIN_CLAIMS, int(cap * RETRY_CLAIM_FRACTION))
+    return (
+        "Your previous reply was EMPTY — nothing came back at all. The most "
+        "likely reason is that you ran out of room before writing any of it. "
+        "Answer the same task again, smaller:\n"
+        f"- Write at most {n} claims, not {cap}. Cover the conclusions first "
+        "and stop; a short answer is wanted, an absent one is not.\n"
+        "- Keep each claim to one sentence and each rationale to one short "
+        "clause.\n"
+        "- Write NOTHING outside the JSON object: no plan, no commentary, no "
+        "working. Your first character is { and your last is }.\n"
+        "- Do not re-read every passage group. Take the groups that most "
+        "directly answer each part and leave the rest.\n\n"
+        "THE TASK, UNCHANGED:\n" + prompt)
+
+
 def _claims_json(reply: str) -> dict:
     """The drafter's reply as JSON, or JSONDecodeError naming what broke."""
     cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
@@ -2144,9 +2209,10 @@ async def _draft_from_extracts(
         if not e.get("passages"):
             continue
         # What the documents in this group ARE, once each, above the
-        # passages. The line carries no summary and no holding: it is the
-        # material for `authority_label`, `jurisdiction_note` and
-        # `currency_note`, and the prompt says so.
+        # passages. The line carries no summary and no holding, and nothing
+        # the drafter has to copy back: it says which document this is, what
+        # kind of thing it is, and whether its class labels it — the one fact
+        # that changes what the drafter may rest on it.
         seen_fn: list[str] = []
         for p in e["passages"]:
             if p["filename"] not in seen_fn:
@@ -2163,14 +2229,13 @@ async def _draft_from_extracts(
         blocks.append(f"PASSAGE GROUP {i}{where}\n{heads}\n{ps}")
     if not blocks:
         return 0
-    reply = await sinas.invoke(
-        "sgr/retrieval-planner-agent",
+    prompt = (
         f"Draft the claims of {_domain_article()}answer from the VERIFIED "
         "PASSAGES below "
         "— these passages are the ONLY thing you know. Every claim must be "
-        "supported entirely by the passages you cite for it. Do not name a "
-        "court, an Advocate General, a case number or a date that no passage "
-        "shows. Skip a passage group that establishes nothing usable.\n"
+        "supported entirely by the passages you cite for it. Name no deciding "
+        "body, no case reference and no date that no passage shows. Skip a "
+        "passage group that establishes nothing usable.\n"
         # The instruction used to be that the FINAL claim states the
         # conclusion, and it was followed: across every answer produced, no
         # claim typed as a conclusion has ever been first and they sit on
@@ -2184,45 +2249,45 @@ async def _draft_from_extracts(
         "before any reasoning or authority: a reader who stops there has the "
         "answer. The claims after it give the reasoning, then the detail. Do "
         "not repeat the conclusion at the end.\n\n"
-        "Each group opens with SOURCE lines saying what its documents ARE "
-        "(title, class, authority tier where 1 is highest, issuing body, "
-        "date, jurisdiction, and a CURRENCY note where the instrument is "
-        "superseded or a later ruling in the same case was retrieved). Use "
-        "them ONLY to fill authority_label, jurisdiction_note and "
-        "currency_note and to decide what a source may carry; never assert "
-        "anything from them in a claim.\n\n"
+        "Each group opens with SOURCE lines saying what its documents ARE: "
+        "title, class, and a `labelled:` note where the source is one that "
+        "cannot carry a rule alone. Never assert anything from a SOURCE line "
+        "in a claim, and never copy one into a field — everything the answer "
+        "prints about what a source IS is filled in for you.\n\n"
         + _structure_rules(parts, cap)
         + "\nFor each claim also give a RATIONALE: ONE short sentence, at most "
         "20 words — which part of the question this answers and why this "
         "source settles it. Never restate the claim; the reader has just "
-        "read it. Where two passage groups spoke to the same point, name "
-        "the one you relied on. It is reasoning, not evidence — nothing in "
-        "it may assert anything the passages do not show. Name a source the "
-        "way the claim names it — deciding body and case reference — never "
-        "by its filename. One claim per proposition per source: do not "
-        "restate a point a claim already makes from the same document.\n\n"
-        'Reply ONLY JSON: {"claims": [{"n": <1, 2, ...>, "text": "<claim>", '
-        '"section": "conclusion|analysis|authority", '
+        "read it. It is reasoning, not evidence — nothing in it may assert "
+        "anything the passages do not show. Name a source the way the claim "
+        "names it, never by its filename. One claim per proposition per "
+        "source: do not restate a point a claim already makes from the same "
+        "document.\n\n"
+        # Six fields the drafter used to author are gone from this shape:
+        # `section`, which follows from `kind`; `authority_label`,
+        # `jurisdiction_note` and `currency_note`, which follow from the
+        # cited document; `position`, which follows from the reply's order;
+        # and the `test` wrapper, whose `conditions` are now flat on the
+        # claim. Each was a decision the engine could make from what it
+        # already had, and every one of them was output the model had to
+        # spend before it could emit a single claim.
+        + 'Reply ONLY JSON, and nothing else — no preamble, no explanation, '
+        'no reasoning outside the JSON. Begin with { and end with }:\n'
+        '{"claims": [{"n": <1, 2, ...>, "text": "<claim, one sentence>", '
         '"part": <part number or null>, "kind": '
         '"legal_principle|factual|procedural|conclusion|test|label|inference", '
         '"follows_from": [<n of each claim this one reasons from; required '
         'for inference and conclusion claims>], '
-        '"authority_label": "court_judgment|court_order|ag_opinion|'
-        'regulator_decision|legislation|commentary|party_submission|other", '
-        '"jurisdiction_note": "<null, or one line when the source\'s '
-        "jurisdiction differs from the question's, e.g. national law "
-        '(country)>", '
-        '"currency_note": "<null, or one line when the instrument is '
-        'superseded, repealed, or pre-dates a later ruling in the same case>", '
-        '"test": <null, or for kind test: {"name": "<the test>", "conditions": '
-        '[{"text": "<condition, in the source\'s order>", "cumulative": '
-        'true|false, "evidence": {"filename": "...", "line_from": <int>, '
-        '"line_to": <int>, "locator": "<or null>"}}], '
-        '"source_para": "<paragraph label if the passage '
-        'shows one, else null>"}>, '
-        '"rationale": "<why this claim rests on this source>", "evidence": '
-        '[{"filename": "...", "line_from": <int>, "line_to": <int>, '
-        '"locator": "<or null>"}]}]}\n\n'
+        '"rationale": "<why this claim rests on this source>", '
+        '"evidence": [{"filename": "...", "line_from": <int>, '
+        '"line_to": <int>, "locator": "<or null>"}], '
+        '"test_name": "<for kind test only: what the test is called>", '
+        '"conditions": [<for kind test only>{"text": "<condition, in the '
+        'source\'s order>", "cumulative": true|false, "evidence": '
+        '{"filename": "...", "line_from": <int>, "line_to": <int>, '
+        '"locator": "<or null>"}}]}]}\n'
+        'Omit "test_name" and "conditions" on every claim that is not a '
+        "test.\n\n"
         # The locator is the drafter's, because the drafter is the only stage
         # that has both the passage and the proposition in front of it. It is
         # checked deterministically against the passage before anything is
@@ -2236,24 +2301,64 @@ async def _draft_from_extracts(
         "that does not appear in the passage it labels is checked and the "
         "citation is thrown away with it.\n\n"
         + await _synthesis_playbook()
-        + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
+        + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks)
     )
-    # One retry on a malformed reply. Drafting is the last call in a run that
-    # has already paid for retrieval, planning and extraction, and a single
-    # unescaped quote inside a claim threw all of it away. The retry is the
-    # cheap half of the work, and a second failure still raises: a run that
-    # cannot draft must say so, not publish nothing.
+    reply = await sinas.invoke("sgr/retrieval-planner-agent", prompt)
+    # Two things can come back that are not claims, and they are different
+    # failures. An UNPARSEABLE reply has claims in it and broke on a quote;
+    # resending it to be repaired is the right and cheap move. An EMPTY reply
+    # has nothing to repair, and that is what a run lost a full answer to:
+    # the drafter returned no text at all, the repair prompt was handed an
+    # empty PREVIOUS REPLY, and the model — correctly, given what it was
+    # shown — answered `{"claims": []}`. The run then reported that no
+    # passage supported a claim, which was false: no reply had arrived.
+    #
+    # So the retry for an empty reply is the WORK again, not a repair of
+    # nothing: the same passages, with the ask cut down to what a shorter
+    # reply can hold. That is also the shape of the cause. The reply was
+    # empty because the model spent its whole output budget before writing
+    # any of it (20,000 completion tokens, zero text blocks, twice), so a
+    # retry that asks for less output is a retry that can finish.
+    data: dict | None = None
     try:
         data = _claims_json(reply)
     except json.JSONDecodeError as exc:
-        await _tele(run_id, "draft", draft_reparse=str(exc)[:200])
-        reply = await sinas.invoke(
-            "sgr/retrieval-planner-agent",
-            "Your previous reply was not valid JSON: " + str(exc)[:200]
-            + ". Send the same claims again as strictly valid JSON. Escape "
-            'every quotation mark inside a string as \\", and use no line '
-            "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
-        data = _claims_json(reply)
+        empty = not (reply or "").strip()
+        await _tele(run_id, "draft",
+                    draft_reparse=str(exc)[:200],
+                    draft_reply_chars=len(reply or ""),
+                    draft_empty_reply=empty,
+                    draft_prompt_chars=len(prompt))
+        if empty:
+            _log.warning("run %s: the drafter returned an empty reply to a "
+                         "%d-character prompt; retrying with a reduced ask",
+                         run_id, len(prompt))
+            reply = await sinas.invoke("sgr/retrieval-planner-agent",
+                                       _shorter_draft_prompt(prompt, cap))
+            await _tele(run_id, "draft",
+                        draft_retry="reduced_ask",
+                        draft_retry_reply_chars=len(reply or ""))
+        else:
+            reply = await sinas.invoke(
+                "sgr/retrieval-planner-agent",
+                "Your previous reply was not valid JSON: " + str(exc)[:200]
+                + ". Send the same claims again as strictly valid JSON. Escape "
+                'every quotation mark inside a string as \\", and use no line '
+                "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
+            await _tele(run_id, "draft", draft_retry="repair_json")
+        try:
+            data = _claims_json(reply)
+        except json.JSONDecodeError as exc2:
+            # Named for what happened. A drafter that said nothing twice is
+            # not a corpus that supports no claim, and the run must not
+            # report it as one.
+            await _tele(run_id, "draft",
+                        draft_retry_failed=str(exc2)[:200],
+                        draft_retry_empty=not (reply or "").strip())
+            raise DrafterSilent(
+                "the drafter returned no usable reply twice"
+                + (" (both replies were empty)" if not (reply or "").strip()
+                   else f" (second reply: {str(exc2)[:120]})")) from exc2
     # The drafter's reply is unvalidated at every level, and this guard is
     # placed once at the boundary rather than a level at a time. Three
     # findings arrived in three review rounds, each the same defect one level
@@ -2302,7 +2407,8 @@ async def _draft_from_extracts(
             continue
         spans = _evidence_entries(c)
         if cols["claim_kind"] == "test":
-            spans = spans + answer_structure.condition_spans(c.get("test"))
+            spans = spans + answer_structure.condition_spans(
+                answer_structure.raw_test(c))
         cols["_n"] = c.get("n") if c.get("n") is not None else i
         cols["_spans"] = spans
         prepared.append(cols)
@@ -2375,14 +2481,26 @@ async def _draft_from_extracts(
                     validated=False))
                 cited_here.add(fn_)
                 first_doc_fn = first_doc_fn or fn_
-            # What the code knows about the source beats what the model
-            # guessed: the tier comes from the hierarchy annotation, and a
-            # currency note the retrieved set establishes is set whether or
-            # not the drafter noticed.
+            # What the code knows about the source, rather than what the
+            # model was asked to guess. All four of these used to be fields
+            # of the reply — the label out of an eight-word vocabulary in
+            # engine code, the tier, the jurisdiction note and the currency
+            # note — and the engine overrode two of them afterwards anyway,
+            # from exactly these rows. Asking for them bought nothing and
+            # cost the drafter output it turned out not to have.
+            #
+            # Keyed on the FIRST cited document, which is the one the claim
+            # rests on: a claim citing a labelled source alongside an
+            # unlabelled one is a claim resting on the unlabelled one, and
+            # that is the order the drafter is told to write them in.
             src = sources.get(first_doc_fn or "") or {}
-            if row.authority_tier is None and src.get("tier") is not None:
+            if src.get("label"):
+                row.authority_label = str(src["label"])[:40]
+            if src.get("tier") is not None:
                 row.authority_tier = int(src["tier"])
-            if not row.currency_note and src.get("currency"):
+            if src.get("jurisdiction"):
+                row.jurisdiction_note = str(src["jurisdiction"])[:300]
+            if src.get("currency"):
                 row.currency_note = str(src["currency"])[:500]
             written += 1
             drafted.append((i, cited_here))
@@ -2425,6 +2543,23 @@ async def _draft_from_extracts(
                      "answer", run_id, len(malformed),
                      [d["sequence"] for d in malformed])
     await _tele(run_id, "draft", **detail)
+    # An answer with no claims is not a corpus with no support. The drafter
+    # was shown passage groups — this function returns early when there are
+    # none — so a reply that yielded no row is the drafter's doing, and the
+    # run says which of its ways it was rather than blaming the passages.
+    if written == 0:
+        if not claims:
+            raise DrafterSilent(
+                "the drafter replied in shape with an empty list of claims "
+                f"over {len(blocks)} passage group(s)"
+                + (f"; `claims` arrived as {bad_container}" if bad_container
+                   else ""),
+                cause=DrafterSilent.NO_CLAIMS)
+        raise DrafterSilent(
+            f"the drafter sent {len(claims)} claim(s) and none could be "
+            f"stored ({len(no_text)} with no text, {len(malformed)} not "
+            "objects)",
+            cause=DrafterSilent.UNUSABLE)
     return written
 
 
@@ -2507,14 +2642,14 @@ def _structure_rules(parts: list[dict], cap: int) -> str:
         f"The whole answer holds at most {cap} claims.\n")
     return (
         "STRUCTURE (binding, and above any house rules):\n" + per_part
-        + '1. Conclusion first. One claim with "section": "conclusion" per '
-        "part, stating that part's answer, and one overall conclusion "
+        + '1. Conclusion first. One claim of kind "conclusion" per part, '
+        "stating that part's answer, and one overall conclusion "
         '("part": null) as the FIRST claim. Conclusions lead; nothing '
         "precedes them, and no later claim restates them.\n"
-        '2. Then the analysis per part ("section": "analysis"), written as a '
-        "chain: the governing rule (evidenced) before its application "
-        "(evidenced), then the step that follows from them. Each claim reads "
-        "on from the previous one in its part.\n"
+        "2. Then the reasoning per part, as a chain: the governing rule "
+        "(evidenced) before its application (evidenced), then the step that "
+        "follows from them. Each claim reads on from the previous one in its "
+        "part.\n"
         "3. A test a source states as two or more conditions is ONE claim of "
         'kind "test" listing the conditions in the order the source states '
         "them, each condition pinned to its own passage, saying whether they "
@@ -2524,13 +2659,12 @@ def _structure_rules(parts: list[dict], cap: int) -> str:
         'the claims it follows from in "follows_from", and introduces no '
         "authority those claims do not carry. A conclusion also names what it "
         'follows from in "follows_from".\n'
-        '5. Authorities last ("section": "authority"): claims that state what '
-        "a source is and holds, labelled.\n"
-        "6. Commentary, advisory opinions, party submissions, regulator "
-        "decisions and sources from another jurisdiction than the question's "
-        "are labelled as such and never carry a rule on their own: a rule "
-        "rests on a court judgment or on legislation, or is stated as what "
-        "the labelled source says.\n"
+        '5. A claim of kind "label" states what a source is and holds; those '
+        "close the answer.\n"
+        "6. A source whose SOURCE line shows a `labelled:` note never carries "
+        "a rule on its own: a rule rests on a source with no such note, or is "
+        "stated as what the labelled source says. You never write the label "
+        "out — it is printed for you.\n"
         + (("PARTS OF THE QUESTION:\n" + answer_structure.parts_block(parts) + "\n")
            if parts else "")
     )
@@ -2654,17 +2788,28 @@ async def _argument_plan(
 
 def _source_context(rows: list[dict]) -> dict[str, dict]:
     """Per filename: the line the drafter is shown above the document's
-    passages, the document's tier, and its currency note if any. Pure over
-    `_manifest_rows` rows."""
+    passages, and the four facts about the source the engine writes onto
+    every claim citing it. Pure over `_manifest_rows` rows.
+
+    The label is the document class's own, declared by the deployment; the
+    tier is the hierarchy annotation's; the jurisdiction note and the
+    currency note are decided across the whole retrieved set, because both
+    are comparisons — one against what the other sources are, the other
+    against what else in the set is about the same instrument or case.
+    """
     currency = answer_structure.currency_notes(rows)
+    jurisdiction = answer_structure.jurisdiction_notes(rows)
     out: dict[str, dict] = {}
     for r in rows:
         fn = r.get("filename")
         if not fn:
             continue
+        label = str(r.get("class_authority_label") or "").strip() or None
         out[fn] = {
-            "line": answer_structure.source_context_line(r, currency.get(fn)),
+            "line": answer_structure.source_context_line(r, label),
+            "label": label,
             "tier": answer_structure.tier_of(r.get("annotation_values")),
+            "jurisdiction": jurisdiction.get(fn),
             "currency": currency.get(fn),
         }
     return out
@@ -2818,8 +2963,17 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # retrieved set — a superseded status, a later ruling in the same case —
     # and set on the claims whether or not the drafter repeats them.
     sources = _source_context(all_rows)
-    n = await _draft_from_extracts(run_id, answer_id, sinas, question, extracts,
-                                   cap=cap, parts=parts, sources=sources)
+    try:
+        n = await _draft_from_extracts(run_id, answer_id, sinas, question,
+                                       extracts, cap=cap, parts=parts,
+                                       sources=sources)
+    except DrafterSilent as exc:
+        # The run's cause is the drafter's, not the corpus's. "no_progress"
+        # with "no passage supported a claim" is what this used to say about
+        # a model that had returned an empty reply, and reading the record
+        # afterwards it was indistinguishable from a genuinely thin corpus.
+        _log.warning("run %s: %s", run_id, exc)
+        raise PartialOutcome(exc.cause, exc.explanation) from exc
     if not n:
         raise PartialOutcome(
             "no_progress", "no passage supported a claim well enough to draft")
@@ -3758,8 +3912,8 @@ async def _gate_answer(
         )
     if data.get("no_conclusion"):
         correctness.append(
-            "The answer never draws its overall conclusion. Add a claim with "
-            '"section": "conclusion" and "part": null that directly answers '
+            "The answer never draws its overall conclusion. Add a claim of "
+            'kind "conclusion" with "part": null that directly answers '
             "the question, supported by the evidence already cited; it leads "
             "the answer, so restore the order rather than append."
         )
@@ -4391,8 +4545,13 @@ def _spans_of(obj: dict) -> list[dict]:
 MAX_ABSTENTIONS = 2
 
 
-_STRUCTURE_KEYS = ("section", "part", "kind", "follows_from", "test",
-                   "authority_label", "jurisdiction_note", "currency_note")
+#: What a patch item may say about where a claim belongs. Four keys left
+#: this tuple with the drafting schema: `section`, which follows from
+#: `kind`, and the three notes about the source, which follow from the
+#: document the claim cites. `conditions` and `test_name` are the flat shape
+#: a test arrives in; `test` is the older nested one, still read.
+_STRUCTURE_KEYS = ("part", "kind", "follows_from", "test", "conditions",
+                   "test_name")
 
 
 def _structure_of(c: dict) -> dict:
@@ -4729,39 +4888,68 @@ def _claim_where(claim: AnswerClaim) -> str:
 
 
 def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
-                     id_by_seq: Mapping[int, uuid.UUID], added: bool = False) -> None:
+                     id_by_seq: Mapping[int, uuid.UUID], added: bool = False,
+                     sources: Mapping[str, dict] | None = None) -> None:
     """Write the structure fields a patch item carries onto a claim row.
 
     A revised claim keeps whatever the patch does not mention; an added claim
     is normalised whole, so it always lands in a section. `follows_from`
     arrives as sequence numbers and is stored as claim ids; a number naming
-    no live claim, or the claim itself, is dropped. Pure over the row.
+    no live claim, or the claim itself, is dropped.
+
+    What the claim says about its SOURCE is not the patch's to carry: the
+    label, the tier, the jurisdiction note and the currency note are set from
+    the document the item cites, exactly as the drafting path sets them. A
+    revision rebinds evidence, so a claim that moves to another document must
+    move to that document's labels with it — leaving the old ones on the row
+    is how an answer ends up calling a source something it is not.
     """
-    carries = {k for k in ("section", "part", "kind", "type", "test",
-                           "authority_label", "jurisdiction_note",
-                           "currency_note") if item.get(k) is not None}
+    carries = {k for k in ("part", "kind", "type", "test", "conditions",
+                           "test_name") if item.get(k) is not None}
     if added or carries:
         cols = answer_structure.normalise_claim(
             {**item, "text": row.claim_text,
              "kind": item.get("kind") or item.get("type") or row.claim_kind,
-             "section": item.get("section") or (None if added else row.section),
              "part": item.get("part") if "part" in item else (
                  None if added or row.part_index is None else row.part_index + 1)},
             parts)
         if cols is not None:
             for k in ("section", "part_index", "part_label", "claim_kind",
-                      "claim_type", "test", "authority_label"):
+                      "claim_type", "test"):
                 if added or k in ("section", "part_index", "part_label") or \
                         k in carries or (k == "claim_kind" and "kind" in carries):
                     setattr(row, k, cols[k])
-            for k in ("jurisdiction_note", "currency_note"):
-                if k in carries:
-                    setattr(row, k, cols[k])
+    _apply_source_facts(row, item.get("evidence"), sources)
     refs = answer_structure.ref_list(item.get("follows_from"))
     if refs:
         ids = [str(id_by_seq[r]) for r in refs
                if r in id_by_seq and id_by_seq[r] != row.id]
         row.follows_from = ids or None
+
+
+def _apply_source_facts(row: AnswerClaim, evidence: Any,
+                        sources: Mapping[str, dict] | None) -> None:
+    """Set the four source-derived columns from the first document cited.
+
+    Shared by drafting and revision so a claim carries the same labels
+    whichever path last touched it. Silent when the claim cites nothing the
+    retrieved set knows about: that is a claim whose evidence did not bind,
+    and it has bigger problems than its label.
+    """
+    if not sources:
+        return
+    fn = next((str(e.get("filename")) for e in (evidence or [])
+               if isinstance(e, dict) and e.get("filename")), None)
+    src = sources.get(fn or "") if fn else None
+    if not src:
+        return
+    row.authority_label = (str(src["label"])[:40] if src.get("label") else None)
+    row.authority_tier = (int(src["tier"]) if src.get("tier") is not None
+                          else None)
+    row.jurisdiction_note = (str(src["jurisdiction"])[:300]
+                             if src.get("jurisdiction") else None)
+    row.currency_note = (str(src["currency"])[:500] if src.get("currency")
+                         else None)
 
 
 async def _revise_answer(
@@ -4806,6 +4994,10 @@ async def _revise_answer(
     cap = answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS
     corpus_rows = (await _manifest_rows(parent_id))[:60]
     corpus = [r["filename"] for r in corpus_rows if r.get("filename")]
+    # The same per-document facts the drafter's claims were labelled from,
+    # so a revised or added claim is labelled by the document it ends up
+    # citing rather than by whatever the row carried before.
+    src_facts = _source_context(corpus_rows)
 
     # Two claims restating one proposition from one source are found here,
     # by arithmetic, and handed to the reviser as a merge to judge. The
@@ -4942,9 +5134,10 @@ async def _revise_answer(
         + "\nThe structure is part of what is corrected. Each claim above is "
         "marked with its section and part. Where the feedback says a part "
         "lacks its conclusion, or a conclusion sits in the analysis, RESTORE "
-        'THE ORDER: add or revise a claim with "section": "conclusion" for that '
-        "part, never append a conclusion to the end of the analysis. Every "
-        'claim you add or revise states its "section", "part" and "kind", and '
+        'THE ORDER: add or revise a claim of kind "conclusion" for that '
+        "part, never append a conclusion to the end of the analysis — a "
+        "claim's section follows from its kind and is filled in for you. "
+        'Every claim you add or revise states its "part" and "kind", and '
         'an inference or conclusion its "follows_from" (the sequence numbers '
         "of the claims it reasons from). Where the feedback names two claims "
         "restating one proposition from one source, merge them: revise one to "
@@ -4975,8 +5168,10 @@ async def _revise_answer(
            "before us do not address X' rather than 'I cannot determine X'. "
            f"At most {MAX_ABSTENTIONS} such claims, and never for the central "
            "question if the sources do answer it.\n\n" if last_attempt else "")
-        + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
-        '"section": "conclusion|analysis|authority", "part": <part number or '
+        + 'Reply ONLY JSON, and nothing else — no preamble, no reasoning '
+        "outside the JSON. Begin with { and end with }:\n"
+        '{"revise": [{"seq": <int>, "text": "<claim>", '
+        '"part": <part number or '
         'null>, "kind": "legal_principle|factual|procedural|conclusion|test|'
         'label|inference", "follows_from": [<seq>, ...], '
         '"rationale": "<why this claim rests on this source>", '
@@ -4991,18 +5186,16 @@ async def _revise_answer(
         'answer needs>"}], '
         '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
         'procedural|conclusion|test|label|inference", '
-        '"section": "conclusion|analysis|authority", "part": <part number or '
-        'null>, "follows_from": [<seq>, ...], '
-        '"authority_label": "court_judgment|court_order|ag_opinion|'
-        'regulator_decision|legislation|commentary|party_submission|other", '
-        '"jurisdiction_note": <null or one line>, "currency_note": <null or one '
-        'line>, "test": <null, or {"name", "conditions": [{"text", '
-        '"cumulative", "evidence": {"filename", "line_from", "line_to", '
-        '"locator"}}], '
-        '"source_para"}>, '
+        '"part": <part number or null>, "follows_from": [<seq>, ...], '
+        '"test_name": "<for a test claim only>", '
+        '"conditions": [<for a test claim only>{"text", "cumulative", '
+        '"evidence": {"filename", "line_from", "line_to", "locator"}}], '
         '"rationale": "<why this claim rests on this '
         'source>", "evidence": [{"filename": "...", '
-        '"line_from": <int>, "line_to": <int>, "locator": "<or null>"}]}]}\n\n'
+        '"line_from": <int>, "line_to": <int>, "locator": "<or null>"}]}]}\n'
+        "What a source IS — what kind of thing it is, how current it is, "
+        "which jurisdiction it belongs to — is never yours to write: it is "
+        "filled in from the document you cite.\n\n"
         # Same rule the drafter is given, and for the same reason: the check
         # is deterministic and runs before any judging, so a label that is
         # not in the passage costs the citation it was attached to.
@@ -5093,7 +5286,7 @@ async def _revise_answer(
                 row.rationale = item["rationale"][:2000]
             # The structure moves with the text when the patch says so; a
             # revision that says nothing about it leaves the row where it is.
-            _apply_structure(row, item, parts, id_by_seq)
+            _apply_structure(row, item, parts, id_by_seq, sources=src_facts)
             # its evidence is re-bound, so its verdicts no longer apply
             await session.execute(ClaimEvidence.__table__.delete()
                                   .where(ClaimEvidence.claim_id == row.id))
@@ -5119,7 +5312,8 @@ async def _revise_answer(
                 await session.flush()
                 # An added claim lands in its section and part, positioned
                 # after what is there, so the order survives the addition.
-                _apply_structure(row, item, parts, id_by_seq, added=True)
+                _apply_structure(row, item, parts, id_by_seq, added=True,
+                                 sources=src_facts)
                 if row.section:
                     same_part = (AnswerClaim.part_index.is_(None)
                                  if row.part_index is None

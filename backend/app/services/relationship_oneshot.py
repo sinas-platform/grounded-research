@@ -297,12 +297,11 @@ async def _apply_edges(
 
     index = _NameIndex(name_to_entity)
 
-    # The document's own case entity, per entity type. Models write
-    # "DOCUMENT" as an end even where the definition wants the case
-    # ENTITY the document is the full text of — semantically correct,
-    # and the reply itself declares the mapping through its
-    # document→entity edges (is_full_text_of). Pre-scan those, then
-    # substitute on entity-typed ends.
+    # The document's own subject entity, per entity type. Models write
+    # "DOCUMENT" as an end even where the definition wants the ENTITY the
+    # document is the full text of — semantically correct, and the reply
+    # itself declares the mapping through its document→entity edges.
+    # Pre-scan those, then substitute on entity-typed ends.
     self_entity: dict[uuid.UUID, uuid.UUID] = {}
     for e in edges if isinstance(edges, list) else []:
         if not isinstance(e, dict):

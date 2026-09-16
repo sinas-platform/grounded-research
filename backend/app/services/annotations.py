@@ -540,14 +540,14 @@ async def annotations_for_documents(
     document_ids: list[uuid.UUID],
     definitions: list[AnnotationDefinition],
 ) -> dict[uuid.UUID, dict]:
-    """Annotations for the case entities the given documents are the full
-    text of, keyed by document id — the read-side surface for result and
+    """Annotations for the entities the given documents are the full text
+    of, keyed by document id — the read-side surface for result and
     answer endpoints (?annotate=).
 
     A document stands for the entity it is linked to through an active
-    IDENTITY edge: a document→entity definition with cardinality "one"
-    (is_full_text_of and friends). Citation-shaped definitions are not
-    subject edges — a document that cites five cases is not any one of
+    IDENTITY edge: a document→entity definition with cardinality "one",
+    whatever the deployment calls it. Citation-shaped definitions are not
+    subject edges — a document that cites five sources is not any one of
     them, and the old any-edge pick silently elected the lowest id.
     Cardinality "one" IS the identity declaration: a definition meant as
     an identity but declared with the default "many" has not declared one,

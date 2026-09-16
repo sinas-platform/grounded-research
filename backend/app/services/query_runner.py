@@ -59,6 +59,7 @@ from app.services import (
     strikes,
     supersession,
 )
+from app.services.relationship_roles import standing_annotation_names
 
 #: How many findings one round puts to the drafter. A round that named
 #: thirty would be a redraft with extra steps, and the ones past the cap are
@@ -643,6 +644,11 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         definitions = list(
             (await session.execute(select(AnnotationDefinition))).scalars()
         )
+        # Which of those annotations says how a source stands against another,
+        # found by the relation it walks rather than by what it is called: the
+        # deployment declares the `standing` role, and this is every annotation
+        # whose path crosses one. Resolved once per manifest, not per document.
+        tier_annotations = await standing_annotation_names(session)
         per_doc: dict = {}
         if definitions and rows:
             per_doc = await annotations_for_documents(
@@ -710,6 +716,10 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             "title": title,
             "props": raw_props,
             "annotation_values": values,
+            # The annotations that carry standing, for the code reading the
+            # tier off this row. Carried per row so the pure readers stay
+            # pure — nothing downstream touches a session to learn a name.
+            "tier_annotations": tier_annotations,
             "identifier": (raw_props.get(ident_prop) if ident_prop else None),
             # What a claim citing this document says about the source, as
             # the class declares it. None for a class that declares none,
@@ -3048,7 +3058,9 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
     every claim citing it. Pure over `_manifest_rows` rows.
 
     The label is the document class's own, declared by the deployment; the
-    tier is the hierarchy annotation's; the jurisdiction note and the
+    tier comes from the annotations the row names as carrying standing —
+    resolved in `_manifest_rows` from the deployment's declared role, so no
+    annotation name appears here; the jurisdiction note and the
     currency note are decided across the whole retrieved set, because both
     are comparisons — one against what the other sources are, the other
     against what else in the set is about the same instrument or case.
@@ -3064,7 +3076,8 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
         out[fn] = {
             "line": answer_structure.source_context_line(r, label),
             "label": label,
-            "tier": answer_structure.tier_of(r.get("annotation_values")),
+            "tier": answer_structure.tier_of(r.get("annotation_values"),
+                                             r.get("tier_annotations")),
             "jurisdiction": jurisdiction.get(fn),
             "currency": currency.get(fn),
         }

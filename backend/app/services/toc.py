@@ -86,8 +86,8 @@ _PAREN_HEADING = re.compile(
 _CAPS_LINE = re.compile(r"^\s{0,3}(?P<title>\S[^\n]{3,58}?)\s*:?\s*$")
 
 # The same headings fused to their first paragraph by sentence-based
-# normalization: "(2) Findings of the Court 150 According to settled
-# case-law, …" — the heading has no terminal punctuation, so a sentence
+# normalization: "(2) Findings 150 According to settled practice, …" — the
+# heading has no terminal punctuation, so a sentence
 # segmenter glues it to the numbered paragraph that follows. The title is
 # cut where a bare paragraph number followed by an uppercase word starts.
 # Kept deliberately narrow (short title, no sentence punctuation inside).

@@ -34,6 +34,7 @@ which property says the date, is read from what the deployment declared.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
 
@@ -79,11 +80,17 @@ UNCLASSIFIED_HEADING = "Unclassified"
 #: two words are the contract's, not a deployment's.
 STALE_STATUSES = ("repealed", "superseded")
 
-#: The annotation whose value carries the authority tier, and the shape of
-#: that value: `{"depth": n}` from a `length` reducer over the hierarchy
-#: path, or a bare integer. The name is the contract's; a deployment that
-#: declares no such annotation yields no tier, which is the null the column
-#: allows.
+#: The shape of a tier value, whichever annotation carries it: `{"depth": n}`
+#: from a `length` reducer over a standing walk, or a bare integer.
+#:
+#: WHICH annotation carries it is not decided here and is not a name in engine
+#: code. The caller passes the annotations whose path walks a relation the
+#: deployment declared with the `standing` role — see
+#: `app.services.relationship_roles.standing_annotation_names`. What is left
+#: below is the fallback for a deployment that has declared no role yet: the
+#: engine-contract name, kept so that such a deployment keeps the tier it has
+#: today, and documented rather than hidden. A deployment that declares the
+#: role may call its annotation anything.
 TIER_ANNOTATION = "authority_tier"
 ISSUING_BODY_ANNOTATION = "issuing_body"
 
@@ -629,20 +636,31 @@ def unwrap(value: Any) -> Any:
     return value
 
 
-def tier_of(annotations: dict | None) -> int | None:
-    """The authority tier out of a document's annotation values, or None."""
+def tier_of(annotations: dict | None,
+            names: Sequence[str] | None = None) -> int | None:
+    """A source's tier out of its annotation values, or None. Pure.
+
+    `names` are the annotations that derive standing, resolved from the
+    deployment's declared `standing` role. The first that yields a number
+    wins, so the caller's order decides; `None` means the caller resolved
+    nothing and falls back to the engine-contract name, which is what a
+    deployment that has declared no role still has.
+    """
     if not isinstance(annotations, dict):
         return None
-    v = annotations.get(TIER_ANNOTATION)
-    if isinstance(v, dict):
-        v = v.get("depth", v.get("value"))
-    if isinstance(v, bool) or v is None:
-        return None
-    try:
-        n = int(v)
-    except (TypeError, ValueError):
-        return None
-    return n if n >= 0 else None
+    for name in (names if names is not None else (TIER_ANNOTATION,)):
+        v = annotations.get(name)
+        if isinstance(v, dict):
+            v = v.get("depth", v.get("value"))
+        if isinstance(v, bool) or v is None:
+            continue
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            continue
+        if n >= 0:
+            return n
+    return None
 
 
 def issuing_body_of(annotations: dict | None) -> str | None:

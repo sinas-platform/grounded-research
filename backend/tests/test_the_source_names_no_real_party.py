@@ -1,4 +1,4 @@
-"""Source text and fixtures name no real party and no real document.
+"""Source text names no real party, no real document, no deployment vocabulary.
 
 A list of names was tried twice in one day and was incomplete both times. The
 first pass missed three undertakings, the second missed two more and two
@@ -28,6 +28,30 @@ and forgetting to add it makes the suite fail loudly rather than pass quietly.
 Bare identifiers are untouched on purpose. `C-606/18` and `AT.39796` name
 nobody, a pattern cannot be tested without one, and this suite is full of them
 for exactly that reason.
+
+THE THIRD CHECK IS A LIST, AND DELIBERATELY SO. Shape cannot catch a leak of
+the third kind: engine behaviour keyed on a name a deployment CHOSE — a
+relationship called `supersedes`, a class called `Court Decision`. Those look
+like ordinary identifiers, and the two found by accident in two days were
+found by accident. So a small list of a deployment's chosen vocabulary is
+named here, in one place, precisely so it appears nowhere else; the list is
+short and fixed rather than exhaustive, because what defends the rule is a
+check that stays on, and a check nobody can keep green gets deleted.
+
+It runs over `app/` only — the engine. Two areas are out of scope by design:
+
+  THE PACKAGE AND CONFIG LAYER is where a deployment's vocabulary is supposed
+  to arrive. `_CONFIG_LAYER` names those modules; the schema that defines the
+  declaration block has to be able to say what it replaced.
+
+  TESTS are not scanned by this check. A fixture simulating a collection of
+  legal documents is doing its job, and the two checks above already say what
+  a fixture must not carry — a real party, a real filename.
+
+`_PENDING` names modules that still hold a leak this check would fail on,
+each with what it would take to clear it. It is not an amnesty: a pending
+module that no longer holds one fails the suite, so an entry cannot outlive
+what it excuses.
 """
 
 from __future__ import annotations
@@ -57,6 +81,73 @@ _BARE_SERIAL = re.compile(r'"(\d{6,}\.md)"')
 _CAPTION = re.compile(
     r"\b((?:[A-Z][A-Za-z.]+\s+){0,3}[A-Z][A-Za-z.]+)\s+v\.?\s+"
     r"([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,3})\b")
+
+# ── a deployment's chosen vocabulary ─────────────────────────────────────────
+
+APP = BACKEND / "app"
+
+# Relationship-definition names one deployment chose. An engine that matches
+# these is an engine that works for that deployment and silently does nothing
+# for every other one: `supersedes` and `is_full_text_of` were matched by
+# literal name in the superseded-source check, and the tier was found by
+# walking names beginning `ranks_higher_than`. What replaced both is
+# `spec.relationship_roles` in the package — the deployment says which of its
+# relations mean what, and the engine reads the role.
+_RELATIONSHIP_NAMES = (
+    "is_full_text_of", "ranks_higher_than", "supersedes", "appealed_in",
+    "issued_by", "in_jurisdiction", "cites_legal_instrument",
+    "book_cites_decision", "article_review_cites_decision",
+)
+
+# Document-class and entity-type names one deployment chose. A class name in
+# engine code is a rule that only fires for the collection that happens to use
+# that spelling.
+_CLASS_NAMES = (
+    "Regulatory Decision", "Court Decision", "Bulletin article",
+    "Conference summary", "Competition Authority", "Competition Decision",
+    "Legal Instrument", "Commentary Source",
+)
+
+# Terms that cannot be anything but knowledge about one kind of corpus. Kept
+# to a handful: "court", "decision" and "authority" are ordinary English and
+# banning them would flag the sentence you are reading, which is how a guard
+# gets switched off.
+_DOMAIN_TERMS = ("case law", "case-law", "jurisprudence", "antitrust", "cartel")
+
+# Names are matched as written and terms are not. A class is a proper name,
+# so `Court Decision` is the deployment's and `a court decision` is English —
+# matching the first case-insensitively flagged three ordinary sentences, and
+# that is the way to a guard nobody keeps.
+_VOCABULARY = re.compile(
+    "|".join(re.escape(t) for t in _RELATIONSHIP_NAMES + _CLASS_NAMES)
+    + "|(?i:" + "|".join(re.escape(t) for t in _DOMAIN_TERMS) + ")")
+
+# Where a deployment's vocabulary is allowed to be named: the schema that
+# defines the declaration block, the importer that writes it, and the settings
+# that read it. Relative to `app/`.
+_CONFIG_LAYER = frozenset({
+    "config.py", "schemas/config.py", "schemas/package.py",
+    "services/package.py",
+})
+
+# Modules that still key on a deployment's vocabulary, with what clearing each
+# one needs. Every entry is a finding, not an exception — see the staleness
+# check below, which fails the moment an entry stops being true.
+_PENDING = {
+    "services/ingestion_oneshot.py":
+        "CLASS_RULES maps filename patterns to document-class names, and the "
+        "entity prompt names kinds of entity by example. Needs the class to "
+        "declare its own filename patterns and the prompt to be built from "
+        "the declared entity types.",
+    "services/citation_adjudicate.py":
+        "_DEFAULT_DEFS lists five relationship names as the default set to "
+        "adjudicate. Needs a structural default (definitions with unresolved "
+        "rows) or no default at all.",
+    "answer_rubric.py":
+        "_KIND_WORDS classifies an authorities-section heading by legal "
+        "vocabulary. Needs the class's own name, which the rubric already "
+        "has elsewhere.",
+}
 
 
 def _sources():
@@ -98,6 +189,67 @@ def test_no_case_caption_names_a_real_party():
     assert not bad, (
         "these read as a real case caption; a fixture wants an invented "
         "party:\n  " + "\n  ".join(bad))
+
+
+def _engine_modules(include_pending: bool = False):
+    """Every engine module this check covers, as (relative path, lines).
+
+    Alembic versions are excluded: a migration is a record of what was done on
+    a date, and editing one to change its prose would change a file that has
+    already run everywhere.
+    """
+    for f in sorted(APP.rglob("*.py")):
+        rel = f.relative_to(APP).as_posix()
+        if rel.startswith("alembic/") or rel in _CONFIG_LAYER:
+            continue
+        if not include_pending and rel in _PENDING:
+            continue
+        yield rel, f.read_text(encoding="utf8").splitlines()
+
+
+def test_no_engine_module_names_a_deployments_vocabulary():
+    """Engine behaviour keyed on a name a deployment chose works for that
+    deployment and silently does nothing for any other. The declaration goes
+    in the package; the engine reads the role."""
+    bad = []
+    for rel, lines in _engine_modules():
+        for n, line in enumerate(lines, 1):
+            for m in _VOCABULARY.finditer(line):
+                bad.append(f"app/{rel}:{n}: {m.group(0)}")
+    assert not bad, (
+        "these name a deployment's vocabulary in engine code; declare it in "
+        "the package (spec.relationship_roles for a relationship's meaning) "
+        "and read the declaration instead:\n  " + "\n  ".join(bad))
+
+
+def test_the_pending_list_names_only_modules_that_are_still_dirty():
+    """An exemption that outlives what it excuses is how a guard rots. A
+    pending module with nothing left to find must leave the list."""
+    stale = []
+    for rel in sorted(_PENDING):
+        path = APP / rel
+        if not path.exists():
+            stale.append(f"{rel}: no such module")
+            continue
+        if not _VOCABULARY.search(path.read_text(encoding="utf8")):
+            stale.append(f"{rel}: clean now")
+    assert not stale, (
+        "_PENDING names modules that no longer hold a finding; remove "
+        "them:\n  " + "\n  ".join(stale))
+
+
+def test_the_vocabulary_check_can_see_an_offender():
+    """A check that matches nothing cannot be told from a clean tree. The
+    pattern is exercised against the two shapes it exists for and against
+    prose that must not trip it."""
+    assert _VOCABULARY.search("WHERE rd.name IN ('is_full_text_of')")
+    assert _VOCABULARY.search("path = 'issued_by/(^ranks_higher_than_court)*'")
+    assert _VOCABULARY.search('CLASS_RULES = [(r"^x", "Regulatory Decision")]')
+    assert _VOCABULARY.search("settled case-law says")
+    for ok in ("the court held", "a decision of the authority",
+               "superseded by a later source", "the full text of the subject",
+               "jurisdiction_note", "the issuing body"):
+        assert not _VOCABULARY.search(ok), ok
 
 
 def test_the_checks_can_see_an_offender():

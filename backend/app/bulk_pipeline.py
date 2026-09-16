@@ -374,6 +374,58 @@ async def await_dependency(label: str, op, *, pre_send_only: bool = False,
         return result
 
 
+# ── submission pacing: don't cause the burst in the first place ─────────────
+# Second finding, 16 Sep: the [Errno -5] bursts are not only a sleeping
+# laptop. Every container resolves the provider host correctly and a single
+# one-prompt submission succeeds immediately — but three workers each firing
+# ~10 chunk submissions back to back make the platform resolve the provider
+# host many times at once, and a burst of simultaneous lookups intermittently
+# fails inside the container. Waiting (above) survives the symptom; pacing
+# removes the cause.
+#
+# One submission in flight per process, and at least a five-second gap after
+# each one finishes. A ten-chunk round therefore costs at most ~45s more
+# against a provider turnaround measured in minutes to hours — under a
+# percent — and the platform's uploads never resolve in a thundering herd.
+# The pacing is per-process by construction: three workers still submit three
+# times as often, which is ~1 submission/1.7s rather than a burst of ten.
+SUBMIT_CONCURRENCY = int(os.environ.get("BULK_SUBMIT_CONCURRENCY", "1"))
+SUBMIT_STAGGER_SECONDS = float(
+    os.environ.get("BULK_SUBMIT_STAGGER_SECONDS", "5"))
+
+_submit_gate: tuple[object, asyncio.Semaphore] | None = None
+_last_submit_at: float = 0.0
+
+
+def _submit_gate_for_loop() -> asyncio.Semaphore:
+    global _submit_gate
+    loop = asyncio.get_running_loop()
+    if _submit_gate is None or _submit_gate[0] is not loop:
+        _submit_gate = (loop, asyncio.Semaphore(max(SUBMIT_CONCURRENCY, 1)))
+    return _submit_gate[1]
+
+
+async def paced_submit(op):
+    """Run one submission, bounded and spaced process-wide.
+
+    The gap is measured from the END of the previous submission: a batch POST
+    carries up to SUBMIT_MAX prompts and the platform's uploads run while it
+    is in flight, so spacing from its completion is what actually separates
+    two bursts of name resolution.
+    """
+    global _last_submit_at
+    async with _submit_gate_for_loop():
+        gap = SUBMIT_STAGGER_SECONDS - (time.monotonic() - _last_submit_at)
+        if gap > 0:
+            log.debug("submission pacing: waiting %.1fs before the next POST",
+                      gap)
+            await asyncio.sleep(gap)
+        try:
+            return await op()
+        finally:
+            _last_submit_at = time.monotonic()
+
+
 def group_outage(errors: list[str], group_size: int) -> bool:
     """Is a group of per-document failures an outage, or just failures?
 
@@ -547,11 +599,12 @@ class BatchClient:
                     # The wait sits INSIDE the attempt: an unreachable
                     # provider pauses here and spends none of the six
                     # attempts, which exist for refusals with a retry (the
-                    # Google 429 window below), not for outages.
+                    # Google 429 window below), not for outages. Every POST,
+                    # first try or retry, goes through the pacer.
                     sub = await await_dependency(
                         f"{round_key} submit chunk {idx}",
-                        lambda chunk=chunk: self._post_batch(
-                            agent, round_key, chunk),
+                        lambda chunk=chunk: paced_submit(
+                            lambda: self._post_batch(agent, round_key, chunk)),
                         pre_send_only=True,
                     )
                     while len(rd["chunks"]) <= idx:

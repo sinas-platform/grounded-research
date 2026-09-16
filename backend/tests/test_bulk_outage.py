@@ -5,7 +5,7 @@ evening) had one shape: a round in flight lost the provider (and its database
 connections), spent its six submit attempts inside the outage, and raised.
 These tests hold the line on the four things that fix must keep true — the
 wait, the fast failure for a real refusal, the untouched checkpoint, and one
-log line per outage.
+log line per outage — plus the pacing that stops causing the burst.
 """
 
 import asyncio
@@ -31,6 +31,7 @@ def _fast_and_clean(monkeypatch):
     bp._OPEN_OUTAGES.clear()
     monkeypatch.setattr(bp, "OUTAGE_BACKOFF_START", 0.01)
     monkeypatch.setattr(bp, "OUTAGE_BACKOFF_MAX", 0.01)
+    monkeypatch.setattr(bp, "SUBMIT_STAGGER_SECONDS", 0.0)
     monkeypatch.setattr(bp, "POLL_SECONDS", 0.0)
     monkeypatch.setattr(bp, "SUBMIT_MAX", 1)
     yield
@@ -281,3 +282,29 @@ async def test_a_pause_never_resubmits_and_leaves_the_checkpoint_alone(
     assert replies == ["reply-for-chat-0"]
     assert resumed_calls["post"] == 0
     assert json.loads((tmp_path / "batches.json").read_text()) == state
+
+
+# ── the burst ───────────────────────────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_submissions_are_spaced_and_never_overlap(tmp_path,
+                                                        monkeypatch):
+    """A round of many chunks must not fire many simultaneous uploads: that
+    burst of name resolutions is what fails inside the container."""
+    monkeypatch.setattr(bp, "SUBMIT_STAGGER_SECONDS", 0.05)
+    starts: list[float] = []
+    ends: list[float] = []
+
+    async def post(agent, round_key, chunk):
+        starts.append(asyncio.get_running_loop().time())
+        await asyncio.sleep(0.01)
+        ends.append(asyncio.get_running_loop().time())
+        return {"batch_id": f"b{len(starts)}", "chat_ids": [f"c{len(starts)}"]}
+
+    client, _ = _client(tmp_path, [_ok(0)])
+    client._post_batch = post
+    await client.run_round("extract-front", "agent", ["p0", "p1", "p2"])
+
+    assert len(starts) == 3
+    for i in range(1, 3):
+        assert starts[i] >= ends[i - 1], "submissions overlapped"
+        assert starts[i] - ends[i - 1] >= 0.04, "submissions were not spaced"

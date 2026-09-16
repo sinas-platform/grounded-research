@@ -45,6 +45,16 @@ the first try and is never absorbed by the wait.
   waits for an unreachable dependency before giving up. Past it the process
   exits and the job resumes from `batches.json` on the next start —
   submitted batches are polled, never resubmitted.
+- `BULK_SUBMIT_CONCURRENCY` (default `1`) and
+  `BULK_SUBMIT_STAGGER_SECONDS` (default `5`): how fast one run may fire
+  submissions. The `[Errno -5] No address associated with hostname` bursts
+  also happen with every host resolving fine — several workers submitting
+  chunks back to back make the platform resolve the provider host many times
+  at once, and some of those lookups fail. One submission in flight with a
+  five-second gap after each one removes that burst. The pacing is
+  per-process, so N workers still submit N times as often — with three
+  workers that is roughly one submission every 1.7s instead of a burst of
+  ten; raise the stagger if the bursts persist, never the concurrency.
 
 ## Completeness gate (run before ANY question batch)
 

@@ -20,11 +20,21 @@ from sqlalchemy import Select, func, literal_column, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models import Document, DocumentClassProperty, PropertyValue
+from app.models.config import DocumentClass
 from app.services.answer_structure import unwrap
 
 
 def document_title_subquery() -> Select:
-    """Correlated scalar subquery: the document's extracted title, or NULL.
+    """Correlated scalar subquery: the document's name property, or NULL.
+
+    WHICH property holds the name is the class's to say. This matched the
+    literal property name ``"title"``, so a deployment whose classes call it
+    anything else — ``heading``, ``subject``, ``titre`` — served the storage
+    filename on every reader surface and had nothing to say why. The class
+    already declares ``name_property`` for exactly this ("the property
+    holding the document's name, for claims that name a source in prose
+    rather than by its identifier"); it is read here instead. A class that
+    declares none has no name property, and NULL is the honest answer.
 
     Property values are stored either wrapped (``{"_": "The title"}``) or as
     a bare JSON scalar, so both shapes are coalesced — same treatment the
@@ -42,8 +52,15 @@ def document_title_subquery() -> Select:
             DocumentClassProperty,
             DocumentClassProperty.id == PropertyValue.property_id,
         )
+        .join(
+            DocumentClass,
+            DocumentClass.id == DocumentClassProperty.document_class_id,
+        )
         .where(PropertyValue.document_id == Document.id)
-        .where(DocumentClassProperty.name == "title")
+        # The property this document's OWN class names, not a property that
+        # happens to share a name with another class's.
+        .where(DocumentClass.id == Document.document_class_id)
+        .where(DocumentClassProperty.name == DocumentClass.name_property)
         # A document holds one title value today, but LIMIT 1 without an
         # order would hand back an arbitrary row the day a re-ingestion
         # leaves two. Newest wins, id as the tiebreak, so the identity an

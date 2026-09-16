@@ -182,3 +182,27 @@ def test_the_write_threshold_still_decides_hint_from_assignment():
     maybe = one.classify_by_rules("maybe-1.md", rules)
     assert sure[1] >= one.RULE_WRITE_CONFIDENCE
     assert maybe[1] < one.RULE_WRITE_CONFIDENCE
+
+
+# ── and which property holds a document's name ───────────────────────────────
+
+def test_the_title_subquery_reads_the_class_s_declared_name_property():
+    """It matched the literal property name `title`, so a deployment whose
+    classes call it `heading`, `subject` or `titre` served the storage
+    filename on every reader surface — the API document list, the results
+    list, the rendered answer's source lines — with nothing saying why. The
+    class already declares `name_property` for exactly this."""
+    from sqlalchemy import select
+
+    from app.models import Document
+    from app.services.document_identity import document_title_subquery
+
+    sql = str(select(Document.id, document_title_subquery()))
+    assert "document_class_property.name = document_class.name_property" in sql
+    assert '"title"' not in sql and "'title'" not in sql
+    # and it is the document's OWN class, not any class with a property of
+    # that name — two classes may both declare one and they are different
+    # properties.
+    assert "document_class.id = document.document_class_id" in sql
+    # still correlated on the document, or every row gets the same title
+    assert "property_value.document_id = document.id" in sql

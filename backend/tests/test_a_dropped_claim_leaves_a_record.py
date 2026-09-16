@@ -35,7 +35,7 @@ def test_a_claim_that_lost_only_its_text_says_so():
         "rationale": "Sets out the deadline the question asks about.",
         "evidence": [{"filename": "a.md", "line_from": 3, "line_to": 9},
                      {"filename": "b.md"}],
-        "type": "legal_principle",
+        "type": "rule",
     })
     assert rec["carried"] == ["evidence", "rationale", "type"]
     assert rec["rationale"].startswith("Sets out the deadline")

@@ -60,11 +60,45 @@ HEADING_MAX_WORDS = 12
 SECTIONS = ("conclusion", "analysis", "authority")
 #: Render order of the sections; a claim with no section sorts last.
 _SECTION_RANK = {s: i for i, s in enumerate(SECTIONS)}
-#: claim_type's values, plus the three the structure adds: a test stated as
-#: conditions, a label, and an inference — a reasoning step that rests on
-#: other claims rather than on a passage.
-CLAIM_KINDS = ("legal_principle", "factual", "procedural", "conclusion",
+#: What a claim DOES in the answer. Six kinds say how the claim stands to
+#: its source — it states a general proposition the source lays down
+#: (`rule`), applies one to the matter at hand (`application`), reports
+#: something that happened or is the case (`fact`), reports how a process ran
+#: (`procedure`), reasons from other claims (`inference`), or answers the
+#: question (`conclusion`) — plus `abstention`, which says the sources do not
+#: answer it. Two more are structural rather than evidential: `test`, a rule
+#: stated as ordered conditions, and `label`, which only says what a source
+#: is.
+#:
+#: These are the ENGINE's words, not a deployment's. The first three used to
+#: be `legal_principle`, `factual` and `procedural`, which made the engine's
+#: stored vocabulary the property of one kind of corpus: an engine over
+#: maintenance reports or clinical guidance has rules and applications and
+#: facts, and nothing it would call a legal principle. A deployment that
+#: wants its readers to see its own words for these renames them where it
+#: renders, which is the only place the word is read by a person — see
+#: `CLAIM_KIND_GLOSS`, the wording the drafter is given.
+CLAIM_KINDS = ("rule", "application", "fact", "procedure", "conclusion",
                "abstention", "test", "label", "inference")
+#: The default when the drafter names no kind, or names one the contract does
+#: not have. A claim asserting something a source lays down is the ordinary
+#: case, and the one that costs least when it is wrong: it lands in the
+#: analysis section, which is where an unclassified claim belongs.
+DEFAULT_CLAIM_KIND = "rule"
+#: What each kind is, in one clause — the words the drafting contract uses
+#: and the only place these names are explained. Kept beside the tuple so a
+#: kind cannot be added without saying what it means.
+CLAIM_KIND_GLOSS: dict[str, str] = {
+    "rule": "a general proposition the source lays down",
+    "application": "that proposition applied to the matter at hand",
+    "fact": "something the source reports as having happened or being so",
+    "procedure": "how a process ran — who did what, when, before whom",
+    "conclusion": "the answer to the question, or to one part of it",
+    "abstention": "that the sources do not answer the question",
+    "test": "a rule stated as two or more ordered conditions",
+    "label": "what a source is, said about the source itself",
+    "inference": "a step that reasons from other claims, not from a passage",
+}
 #: Kinds that may stand without a span of their own, resting on the claims
 #: they follow from. An abstention rests on nothing, by design.
 DERIVED_KINDS = ("inference", "conclusion")
@@ -302,14 +336,15 @@ def normalise_claim(c: dict, parts: list[dict]) -> dict | None:
     text = str(c.get("text") or "").strip()
     if not text:
         return None
-    kind = str(c.get("kind") or c.get("type") or "legal_principle").strip().lower()
+    kind = str(c.get("kind") or c.get("type")
+               or DEFAULT_CLAIM_KIND).strip().lower()
     if kind not in CLAIM_KINDS:
-        kind = "legal_principle"
+        kind = DEFAULT_CLAIM_KIND
     idx = part_index_of(c.get("part"), len(parts))
     label = parts[idx]["label"] if idx is not None else None
     test = normalise_test(raw_test(c)) if kind == "test" else None
     if kind == "test" and test is None:
-        kind = "legal_principle"
+        kind = DEFAULT_CLAIM_KIND
     return {
         "claim_text": text[:4000],
         "claim_type": _claim_type_of(kind),
@@ -439,10 +474,12 @@ def inference_gaps(claims: list[dict]) -> list[str]:
 
 
 def _claim_type_of(kind: str) -> str:
-    """claim_type keeps its old vocabulary for the readers that have it; the
-    new kinds map onto the nearest old value."""
-    return {"test": "legal_principle", "label": "factual",
-            "inference": "legal_principle"}.get(kind, kind)
+    """`claim_type` is the older, coarser column several readers still have.
+    The three structural kinds have no claim_type of their own and take the
+    evidential kind nearest them; everything else is the kind itself. Both
+    columns now carry the same vocabulary — see `CLAIM_KINDS`."""
+    return {"test": "rule", "label": "fact",
+            "inference": "rule"}.get(kind, kind)
 
 
 def _note(raw: Any, cap: int) -> str | None:

@@ -2167,6 +2167,22 @@ RETRY_CLAIM_FRACTION = 0.5
 RETRY_MIN_CLAIMS = 4
 
 
+#: The kinds a drafter may choose, as the contract prints them, built from
+#: the taxonomy rather than spelled out beside it: the three schemas below
+#: listed the values by hand and drifted apart from `CLAIM_KINDS` twice.
+#: `abstention` is deliberately not offered — a drafter that cannot answer
+#: says so through the refusal path, not by writing a claim.
+_KIND_ALTERNATIVES = "|".join(
+    k for k in answer_structure.CLAIM_KINDS if k != "abstention")
+#: What each of those words means, once, in the brief. The names are the
+#: engine's and say nothing about any one corpus, so a drafter that has not
+#: been told what they mean will guess from its own domain — which is how
+#: `factual` collected everything the model was unsure of.
+_KIND_GLOSS_BLOCK = "\n".join(
+    f'- "{k}": {answer_structure.CLAIM_KIND_GLOSS[k]}'
+    for k in answer_structure.CLAIM_KINDS if k != "abstention")
+
+
 #: The shape the drafter replies in. Six fields it used to author are gone:
 #: `section`, which follows from `kind`; `authority_label`,
 #: `jurisdiction_note` and `currency_note`, which follow from the cited
@@ -2177,7 +2193,7 @@ RETRY_MIN_CLAIMS = 4
 _DRAFT_SCHEMA = (
     '{"claims": [{"n": <1, 2, ...>, "text": "<claim, one sentence>", '
     '"part": <part number or null>, "kind": '
-    '"legal_principle|factual|procedural|conclusion|test|label|inference", '
+    f'"{_KIND_ALTERNATIVES}", '
     '"follows_from": [<n of each claim this one reasons from; required '
     'for inference and conclusion claims>], '
     '"rationale": "<why this claim rests on this source>", '
@@ -2194,8 +2210,7 @@ _DRAFT_SCHEMA = (
 #: The shape a correction comes back in.
 _PATCH_SCHEMA = (
     '{"revise": [{"seq": <int>, "text": "<claim>", '
-    '"part": <part number or null>, "kind": "legal_principle|factual|'
-    'procedural|conclusion|test|label|inference", '
+    f'"part": <part number or null>, "kind": "{_KIND_ALTERNATIVES}", '
     '"follows_from": [<seq>, ...], '
     '"rationale": "<why this claim rests on this source>", '
     '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>, '
@@ -2211,8 +2226,7 @@ _PATCH_SCHEMA = (
     '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
     'its passages, this OWED document does not carry any point this '
     'answer needs>"}], '
-    '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
-    'procedural|conclusion|test|label|inference", '
+    f'"add": [{{"text": "<claim>", "type": "{_KIND_ALTERNATIVES}", '
     '"part": <part number or null>, "follows_from": [<seq>, ...], '
     '"test_name": "<for a test claim only>", '
     '"conditions": [<for a test claim only>{"text", "cumulative", '
@@ -2931,6 +2945,9 @@ def _structure_rules(parts: list[dict], cap: int) -> str:
         "a rule on its own: a rule rests on a source with no such note, or is "
         "stated as what the labelled source says. You never write the label "
         "out — it is printed for you.\n"
+        "\nWHAT EACH KIND MEANS (the kind says how the claim stands to its "
+        "source, nothing about the subject matter):\n"
+        + _KIND_GLOSS_BLOCK + "\n"
         + (("PARTS OF THE QUESTION:\n" + answer_structure.parts_block(parts) + "\n")
            if parts else "")
     )
@@ -2960,8 +2977,8 @@ async def _argument_plan(
             "Design the argument for answering the question below, using ONLY "
             "the documents listed. Reply ONLY JSON:\n"
             '{"claims": [{"n": 1, "part": <part number, or null for the overall '
-            'conclusion>, "kind": "<conclusion|rule|application|inference|test|'
-            'authority>", "establishes": "<one sentence: what this '
+            'conclusion>, "kind": "<' + _KIND_ALTERNATIVES +
+            '>", "establishes": "<one sentence: what this '
             'claim must establish>", "anchors": ["<filename>", ...], '
             '"hint": "<which part of the anchor documents to read, from their '
             'TOCs>"}]}\n'
@@ -5956,8 +5973,10 @@ async def _revise_answer(
                                   claim_text=item["text"][:4000],
                                   rationale=(item.get("rationale") or "")[:2000]
                                   or None,
-                                  claim_type=str(item.get("type")
-                                                 or "legal_principle")[:50])
+                                  claim_type=str(
+                                      item.get("type")
+                                      or answer_structure.DEFAULT_CLAIM_KIND
+                                  )[:50])
                 session.add(row)
                 await session.flush()
                 # An added claim lands in its section and part, positioned

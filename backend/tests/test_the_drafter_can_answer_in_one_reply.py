@@ -67,7 +67,7 @@ REPLY = {
          "follows_from": [3], "rationale": "Answers part 1.",
          "evidence": []},
         {"n": 3, "text": "The governing rule is stated in the decision.",
-         "part": 1, "kind": "legal_principle", "rationale": "The rule.",
+         "part": 1, "kind": "rule", "rationale": "The rule.",
          "evidence": [{"filename": "a.md", "line_from": 16, "line_to": 16,
                        "locator": "44"}]},
         {"n": 4, "text": "The test has two limbs.", "part": 2, "kind": "test",
@@ -115,7 +115,7 @@ def test_the_section_follows_from_the_kind_without_being_asked_for():
     assert st.section_of("conclusion") == "conclusion"
     assert st.section_of("abstention") == "conclusion"
     assert st.section_of("label") == "authority"
-    for kind in ("legal_principle", "factual", "procedural", "test",
+    for kind in ("rule", "application", "fact", "procedure", "test",
                  "inference"):
         assert st.section_of(kind) == "analysis", kind
     # An unknown kind is analysis, not a crash and not a conclusion.
@@ -443,3 +443,59 @@ def test_the_reduced_ask_keeps_a_floor_under_the_claim_count():
     smaller = qr._shorter_draft_ask(12)
     assert "The brief has not changed" in smaller
     assert qr._DRAFT_SCHEMA in smaller
+
+
+# ── the taxonomy says how a claim stands to its source, not what it is about ──
+
+def test_no_claim_kind_names_a_subject_matter():
+    """`legal_principle`, `factual` and `procedural` put one kind of corpus
+    into the engine's own stored enumeration: an engine over maintenance
+    reports has rules and facts and nothing it would call a legal principle.
+    Every kind must name a RELATION between the claim and its source."""
+    assert set(st.CLAIM_KINDS) == {
+        "rule", "application", "fact", "procedure", "conclusion",
+        "abstention", "test", "label", "inference"}
+    banned = ("legal", "law", "court", "case", "judgment", "statutory")
+    for kind in st.CLAIM_KINDS:
+        assert not any(w in kind for w in banned), kind
+
+
+def test_every_kind_is_explained_where_it_is_named():
+    """A word the contract offers and never defines is a word the model
+    fills in from its own domain, which is how `factual` collected every
+    claim the drafter was unsure of."""
+    assert set(st.CLAIM_KIND_GLOSS) == set(st.CLAIM_KINDS)
+    assert all(st.CLAIM_KIND_GLOSS[k].strip() for k in st.CLAIM_KINDS)
+
+
+def test_the_contract_the_drafter_gets_is_built_from_the_taxonomy():
+    """Three prompt schemas used to list the kinds by hand. A kind added to
+    the tuple and not to the schema is a kind no drafter can choose."""
+    offered = set(qr._KIND_ALTERNATIVES.split("|"))
+    assert offered == set(st.CLAIM_KINDS) - {"abstention"}
+    for schema in (qr._DRAFT_SCHEMA, qr._PATCH_SCHEMA):
+        assert qr._KIND_ALTERNATIVES in schema
+    for kind in offered:
+        assert f'"{kind}": {st.CLAIM_KIND_GLOSS[kind]}' in qr._KIND_GLOSS_BLOCK
+
+
+def test_a_claim_with_no_kind_becomes_a_rule_and_lands_in_the_analysis():
+    """The default is the ordinary case and the one that costs least when it
+    is wrong. A kind the contract does not have takes the same route."""
+    assert st.DEFAULT_CLAIM_KIND in st.CLAIM_KINDS
+    for given in ({}, {"kind": "legal_principle"}, {"kind": "whatever"}):
+        row = st.normalise_claim({"text": "A sentence.", **given}, PARTS)
+        assert row["claim_kind"] == st.DEFAULT_CLAIM_KIND == "rule"
+        assert row["section"] == "analysis"
+
+
+def test_both_stored_columns_carry_the_same_words():
+    """`claim_type` is the older, coarser column. It held the same three
+    domain words, so it moves with the kinds rather than staying behind as
+    the place the old vocabulary survives."""
+    for kind in st.CLAIM_KINDS:
+        assert st._claim_type_of(kind) in st.CLAIM_KINDS
+    # the three structural kinds have no claim_type of their own
+    assert st._claim_type_of("test") == "rule"
+    assert st._claim_type_of("label") == "fact"
+    assert st._claim_type_of("inference") == "rule"

@@ -33,7 +33,7 @@ def _claim(answer_id, sequence):
         answer_id=answer_id,
         sequence=sequence,
         claim_text=f"claim {sequence}",
-        claim_type="factual",
+        claim_type="fact",
     )
     row.created_at = _NOW
     row.updated_at = _NOW

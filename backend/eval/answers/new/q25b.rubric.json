@@ -1,0 +1,256 @@
+{
+ "question": "Does legal professional privilege in EU competition law cover advice from a company's own in-house lawyers? How have the courts justified where the line falls, and what does that mean in practice during an inspection?",
+ "question_parts": [
+  "Does legal professional privilege in EU competition law cover advice from a company's own in-house lawyers?",
+  "How have the courts justified where the line falls?",
+  "What does that mean in practice during an inspection?"
+ ],
+ "criteria": {
+  "conclusion_first": {
+   "score": 2,
+   "reason": "Conclusion section addresses coverage (no in-house), justification (independent lawyer test) and practical sealed-envelope consequence before analysis."
+  },
+  "parts_answered": {
+   "score": 2,
+   "reason": "Part 1 answered in claims on AM&S scope, part 2 in claims on economic dependence rationale, part 3 in claims 5-7 on sealed-envelope procedure."
+  },
+  "tests_as_conditions": {
+   "score": 2,
+   "reason": "AM&S conditions are set out as an ordered, cumulative two-part list under claim [2]."
+  },
+  "authorities_labelled": {
+   "score": 2,
+   "reason": "Commentary claims [2],[3],[4],[7] are explicitly tagged '[commentary]' and no rule rests on them alone since AM&S [1] and Akzo cases [5][6] anchor the rules."
+  },
+  "citations_complete": {
+   "score": 1,
+   "reason": "Markers [2] and [7] lack case/instrument numbers or full dates, per incomplete_authority_markers, though [1],[5],[6] are complete."
+  },
+  "no_duplicate_authorities": {
+   "score": 2,
+   "reason": "No repeated authorities or near-duplicate claims found across the nine claims."
+  },
+  "no_off_topic": {
+   "score": 2,
+   "reason": "Every claim, including procedural detail in [5]-[7], directly supports one of the three question parts."
+  },
+  "no_contradictions": {
+   "score": 2,
+   "reason": "Claims on independence, AM&S rationale, and sealed-envelope steps are mutually consistent without unresolved tension."
+  },
+  "currency_flagged": {
+   "score": 2,
+   "reason": "Answer is dated 'as at 2025-11-28' and notes ongoing Commission policy (claim 3), with no stale or foreign-jurisdiction material left unflagged."
+  }
+ },
+ "parts_answered": [
+  {
+   "part": "Does legal professional privilege in EU competition law cover advice from a company's own in-house lawyers?",
+   "score": 2,
+   "reason": "Claims 1 and the AM&S-conditions claim [2] substantively confirm exclusion of in-house lawyers."
+  },
+  {
+   "part": "How have the courts justified where the line falls?",
+   "score": 2,
+   "reason": "Claims [1] and [4] give the independence/economic-dependence rationale from AM&S as explained by commentary."
+  },
+  {
+   "part": "What does that mean in practice during an inspection?",
+   "score": 2,
+   "reason": "Claims [5], [6], [7] detail the sealed-envelope procedure, tacit rejection, and judicial review timing."
+  }
+ ],
+ "prechecks": {
+  "citations": {
+   "format": "authorities",
+   "claims": 9,
+   "authorities": 7,
+   "authorities_by_kind": {
+    "decision": 3,
+    "commentary": 4
+   },
+   "incomplete_authority_markers": [
+    2,
+    7
+   ],
+   "filename_citations": [],
+   "claims_with_citation": 5,
+   "claims_without_citation": 4,
+   "unresolved_markers": [],
+   "with_name_and_number": 3,
+   "with_date": 4,
+   "with_year_only": 0,
+   "with_ecli": 2,
+   "with_paragraph": 1,
+   "complete_citations": 4,
+   "cap": 1,
+   "per_claim": [
+    {
+     "claim": 1,
+     "markers": [
+      1
+     ],
+     "unresolved": [],
+     "kinds": [
+      "decision"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": true,
+     "para": false,
+     "complete": true
+    },
+    {
+     "claim": 2,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 3,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 4,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 5,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 6,
+     "markers": [
+      2
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary"
+     ],
+     "name": true,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 7,
+     "markers": [
+      3
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary"
+     ],
+     "name": true,
+     "number": false,
+     "date": true,
+     "year": true,
+     "ecli": false,
+     "para": false,
+     "complete": true
+    },
+    {
+     "claim": 8,
+     "markers": [
+      1,
+      4
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary",
+      "decision"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": true,
+     "para": false,
+     "complete": true
+    },
+    {
+     "claim": 9,
+     "markers": [
+      5,
+      5,
+      5,
+      5,
+      6,
+      7,
+      7,
+      7
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary",
+      "decision"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": false,
+     "para": true,
+     "complete": true
+    }
+   ]
+  },
+  "duplicates": {
+   "near_duplicate_pairs": [],
+   "authorities_cited_thrice_or_more": {},
+   "cap": 2
+  },
+  "currency": {
+   "markers": [
+    "set aside",
+    "stated as at"
+   ],
+   "dated": true
+  }
+ },
+ "total": 17,
+ "max": 18,
+ "verdict": "17/18 — A well-structured, dated answer with ordered test conditions and labelled commentary, let down only by two incompletely cited authorities.",
+ "judge": {
+  "agent": "sgr/retrieval-planner-agent"
+ }
+}

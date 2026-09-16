@@ -74,12 +74,12 @@ def _claims():
         # No label: the class these cite declares none, which is what says a
         # source carries a rule on its own.
         {"id": "c4", "sequence": 4, "section": "analysis", "part_index": 0,
-         "position": 1, "claim_kind": "legal_principle",
+         "position": 1, "claim_kind": "rule",
          "authority_tier": 1,
          "claim_text": "The deciding body held that the obligation reaches "
                        "an undertaking in the respondent's position."},
         {"id": "c5", "sequence": 5, "section": "analysis", "part_index": 0,
-         "position": 2, "claim_kind": "legal_principle",
+         "position": 2, "claim_kind": "rule",
          "authority_tier": 1,
          "claim_text": "It reasoned from the wording of the instrument."},
         {"id": "c6", "sequence": 6, "section": "analysis", "part_index": 0,
@@ -93,7 +93,7 @@ def _claims():
          "position": 5, "claim_kind": "inference", "follows_from": ["c4"],
          "claim_text": "It follows that the respondent is within reach."},
         {"id": "c8", "sequence": 8, "section": "analysis", "part_index": 1,
-         "position": 1, "claim_kind": "legal_principle",
+         "position": 1, "claim_kind": "rule",
          "authority_tier": 2,
          "currency_note": "repealed; superseded by a later instrument",
          "claim_text": "The instrument states the duty in mandatory terms."},
@@ -101,7 +101,7 @@ def _claims():
         # are the deployment's; the renderer prints them and knows nothing
         # about what they mean.
         {"id": "c9", "sequence": 9, "section": "analysis", "part_index": 1,
-         "position": 2, "claim_kind": "legal_principle",
+         "position": 2, "claim_kind": "rule",
          "authority_label": "commentary",
          "jurisdiction_note": "jurisdiction: a single state",
          "claim_text": "A commentator reads the duty the same way."},

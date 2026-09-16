@@ -424,10 +424,10 @@ CLAIMS = [
      "position": 1, "claim_kind": "conclusion",
      "claim_text": "It applies and is mandatory."},
     {"id": "c2", "sequence": 2, "section": "analysis", "part_index": 0,
-     "position": 1, "claim_kind": "legal_principle",
+     "position": 1, "claim_kind": "rule",
      "claim_text": "The duty reaches the respondent."},
     {"id": "c3", "sequence": 3, "section": "analysis", "part_index": 1,
-     "position": 1, "claim_kind": "legal_principle",
+     "position": 1, "claim_kind": "rule",
      "claim_text": "The duty is stated in mandatory terms."},
 ]
 
@@ -493,7 +493,7 @@ def test_a_note_that_is_not_a_caveat_prints_nothing():
 def test_a_reservation_still_prints_when_the_answer_has_no_parts_to_hang_it_on():
     """An answer drafted before the structure existed renders as a flat list.
     The one thing a reservation must never do is go unprinted."""
-    flat = [{"id": "c1", "sequence": 1, "claim_kind": "legal_principle",
+    flat = [{"id": "c1", "sequence": 1, "claim_kind": "rule",
              "claim_text": "The duty reaches the respondent."}]
     md = _md([_note()], claims=flat)
     assert "> **Reservation.**" in md
@@ -526,7 +526,7 @@ class _Claim:
         self.rationale = None
         self.section = "analysis"
         self.part_index = 0
-        self.claim_kind = "legal_principle"
+        self.claim_kind = "rule"
 
 
 @pytest.fixture

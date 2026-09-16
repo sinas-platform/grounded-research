@@ -514,7 +514,9 @@ class AnswerClaim(Base, TimestampMixin):
     part_label: Mapped[str | None] = mapped_column(String(300))
     #: Render order within section + part.
     position: Mapped[int | None] = mapped_column(Integer)
-    #: claim_type's values plus `test` and `label`.
+    #: What the claim DOES: one of `app.services.answer_structure.CLAIM_KINDS`
+    #: — the engine's own words, not a deployment's. claim_type carries the
+    #: same vocabulary, coarser by the three structural kinds.
     claim_kind: Mapped[str | None] = mapped_column(String(50))
     #: For a test: {"name", "conditions": [{"text", "cumulative"}],
     #: "source_para"} — the conditions in the order the source states them.

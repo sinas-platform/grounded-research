@@ -359,7 +359,7 @@ class _Claim:
         self.rationale = None
         self.section = "analysis"
         self.part_index = 0
-        self.claim_kind = "legal_principle"
+        self.claim_kind = "rule"
 
 
 @pytest.fixture

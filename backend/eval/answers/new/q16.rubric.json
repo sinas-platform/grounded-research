@@ -1,0 +1,257 @@
+{
+ "question": "Under what conditions must the European Commission protect personal data during an inspection? Does the GDPR apply? Must documents be sealed on request?",
+ "question_parts": [
+  "Under what conditions must the European Commission protect personal data during an inspection?",
+  "Does the GDPR apply?",
+  "Must documents be sealed on request?"
+ ],
+ "criteria": {
+  "conclusion_first": {
+   "score": 2,
+   "reason": "Opening conclusion paragraphs address data-protection conditions, GDPR applicability, and sealing (claims in Conclusion section)."
+  },
+  "parts_answered": {
+   "score": 2,
+   "reason": "Each part has substantive treatment: claims 1-2 for conditions, claim 7/Article 4(9) for GDPR, claims 8-11 for sealing."
+  },
+  "tests_as_conditions": {
+   "score": 0,
+   "reason": "The IMI 'strict legal framework and adequate safeguards' test (claim 2) is dissolved into prose rather than listed as ordered cumulative conditions."
+  },
+  "authorities_labelled": {
+   "score": 1,
+   "reason": "Commentary/AG opinion flagged in claims 4, 5, 9, but claim 4's GDPR Article 4(9) rule rests solely on a commentary book chapter."
+  },
+  "citations_complete": {
+   "score": 1,
+   "reason": "Only 4 of 11 authorities are fully complete per pre-check cap (complete_citations:4, cap:1), e.g. claims 2, 4, 9 lack full identifiers."
+  },
+  "no_duplicate_authorities": {
+   "score": 2,
+   "reason": "No repeated authorities or near-duplicate claims per pre-check."
+  },
+  "no_off_topic": {
+   "score": 2,
+   "reason": "All claims, including the Facebook Ireland orders, tie back to data protection/sealing during inspections."
+  },
+  "no_contradictions": {
+   "score": 2,
+   "reason": "Claims on data protection (claim 4) and sealing (claim 9) address distinct issues without conflicting."
+  },
+  "currency_flagged": {
+   "score": 2,
+   "reason": "Answer is dated 'as at 2026-06-03' and no superseded/other-jurisdiction sources are misused."
+  }
+ },
+ "parts_answered": [
+  {
+   "part": "Under what conditions must the European Commission protect personal data during an inspection?",
+   "score": 2,
+   "reason": "Claims 1-2 and the AG opinion (claim 5) substantively address the triggering conditions."
+  },
+  {
+   "part": "Does the GDPR apply?",
+   "score": 2,
+   "reason": "Claims 4 and 7 substantively address non-application of GDPR to Commission's inspection processing."
+  },
+  {
+   "part": "Must documents be sealed on request?",
+   "score": 2,
+   "reason": "Claims 8-11 substantively conclude sealing is a power, not an automatic right on request."
+  }
+ ],
+ "prechecks": {
+  "citations": {
+   "format": "authorities",
+   "claims": 9,
+   "authorities": 11,
+   "authorities_by_kind": {
+    "decision": 7,
+    "commentary": 3,
+    "instrument": 1
+   },
+   "incomplete_authority_markers": [
+    2,
+    4,
+    9
+   ],
+   "filename_citations": [],
+   "claims_with_citation": 5,
+   "claims_without_citation": 4,
+   "unresolved_markers": [],
+   "with_name_and_number": 5,
+   "with_date": 4,
+   "with_year_only": 0,
+   "with_ecli": 2,
+   "with_paragraph": 2,
+   "complete_citations": 4,
+   "cap": 1,
+   "per_claim": [
+    {
+     "claim": 1,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 2,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 3,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 4,
+     "markers": [],
+     "unresolved": [],
+     "kinds": [],
+     "name": false,
+     "number": false,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 5,
+     "markers": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary",
+      "decision",
+      "instrument"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": false,
+     "para": true,
+     "complete": true
+    },
+    {
+     "claim": 6,
+     "markers": [
+      4
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary"
+     ],
+     "name": true,
+     "number": true,
+     "date": false,
+     "year": false,
+     "ecli": false,
+     "para": false,
+     "complete": false
+    },
+    {
+     "claim": 7,
+     "markers": [
+      7
+     ],
+     "unresolved": [],
+     "kinds": [
+      "decision"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": true,
+     "para": false,
+     "complete": true
+    },
+    {
+     "claim": 8,
+     "markers": [
+      8,
+      9
+     ],
+     "unresolved": [],
+     "kinds": [
+      "commentary",
+      "decision"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": true,
+     "para": false,
+     "complete": true
+    },
+    {
+     "claim": 9,
+     "markers": [
+      10,
+      11
+     ],
+     "unresolved": [],
+     "kinds": [
+      "decision"
+     ],
+     "name": true,
+     "number": true,
+     "date": true,
+     "year": true,
+     "ecli": false,
+     "para": true,
+     "complete": true
+    }
+   ]
+  },
+  "duplicates": {
+   "near_duplicate_pairs": [],
+   "authorities_cited_thrice_or_more": {},
+   "cap": 2
+  },
+  "currency": {
+   "markers": [
+    "stated as at"
+   ],
+   "dated": true
+  }
+ },
+ "total": 14,
+ "max": 18,
+ "verdict": "14/18 — Well-structured and dated answer covering all parts, but the key Charter test is not itemised and citation completeness is capped by missing identifiers.",
+ "judge": {
+  "agent": "sgr/retrieval-planner-agent"
+ }
+}

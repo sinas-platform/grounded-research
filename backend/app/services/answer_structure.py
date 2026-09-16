@@ -721,6 +721,29 @@ def issuing_body_of(annotations: dict | None, name: str | None) -> str | None:
     return str(v) if v not in (None, "") else None
 
 
+#: Month names as the stored values spell them, so a date a source wrote in
+#: words can be read. Five languages because the corpus holds all five; a
+#: month this does not know leaves the value unparsed rather than guessed.
+_MONTHS = {}
+for _i, _names in enumerate((
+    ("january", "januari", "janvier", "enero", "januar"),
+    ("february", "februari", "février", "fevrier", "febrero", "februar"),
+    ("march", "maart", "mars", "marzo", "märz", "marz"),
+    ("april", "avril", "abril"),
+    ("may", "mei", "mai", "mayo"),
+    ("june", "juni", "juin", "junio"),
+    ("july", "juli", "juillet", "julio"),
+    ("august", "augustus", "août", "aout", "agosto"),
+    ("september", "septembre", "septiembre"),
+    ("october", "oktober", "octobre", "octubre"),
+    ("november", "novembre", "noviembre"),
+    ("december", "dezember", "décembre", "decembre", "diciembre"),
+), start=1):
+    for _n in _names:
+        _MONTHS[_n] = _i
+        _MONTHS[_n[:3]] = _i
+
+
 def parse_date(value: Any) -> date | None:
     """A date out of a property value, or None. ISO first, then a plain
     year-month-day with any separator, then a bare year as 1 January."""
@@ -744,6 +767,32 @@ def parse_date(value: Any) -> date | None:
             return date(int(m.group(3)), int(m.group(2)), int(m.group(1)))
         except ValueError:
             return None
+    # A date the source wrote out in words — "9 March 2023", "14 November
+    # 2012", "1st October 2020". Extraction stores what the document says, so
+    # the field a class declares as its date often holds prose rather than a
+    # machine date. Left unparsed, such a document is simply dateless: in one
+    # published answer both judgments carried their date this way, neither
+    # parsed, and the closing "law stated as at" line took the date of a
+    # commentary piece eleven years older than the judgment being described.
+    # Month names only, in the languages the stored values actually use; a
+    # date this cannot read stays None rather than becoming a guess.
+    m = re.match(
+        r"(\d{1,2})(?:st|nd|rd|th)?[\s.]+([A-Za-zÀ-ÿ]+)[\s.,]+(\d{4})", s)
+    if m:
+        month = _MONTHS.get(m.group(2).lower().rstrip("."))
+        if month:
+            try:
+                return date(int(m.group(3)), month, int(m.group(1)))
+            except ValueError:
+                return None
+    m = re.match(r"([A-Za-zÀ-ÿ]+)\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})", s)
+    if m:
+        month = _MONTHS.get(m.group(1).lower().rstrip("."))
+        if month:
+            try:
+                return date(int(m.group(3)), month, int(m.group(2)))
+            except ValueError:
+                return None
     m = re.fullmatch(r"(\d{4})", s)
     if m:
         return date(int(m.group(1)), 1, 1)

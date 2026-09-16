@@ -556,3 +556,27 @@ def test_one_structured_claim_is_enough_to_make_the_answer_structured():
     md = render_markdown(_answer(), claims, [], {}).markdown
     assert "## Conclusion" in md
     assert "An older row." in md
+
+
+def test_a_date_written_in_words_is_read():
+    """Extraction stores what a document says, so the property a class
+    declares as its date often holds prose.
+
+    In one published answer both judgments carried their date as "9 March
+    2023" and "14 November 2012", neither parsed, and the closing "law stated
+    as at" line took the date of a commentary piece eleven years older than
+    the judgment it described. A date this cannot read must still be None
+    rather than a guess.
+    """
+    from app.services.answer_structure import parse_date
+
+    assert parse_date({"_": "9 March 2023"}).isoformat() == "2023-03-09"
+    assert parse_date({"_": "14 November 2012"}).isoformat() == "2012-11-14"
+    assert parse_date({"_": "1st October 2020"}).isoformat() == "2020-10-01"
+    assert parse_date({"_": "March 9, 2023"}).isoformat() == "2023-03-09"
+    # The corpus is not monolingual.
+    assert parse_date({"_": "9 mars 2023"}).isoformat() == "2023-03-09"
+    # Machine dates keep working, and nonsense stays unparsed.
+    assert parse_date({"_": "2012-11-14T00:00:00"}).isoformat() == "2012-11-14"
+    assert parse_date({"_": "the following spring"}) is None
+    assert parse_date({"_": "9 Smarch 2023"}) is None

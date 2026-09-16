@@ -161,6 +161,13 @@ class PackageDocumentClassEntry(_Strict):
     # labelled source states what it says rather than what the law is. A
     # class that declares none is unlabelled and carries rules.
     authority_label: str | None = Field(default=None, max_length=40)
+    #: Whether a claim asserting a rule on a source of this class must NAME
+    #: it in the sentence. An expert reviewer asked for this structurally:
+    #: where the source is one the field treats as authority, the claim must
+    #: identify it so a reader can look it up, and a claim that does not is
+    #: sent back. Which classes those are is the deployment's to say; the
+    #: engine holds no list.
+    naming_required: bool = False
     # How high a source of this class stands against the other classes of the
     # same deployment, as a rank: 1 stands highest, larger numbers stand
     # lower. Absent means UNRANKED, and an unranked class is inert — a source

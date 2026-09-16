@@ -37,6 +37,9 @@ class DocumentClass(Base, TimestampMixin):
     #: the words a reader needs. Null means the class needs no label, which
     #: is also what says the class may carry a rule on its own.
     authority_label: Mapped[str | None] = mapped_column(String(40))
+    #: Whether a claim asserting a rule on this class of source must name it.
+    naming_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False)
     #: How high a source of this class stands against the deployment's other
     #: classes: 1 highest, larger lower, ties allowed. NULL means unranked,
     #: and an unranked class is inert — a claim citing one neither satisfies

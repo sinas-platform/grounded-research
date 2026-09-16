@@ -324,6 +324,7 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "identifier_pattern": dc.identifier_pattern,
                 "name_property": dc.name_property,
                 "authority_label": dc.authority_label,
+                "naming_required": dc.naming_required,
                 "standing": dc.standing,
                 "declared_properties": [d.model_dump()
                                         for d in dc.declared_properties] or None,
@@ -892,6 +893,7 @@ async def export_package(
                     "identifier_pattern": dc.identifier_pattern,
                     "name_property": dc.name_property,
                     "authority_label": dc.authority_label,
+                "naming_required": dc.naming_required,
                     # The rank, round-tripped. An export that dropped it would
                     # hand back a manifest that silently unranks every class
                     # when pasted over the original — and an unranked class is

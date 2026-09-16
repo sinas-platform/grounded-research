@@ -656,8 +656,6 @@ def duplicate_feedback(pairs: list[tuple[int, int]]) -> list[str]:
 
 # ── source context ───────────────────────────────────────────────────────────
 
-_DATE_KEY = re.compile(r"date", re.IGNORECASE)
-_JURISDICTION_KEY = re.compile(r"jurisdiction|country|member_?state", re.IGNORECASE)
 
 
 def unwrap(value: Any) -> Any:
@@ -736,28 +734,40 @@ def parse_date(value: Any) -> date | None:
     return None
 
 
-def document_date(props: dict | None) -> date | None:
-    """The document's own date: the latest parsable value among properties
-    whose name mentions a date. Latest, because a decision's `date` and a
-    consolidated instrument's `date_of_effect` both count and the later is
-    the one a currency question turns on."""
-    best = None
-    for name, value in (props or {}).items():
-        if not _DATE_KEY.search(str(name)):
-            continue
-        d = parse_date(value)
-        if d and (best is None or d > best):
-            best = d
-    return best
+def document_date(
+    props: dict | None, class_name: str = "", by_class: dict | None = None
+) -> date | None:
+    """The document's own date, read from the property its class declares.
+
+    The engine used to take the latest parsable value among properties whose
+    NAME mentioned a date, which is a guess about another party's vocabulary:
+    a class calling it `issued` or `fecha` had no date at all, silently. The
+    class now says which of its properties is the date (`engine_role: date`),
+    and a class that declares none has none.
+
+    `by_class` is `declared_roles.property_names_by_class_name(..., DATE)`.
+    With no mapping — a caller that has not been given one yet — the answer is
+    None rather than a guess.
+    """
+    name = (by_class or {}).get(class_name)
+    if not name:
+        return None
+    return parse_date((props or {}).get(name))
 
 
-def jurisdiction_of(props: dict | None) -> str | None:
-    for name, value in (props or {}).items():
-        if _JURISDICTION_KEY.search(str(name)):
-            v = unwrap(value)
-            if v not in (None, ""):
-                return str(v)
-    return None
+def jurisdiction_of(
+    props: dict | None, class_name: str = "", by_class: dict | None = None
+) -> str | None:
+    """Whose law the source belongs to, from the property its class declares.
+
+    Same fault as `document_date`: the name used to be matched against
+    `jurisdiction|country|member_?state`, so any other word was invisible.
+    """
+    name = (by_class or {}).get(class_name)
+    if not name:
+        return None
+    v = unwrap((props or {}).get(name))
+    return str(v) if v not in (None, "") else None
 
 
 def currency_notes(rows: list[dict]) -> dict[str, str]:

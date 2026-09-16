@@ -73,6 +73,10 @@ class DocumentClassProperty(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
     schema: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     guidance: Mapped[str | None] = mapped_column(Text)
+    #: What this property MEANS to the engine — a date, a jurisdiction, a
+    #: status — written from the class's own declaration at import. NULL for
+    #: the normal case: a property that is the deployment's own business.
+    engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
     manual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     cardinality: Mapped[str] = mapped_column(String(10), default="one", nullable=False)  # one|many
@@ -181,6 +185,9 @@ class AnnotationDefinition(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = uuid_pk()
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
+    #: What this annotation MEANS to the engine — which source stands higher,
+    #: who issued it. NULL unless the deployment declares it.
+    engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     reduce: Mapped[dict | str] = mapped_column(JSONB, nullable=False)
     materialize: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

@@ -33,6 +33,32 @@ class _Strict(BaseModel):
 # ─────────────────────────────────────────────────────────────
 # Resource entries
 # ─────────────────────────────────────────────────────────────
+#: What a property MEANS to the engine, declared by the deployment on the
+#: property itself. The engine used to find these by matching names — a
+#: property whose name contained "date" was a date, one matching
+#: "jurisdiction|country|member_?state" was a jurisdiction, a citation was
+#: built from the first of ("case_number", "celex", "reference", "number")
+#: that existed. A deployment naming its properties anything else got no
+#: currency note, no jurisdiction note and no identifier in its citations,
+#: silently. The role says what the engine does with the value; the name
+#: stays the deployment's own.
+PROPERTY_ROLES = (
+    "date",              # when the source speaks: currency, ordering, "as at"
+    "jurisdiction",      # whose law or authority the source belongs to
+    "status",            # in force, repealed, superseded …
+    "superseded_by",     # what replaced it, when status says it was replaced
+    "alternate_identifier",  # a second citable identifier (a neutral one)
+)
+
+#: What an annotation MEANS to the engine. Same fault, same fix: the tier and
+#: the issuing body were found by the literal names "authority_tier" and
+#: "issuing_body".
+ANNOTATION_ROLES = (
+    "standing_tier",     # how high this source stands, 1 highest
+    "issuing_body",      # who issued it
+)
+
+
 class PackagePropertyEntry(_Strict):
     name: str
     description: str | None = None
@@ -42,6 +68,19 @@ class PackagePropertyEntry(_Strict):
     required: bool = False
     cardinality: Literal["one", "many"] = "one"
     schema_version: int = 1
+    #: What this property means to the engine, if anything. Absent is the
+    #: normal case: most properties are the deployment's own business.
+    engine_role: str | None = None
+
+    @model_validator(mode="after")
+    def _known_role(self):
+        if self.engine_role is not None and self.engine_role not in PROPERTY_ROLES:
+            raise ValueError(
+                f"property {self.name!r} declares engine_role "
+                f"{self.engine_role!r}; known roles are "
+                f"{', '.join(PROPERTY_ROLES)}"
+            )
+        return self
 
 
 class PackageDeclaredProperty(_Strict):
@@ -216,6 +255,24 @@ class PackageDocumentClassEntry(_Strict):
         return v
 
 
+    @model_validator(mode="after")
+    def _one_property_per_role(self):
+        """A class naming two properties for the same role would leave the
+        engine to choose at read time, which is the guessing this mechanism
+        exists to remove, so it is refused where it is written."""
+        seen: dict[str, str] = {}
+        for prop in self.properties:
+            role = getattr(prop, "engine_role", None)
+            if not role:
+                continue
+            if role in seen:
+                raise ValueError(
+                    f"class {self.name!r} declares {seen[role]!r} and "
+                    f"{prop.name!r} both as the {role!r} property"
+                )
+            seen[role] = prop.name
+        return self
+
 class PackageEntityTypeEntry(_Strict):
     name: str
     description: str | None = None
@@ -265,6 +322,8 @@ class PackageRelationshipDefinitionEntry(_Strict):
 #: Adding a role here is a change to the engine, not to a deployment: a name
 #: nothing reads would be a declaration that does nothing.
 ENGINE_ROLES = ("standing", "supersession", "full_text")
+
+
 
 
 class PackageRelationshipRoles(_Strict):
@@ -358,6 +417,19 @@ class PackageAnnotationEntry(_Strict):
     name: str
     description: str | None = None
     path: str
+    #: What this annotation means to the engine, if anything.
+    engine_role: str | None = None
+
+    @model_validator(mode="after")
+    def _known_annotation_role(self):
+        if (self.engine_role is not None
+                and self.engine_role not in ANNOTATION_ROLES):
+            raise ValueError(
+                f"annotation {self.name!r} declares engine_role "
+                f"{self.engine_role!r}; known roles are "
+                f"{', '.join(ANNOTATION_ROLES)}"
+            )
+        return self
     reduce: str | dict[str, str]
     materialize: bool = False
 

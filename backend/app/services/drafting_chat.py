@@ -335,6 +335,15 @@ def objections_block(open_points: list[dict[str, Any]]) -> str:
         'your answer to one of these, put the same id on that "drop" or '
         '"keep" entry instead and its rationale answers the request. The '
         "brief says what each of those three moves commits you to.\n"
+        "\nA REFUSAL ALSO CHANGES WHAT THE CLAIM SAYS. Refusing a request "
+        "that a proposition rest on a source of higher standing means the "
+        "higher-standing sources were opened for that point and did not "
+        "state it. A reader cannot tell that from ordinary attribution, and "
+        "a proposition the stronger sources do not carry may be mistaken, "
+        "may have been overtaken, or may be the view of whoever wrote it. So "
+        "when you refuse on those grounds, rewrite the claim to say that the "
+        "stronger sources were read for this point and do not state it. "
+        "Write it as the warning it is, in your own words.\n"
     )
 
 

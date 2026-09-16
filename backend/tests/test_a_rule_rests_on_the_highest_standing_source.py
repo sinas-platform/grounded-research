@@ -459,3 +459,27 @@ async def test_an_unranked_corpus_costs_nothing_and_says_nothing(
     assert counts == {"gaps": 0, "raised": 0, "looked": 0, "found": 0,
                       "resolved": 0}
     assert looked.calls == [] and ledger == {}
+
+
+def test_a_refusal_must_change_what_the_claim_says():
+    """Refusing a standing request is not a licence to leave the claim
+    reading like ordinary attribution.
+
+    A proposition the higher-standing sources were opened for and did not
+    state may be mistaken, overtaken, or its author's own position, and a
+    reader cannot tell any of that from "as X reports". The block that tells
+    the drafter what refusing commits it to must say so, and must say it
+    without borrowing any one field's vocabulary.
+    """
+    from app.services.drafting_chat import objections_block
+
+    block = objections_block(
+        [{"id": "obj-1", "subject": "claim 7", "asked": "rests lower"}]
+    )
+    lowered = block.lower()
+    assert "refusal also changes what the claim says" in lowered
+    assert "did not state it" in lowered
+    assert "rewrite the claim" in lowered
+    # The warning is the drafter's to word: the engine names the fact, not
+    # the sentence.
+    assert "in your own words" in lowered

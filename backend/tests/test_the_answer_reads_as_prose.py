@@ -580,3 +580,36 @@ def test_a_date_written_in_words_is_read():
     assert parse_date({"_": "2012-11-14T00:00:00"}).isoformat() == "2012-11-14"
     assert parse_date({"_": "the following spring"}) is None
     assert parse_date({"_": "9 Smarch 2023"}) is None
+
+
+def test_one_part_may_not_take_half_the_answer():
+    """A minimum per part was enforced and a maximum was not.
+
+    Across three published runs the claims fell 3/4/11, 6/4/5 and 5/4/10: the
+    last part took half the answer while the others were answered at the
+    floor. A part that swells that far crowds out the parts a reader asked
+    about first.
+    """
+    from app.services.answer_structure import crowded_parts, thin_parts
+
+    parts = [{"index": i, "label": c} for i, c in enumerate("abc")]
+
+    def claims(counts):
+        return [{"part": i} for i, n in enumerate(counts) for _ in range(n)]
+
+    # The two lopsided runs are caught, and neither is thin.
+    assert [p["label"] for p in crowded_parts(claims([3, 4, 11]), parts)] == ["c"]
+    assert [p["label"] for p in crowded_parts(claims([5, 4, 10]), parts)] == ["c"]
+    assert thin_parts(claims([3, 4, 11]), parts) == []
+    # The balanced run is left alone.
+    assert crowded_parts(claims([6, 4, 5]), parts) == []
+    assert crowded_parts(claims([4, 4, 4]), parts) == []
+    # An answer too small for a share to mean anything is left alone: below
+    # a claim per part per floor there is nothing to be lopsided about.
+    assert crowded_parts(claims([1, 1, 2]), parts) == []
+    # But once there is enough to judge, a part holding most of a small
+    # answer is caught like any other — and those parts are thin besides.
+    assert [p["label"] for p in crowded_parts(claims([1, 1, 4]), parts)] == ["c"]
+    # Two parts are left alone: one of two can legitimately be most of it.
+    two = [{"index": 0, "label": "a"}, {"index": 1, "label": "b"}]
+    assert crowded_parts([{"part": 1}] * 10 + [{"part": 0}] * 2, two) == []

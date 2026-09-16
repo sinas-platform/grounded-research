@@ -3040,6 +3040,16 @@ async def _argument_plan(
         if thin:
             await _tele(run_id, "draft", plan_parts_thin=[
                 {"index": p["index"], "label": p["label"]} for p in thin])
+        # And the other end of the same fault. A minimum per part was enforced
+        # and a maximum was not, so a plan could satisfy every rule and still
+        # be lopsided — 3/4/11 and 5/4/10 across published runs, the last part
+        # taking half the answer while the others sat at the floor. Reported
+        # here, where the plan is still a plan and the drafter can spend the
+        # budget differently, rather than discovered in the rendered answer.
+        crowded = answer_structure.crowded_parts(claims, parts)
+        if crowded:
+            await _tele(run_id, "draft", plan_parts_crowded=[
+                {"index": p["index"], "label": p["label"]} for p in crowded])
         lines = []
         for c in claims[:cap]:
             anchors = ", ".join(str(a) for a in (c.get("anchors") or [])[:4])

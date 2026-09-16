@@ -50,6 +50,11 @@ CLAIMS_PER_EXTRA_PART = 4
 HARD_MAX_CLAIMS = 24
 #: A part answered by fewer claims than this is thin, whatever the total.
 MIN_CLAIMS_PER_PART = 2
+#: And the other end: with three or more parts, the share of the answer one
+#: part may take before it is crowding the rest out. Half, because a part
+#: that holds more than every other part put together is no longer one of
+#: several answers to one question.
+MAX_PART_SHARE = 0.5
 #: A decomposition longer than this is the model listing sentences.
 MAX_PARTS = 8
 #: Words a part's heading may run to. The splitter is asked for three to
@@ -303,6 +308,33 @@ def thin_parts(claims: list[dict], parts: list[dict], key: str = "part") -> list
     """The parts held by fewer than MIN_CLAIMS_PER_PART claims. Pure."""
     counts = part_counts(claims, len(parts), key)
     return [p for p in parts if counts[p["index"]] < MIN_CLAIMS_PER_PART]
+
+
+def crowded_parts(claims: list[dict], parts: list[dict],
+                  key: str = "part") -> list[dict]:
+    """The parts holding more than their share of the answer. Pure.
+
+    A minimum per part was enforced and a maximum was not, so the answer
+    could satisfy every rule and still be lopsided: across three published
+    runs the claims fell 3/4/11, 6/4/5 and 5/4/10, the last part taking half
+    the answer while the others were answered at the floor. A part that
+    swells that far is not thoroughness, it is the drafter continuing past
+    the question — and it crowds out the parts a reader asked about first.
+
+    The share is deliberately loose: with three or more parts no one part may
+    hold more than `MAX_PART_SHARE` of the claims that were filed under a
+    part. Two parts are left alone — one of two can legitimately be most of
+    the answer — and so is any answer too small for a share to mean anything.
+    """
+    n = len(parts)
+    if n < 3:
+        return []
+    counts = part_counts(claims, n, key)
+    filed = sum(counts)
+    if filed < n * MIN_CLAIMS_PER_PART:
+        return []
+    ceiling = filed * MAX_PART_SHARE
+    return [p for p in parts if counts[p["index"]] > ceiling]
 
 
 # ── drafted claims ───────────────────────────────────────────────────────────

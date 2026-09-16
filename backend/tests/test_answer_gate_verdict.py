@@ -66,7 +66,17 @@ def gate_env(monkeypatch):
                 telemetry={"validate": dict(tele.get("validate") or {})}
             )
 
-        async def execute(self, *_a, **_k):
+        async def execute(self, statement=None, *_a, **_k):
+            # The per-claim citations are the one read whose rows are not the
+            # claim triple below, and a stub that answered every statement
+            # with one shape would hand it a row of the wrong width. No
+            # evidence in this fixture, so no claim rests on any document.
+            if "claim_evidence.claim_id" in str(statement):
+                return SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: []),
+                    scalar_one_or_none=lambda: None,
+                    all=lambda: [],
+                )
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(all=lambda: []),
                 scalar_one_or_none=lambda: None,

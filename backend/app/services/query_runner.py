@@ -57,6 +57,7 @@ from app.services import (
     drafting_chat,
     objections,
     obligations,
+    standing,
     strikes,
     supersession,
 )
@@ -633,6 +634,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     DocumentClass.identifier_property,
                     document_title_subquery(),
                     DocumentClass.authority_label,
+                    DocumentClass.standing,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -697,7 +699,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
 
     out = []
     for (did, fn, cls, reason, summary, rank, ident_prop, title,
-         class_label) in rows:
+         class_label, class_standing) in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -728,6 +730,10 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             # the class declares it. None for a class that declares none,
             # which is also what says the class carries rules on its own.
             "class_authority_label": class_label,
+            # How high a source of this class stands, as the class declared
+            # it. None for a class that declared nothing, and None is inert:
+            # it neither satisfies the highest-standing rule nor breaches it.
+            "class_standing": class_standing,
         })
     return out
 
@@ -3089,6 +3095,11 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
     Rows that carry no declarations — a caller that built them by hand — get
     the empty set, which is every rule that needs one switched off rather
     than any of them guessed.
+
+    `standing` rides here too and is not one of the four: nothing is written
+    onto a claim from it. It is the class's declared rank, and it is in this
+    dict because this is already the one place that turns the retrieved set
+    into per-filename facts, and the standing gate needs exactly that shape.
     """
     roles = next((r["roles"] for r in rows if r.get("roles")),
                  declared_roles.NONE)
@@ -3108,6 +3119,10 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
                 roles.tier_annotations if r.get("roles") else None),
             "jurisdiction": jurisdiction.get(fn),
             "currency": currency.get(fn),
+            # The class's declared rank, carried through unchanged so the
+            # standing gate compares two integers and never reads a class
+            # name. None where the class declared none, which is inert.
+            "standing": r.get("class_standing"),
         }
     return out
 
@@ -3432,6 +3447,7 @@ async def _record_gate_cycle(
     naming_mismatches: list[dict] | None = None,
     checks: dict | None = None,
     reread: dict | None = None,
+    standing_counts: dict | None = None,
     objection_ledger: list[dict] | None = None,
     no_claims: bool = False,
 ) -> None:
@@ -3508,6 +3524,16 @@ async def _record_gate_cycle(
         # read as belonging to the next one, which is the defect this
         # function exists to stop.
         "reread": reread or {"looked": 0, "found": 0},
+        # What the standing rule did this cycle: how many rule claims rested
+        # lower than the retrieved set allowed, how many of those gaps became
+        # a request, how many higher-standing documents were opened for a
+        # proposition and how many of those reads found one, and how many
+        # arguments the answer itself closed. Always written, zeros included,
+        # for the reason every other key here is: a cycle that sets no key
+        # inherits the last one's, and a rule that fired twenty cycles ago
+        # would read as firing now.
+        "standing": standing_counts or {"gaps": 0, "raised": 0, "looked": 0,
+                                        "found": 0, "resolved": 0},
         # Beside the parts it summarises, not only as a flat key. The parts in
         # this dict already carry the per-part audit, so leaving the summary
         # flat would put a last-write count next to a per-cycle history and
@@ -3884,6 +3910,29 @@ def _audit_coverage(named: list[int], claim_seqs: set, with_evidence: set,
 
 
 
+async def _ask_document(sinas: _Sinas, prompt: str, filename: str) -> dict | None:
+    """One whole-document look, as a hit or nothing.
+
+    The half of a re-read that is not policy: make the call, read the reply,
+    and refuse to call a hit anything that did not come back with a verbatim
+    quote. Shared by the two callers of `services.reread` so that the
+    condition for "found" is written once — a second copy of this is a second
+    place for `found: true` with an empty quote to become evidence.
+    """
+    reply = await sinas.invoke("sgr/answer-gate-agent", prompt)
+    try:
+        cleaned = (reply or "").strip().strip("`")
+        cleaned = cleaned.removeprefix("json").strip()
+        a, b = cleaned.find("{"), cleaned.rfind("}")
+        data = json.loads(cleaned[a:b + 1]) if a >= 0 < b else {}
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not (data.get("found") and str(data.get("quote") or "").strip()):
+        return None
+    return {"filename": filename, "line_from": data.get("line_from"),
+            "line_to": data.get("line_to"), "quote": data.get("quote")}
+
+
 async def _reread_cited_for_parts(
     sinas: _Sinas, answer_id: uuid.UUID, parts: list[dict]
 ) -> tuple[list[dict], int, int]:
@@ -3922,20 +3971,9 @@ async def _reread_cited_for_parts(
             for src in sources:
                 if not src.text or len(src.text) < 40:
                     continue
-                reply = await sinas.invoke(
-                    "sgr/answer-gate-agent", reread_prompt(parts[i], src))
-                try:
-                    cleaned = (reply or "").strip().strip("`")
-                    cleaned = cleaned.removeprefix("json").strip()
-                    a, b = cleaned.find("{"), cleaned.rfind("}")
-                    data = json.loads(cleaned[a:b + 1]) if a >= 0 < b else {}
-                except (ValueError, json.JSONDecodeError):
-                    continue
-                if data.get("found") and str(data.get("quote") or "").strip():
-                    hit = {"filename": src.filename,
-                           "line_from": data.get("line_from"),
-                           "line_to": data.get("line_to"),
-                           "quote": data.get("quote")}
+                hit = await _ask_document(
+                    sinas, reread_prompt(parts[i], src), src.filename)
+                if hit:
                     break
             found[i] = hit
         parts, hits = apply_reread(parts, found,
@@ -3947,6 +3985,150 @@ async def _reread_cited_for_parts(
         _log.exception("re-read before unanswered failed for answer %s",
                        answer_id)
         return parts, 0, 0
+
+
+#: Standing gaps one cycle argues about. Each costs a whole-document read per
+#: higher-standing document named, and a round that hands the drafter eight
+#: arguments gets eight shallow answers. Three is what a revision round can
+#: actually act on, and a gap not argued this cycle is argued the next one:
+#: the gaps are recomputed from the claims as they then stand.
+MAX_STANDING_GAPS = 3
+#: Higher-standing documents opened for one gap before the look gives up.
+#: The list is best-standing first, so this cuts from the bottom.
+MAX_STANDING_LOOKS = 3
+
+
+async def _standing_objections(
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
+    mrows: list[dict], claims: list[dict], cycle_no: int,
+) -> tuple[list[str], list[str], dict[str, int]]:
+    """Argue with the drafter about claims resting lower than the set allows.
+
+    Returns `(issues, points, counts)`. Each issue is a request the drafter
+    must act on or refuse with a reason; each point is a proposition the
+    reviser is given passages for, anchored on the document that should carry
+    it. Deterministic in what it FINDS — two integers compared — and a model
+    call only where one is unavoidable: reading a document for a proposition.
+
+    THE ORDER MATTERS AND IS THE WHOLE DESIGN. The gap is found first, the
+    higher-standing documents are read SECOND, and only then is the objection
+    put. The drafter sees passages extracted for its own planned claims, so a
+    claim resting on a lower-standing source may rest there because the
+    higher-standing one was never opened for that proposition. Putting the
+    objection before the read would produce a refusal from a drafter that had
+    nothing to check it against, and a refusal made in ignorance settles a
+    point that was never argued.
+
+    Best-effort, like the naming checks around it: this can only ever add a
+    finding, so a failure costs the finding and never the run.
+    """
+    issues: list[str] = []
+    points: list[str] = []
+    counts = {"gaps": 0, "raised": 0, "looked": 0, "found": 0, "resolved": 0}
+    try:
+        facts = _source_context(mrows)
+        by_file = {fn: f.get("standing") for fn, f in facts.items()}
+        gaps = standing.gaps(claims, by_file)
+        counts["gaps"] = len(gaps)
+        # A point the answer has since fixed is settled by the answer. The
+        # gaps are recomputed every cycle from the claims as they now stand,
+        # so a claim re-cited, revised into another kind or dropped simply
+        # stops appearing — and its argument ends, rather than being asked
+        # about a claim that no longer says what was objected to.
+        ledger = [e for e in await objections.ledger(run_id)
+                  if e.get("kind") == standing.KIND]
+        # Only the arguments still running. An accepted refusal and a stall
+        # are settled by the review's ruling, and marking either resolved
+        # here would rewrite a point the drafter won as a point the answer
+        # fixed — which is precisely the count this rule exists to measure.
+        done = standing.closed(
+            {str(e.get("subject") or "") for e in ledger
+             if e.get("state") in (objections.OPEN, objections.ANSWERED)},
+            gaps)
+        if done:
+            await objections.resolve(run_id, done, kind=standing.KIND)
+            counts["resolved"] = len(done)
+        asked_before = {str(e.get("subject") or ""): e for e in ledger}
+        settled = await objections.settled_subjects(run_id)
+        fresh = [g for g in gaps if g.subject not in settled]
+        for gap in fresh[:MAX_STANDING_GAPS]:
+            prior = asked_before.get(gap.subject)
+            if prior is not None:
+                # Already argued this run and still open. The documents were
+                # read when it was first put; reading them again every cycle
+                # would spend a call per document per cycle to reach the same
+                # answer, and the drafter has not been shown anything new.
+                asked = str(prior.get("asked") or "")
+                hit = None
+            else:
+                hit = await _look_higher(sinas, gap, counts)
+                asked = standing.objection(gap, hit)
+            oid = await objections.raise_objection(
+                run_id, kind=standing.KIND, subject=gap.subject, asked=asked,
+                # Supporting, always. There is no hard fail here: a claim
+                # resting low is a claim a reader must be told about, not a
+                # part of the question that could not be answered, and only a
+                # justified `essential` may reach a run's verdict.
+                importance=objections.SUPPORTING, cycle=cycle_no)
+            if oid is None:
+                continue
+            counts["raised"] += 1
+            issues.append(
+                f"Standing: {asked} A general proposition rests on the "
+                "highest-standing source RETRIEVED FOR THIS ANSWER that "
+                "carries it. Revise the claim to cite the higher-standing "
+                "source for this proposition — the lower-standing one may "
+                "stay beside it where it adds something of its own — or "
+                f'REFUSE: reply with {{"objection": "{oid}", "rationale": '
+                '"<why no higher-standing retrieved source carries this '
+                'proposition>"}, which is an answer and will be ruled on '
+                "rather than ignored. A refusal commits you to one more "
+                "thing: the claim must then say, in its own sentence and in "
+                "your words, what the proposition rests on and what that "
+                "means for the weight a reader should give it. Nothing is "
+                "added to your sentence for you."
+            )
+            if hit:
+                points.append(standing.point(gap))
+    except CancelledOutcome:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.exception("standing check failed for answer %s", answer_id)
+    return issues, points, counts
+
+
+async def _look_higher(sinas: _Sinas, gap, counts: dict[str, int]) -> dict | None:
+    """Read the higher-standing documents for this claim's proposition.
+
+    The same whole-document read the uncovered-part re-read makes, pointed at
+    the documents the answer did NOT cite — which is the one boundary that
+    differs, and differs for a reason: there, reaching outside the citations
+    would be the gate answering the question instead of checking it; here,
+    the documents are the retrieved set's own and the entire finding is that
+    the drafter was never shown them.
+    """
+    from app.services.reread import Cited, standing_prompt
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename, DocumentVersion.content_md)
+            .join(DocumentVersion,
+                  DocumentVersion.id == Document.current_version_id)
+            .where(Document.filename.in_(list(gap.better))))).all()
+    order = {fn: i for i, fn in enumerate(gap.better)}
+    sources = sorted((Cited(filename=str(f), text=str(c or ""))
+                      for f, c in rows), key=lambda s: order.get(s.filename, 99))
+    for src in sources[:MAX_STANDING_LOOKS]:
+        if len(src.text) < 40:
+            continue
+        counts["looked"] += 1
+        hit = await _ask_document(
+            sinas, standing_prompt(gap.text, src), src.filename)
+        if hit:
+            counts["found"] += 1
+            return hit
+    return None
+
 
 async def _gate_answer(
     sinas: _Sinas, run_question: str, answer_id: uuid.UUID, run_id: uuid.UUID
@@ -4039,6 +4221,19 @@ async def _gate_answer(
             .join(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
             .where(AnswerClaim.answer_id == answer_id)
         )).scalars().all())
+        # Which documents each claim actually rests on. `cited` above is one
+        # flat set for the whole answer and cannot answer the question the
+        # standing rule asks — whether THIS claim rests lower than the set
+        # allows — for which the citations have to be read per claim.
+        cites_by_claim: dict[uuid.UUID, list[str]] = {}
+        for cid, fname in (await session.execute(
+            select(ClaimEvidence.claim_id, Document.filename)
+            .join(Document, Document.id == ClaimEvidence.document_id)
+            .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+            .where(AnswerClaim.answer_id == answer_id)
+        )).all():
+            if fname not in cites_by_claim.setdefault(cid, []):
+                cites_by_claim[cid].append(str(fname))
         parent_result_id = (
             await session.execute(
                 select(QueryRun.parent_result_id).where(QueryRun.answer_id == answer_id)
@@ -4432,6 +4627,25 @@ async def _gate_answer(
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
 
+    # A claim that states a general proposition must rest on the
+    # highest-standing source the retrieval actually returned that carries
+    # it. Deterministic in what it finds — the class declared a rank and two
+    # of them are compared — and argued rather than enforced: the higher
+    # documents are read for the proposition first, and what the drafter gets
+    # is a request it may refuse with a reason. Run after the gate's rulings
+    # above, so a refusal this review has already accepted is not put again,
+    # and before the cycle is recorded, so the ledger written below holds
+    # what was argued this cycle rather than last.
+    standing_issues, standing_points, standing_counts = (
+        await _standing_objections(
+            sinas, run_id, answer_id, mrows,
+            [{"id": str(c.id), "sequence": c.sequence, "kind": c.claim_kind,
+              "text": c.claim_text,
+              "cites": cites_by_claim.get(c.id) or []} for c in structured],
+            cycle_no))
+    issues += standing_issues
+    stronger += standing_points
+
     # What the answer has not accounted for, decided from the ledger rather
     # than asked of the model. The gate is given two jobs in one call and
     # nothing ties its answers together: it judges each part covered, and it
@@ -4497,6 +4711,10 @@ async def _gate_answer(
         claim_naming.mismatch_message(m)
         for m in mismatched[:claim_naming.MAX_FINDINGS]
     ]
+    # Read once and used twice, for the reason the coverage read above is:
+    # the per-cycle record and the run-scoped counts must describe the same
+    # ledger, and two reads could disagree.
+    ledger_record = await objections.record(run_id)
     await _record_gate_cycle(
         run_id, reparse=reparse, unaccounted=unaccounted,
         fed=[{"doc": u["doc"], "feeds": int(u["fed"]) + 1} for u in feed],
@@ -4521,14 +4739,27 @@ async def _gate_answer(
         # otherwise, and telling an absent limb from an unchecked one is half
         # of why this is worth having.
         reread={"looked": reread_looked, "found": reread_found},
+        standing_counts=standing_counts,
         # The argument as it stands at this cycle: every request, what it
         # asked, the importance the gate had to justify, the drafter's reason,
         # the gate's ruling and the cycle each happened in. Recorded per cycle
         # rather than once at the end, because the interesting question about a
         # two-way loop is when a point turned, and an end-state snapshot cannot
         # answer it.
-        objection_ledger=await objections.record(run_id),
+        objection_ledger=ledger_record,
         closing=_closing_record(data, claims_by_seq, parts))
+    # The three numbers the standing rule has to be able to show, run-scoped
+    # and flat beside the per-cycle counts above: how many standing
+    # objections this run raised, how many the answer settled by citing the
+    # higher-standing source, and how many the drafter refused with a reason.
+    #
+    # The third is the one that was never observable. Across three live runs
+    # the drafter refused nothing, because evidence findings are usually
+    # correct and there was nothing to argue — so whether a reasoned refusal
+    # could happen at all was a question nobody could answer from a run's
+    # telemetry. A standing objection is precisely the case where refusing is
+    # the right move, and this is the count that says whether it is reached.
+    await _tele(run_id, "validate", standing=standing.summary(ledger_record))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,

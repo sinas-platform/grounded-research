@@ -19,6 +19,16 @@ would be the gate answering the question instead of checking it. And a
 re-read that found nothing has to be distinguishable from a re-read that never
 ran, or a later reader cannot tell an absent limb from an unchecked one.
 
+ONE MECHANISM, TWO VERDICTS. The second caller is the standing gate, which
+opens the HIGHER-STANDING documents of the retrieved set before a claim is
+allowed to keep resting on a lower-standing one. The condition differs and
+so does the boundary — that one may reach a document the answer does not
+cite, because the whole point is that the drafter was never shown it — but
+the read is the same read: whole document, verbatim quote or none, one reply
+shape. `look_prompt` is that read, and the two wrappers are the two
+questions. A second copy of it would drift, and it would drift towards
+finding things that are not there.
+
 Pure. Deciding what to re-read, building the prompt and applying the result
 are separate from making the call, so the policy is testable without a model.
 """
@@ -52,25 +62,57 @@ def needs_reread(parts: list[dict], cited: list[Cited]) -> list[dict]:
     return [p for p in parts if not p.get("covered")]
 
 
-def reread_prompt(part: dict, source: Cited) -> str:
-    """Ask one document about one part, with the document whole.
+def look_prompt(finding: str, label: str, ask: str, source: Cited) -> str:
+    """Ask one document one question, with the document whole.
 
     Whole is the point. Reading a window is what produced the defect this
     exists for: the material was in the document and outside the window that
     was extracted for some other claim.
+
+    `finding` says what a review concluded and `ask` is the thing to look
+    for, under the heading `label`. Everything after that — read it in full,
+    quote verbatim or answer none, reply as this object — is the same for
+    every caller, and is the half that must not be written twice: a second
+    copy that drifts into summarising, or into a different reply shape,
+    fails quietly in the direction of finding things that are not there.
     """
     return (
-        "A review of an answer concluded that this part of the question is "
-        "not addressed:\n\n"
-        f"PART: {str(part.get('asks') or '').strip()}\n\n"
-        "The answer cites the document below. Read it in full and say whether "
-        "it contains a passage that addresses that part. Quote verbatim or "
-        "answer none; do not summarise, and do not reason from what the "
-        "document implies.\n\n"
+        f"{finding}\n\n"
+        f"{label}: {ask.strip()}\n\n"
+        "Read the document below in full and say whether it contains a "
+        "passage that states that. Quote verbatim or answer none; do not "
+        "summarise, and do not reason from what the document implies.\n\n"
         'Reply ONLY JSON: {"found": true|false, "line_from": <int>, '
         '"line_to": <int>, "quote": "<verbatim>"}\n\n'
         f"DOCUMENT: {source.filename}\n{source.text}"
     )
+
+
+def reread_prompt(part: dict, source: Cited) -> str:
+    """Ask one CITED document whether it addresses a part called uncovered."""
+    return look_prompt(
+        "A review of an answer concluded that this part of the question is "
+        "not addressed. The answer cites the document below.",
+        "PART", str(part.get("asks") or ""), source)
+
+
+def standing_prompt(proposition: str, source: Cited) -> str:
+    """Ask one HIGHER-STANDING document whether it carries a proposition.
+
+    The mirror image of the re-read above and the same mechanism, pointed the
+    other way. There, an answer's own sources are opened again because the
+    material may sit outside the window that was extracted. Here, a document
+    the answer did NOT cite is opened for the same reason: extraction reads
+    per planned claim from that claim's anchors, so the drafter resting a
+    general proposition on a lower-standing source may never have been shown
+    the higher-standing one at all. An objection refused by a drafter that
+    was never shown the passage is not an argument, it is an accident.
+    """
+    return look_prompt(
+        "A review of an answer concluded that this general proposition rests "
+        "on a source that stands lower than one retrieved beside it. The "
+        "document below is the higher-standing one.",
+        "PROPOSITION", proposition, source)
 
 
 def apply_reread(

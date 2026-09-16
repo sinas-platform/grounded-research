@@ -55,6 +55,7 @@ from app.services import (
     claim_naming,
     declared_roles,
     drafting_chat,
+    naming,
     objections,
     obligations,
     standing,
@@ -635,6 +636,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     document_title_subquery(),
                     DocumentClass.authority_label,
                     DocumentClass.standing,
+                    DocumentClass.naming_required,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -699,7 +701,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
 
     out = []
     for (did, fn, cls, reason, summary, rank, ident_prop, title,
-         class_label, class_standing) in rows:
+         class_label, class_standing, class_naming) in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -734,6 +736,10 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             # it. None for a class that declared nothing, and None is inert:
             # it neither satisfies the highest-standing rule nor breaches it.
             "class_standing": class_standing,
+            # Whether a claim asserting a rule on this class must name it in
+            # the sentence, as the class declared. False for a class that
+            # declared nothing, which holds it to nothing.
+            "naming_required": class_naming,
         })
     return out
 
@@ -4655,6 +4661,35 @@ async def _gate_answer(
             cycle_no))
     issues += standing_issues
     stronger += standing_points
+
+    # A claim asserting a rule names the source it rests on. Deterministic —
+    # the document's own identifier, or the words that identify its name,
+    # looked for in the claim's text — so it costs no model call and behaves
+    # the same whatever language the source is written in. That last part is
+    # the point: the check this replaces looked for English attribution
+    # words, and a third of the collection is French, so a claim resting on a
+    # French source could not fail it.
+    named_docs = {
+        str(r.get("filename")): {
+            "identifier": r.get("identifier"),
+            "name": r.get("title"),
+            "naming_required": bool(r.get("naming_required")),
+        }
+        for r in mrows if r.get("filename")
+    }
+    unnamed = naming.unnamed_sources(
+        [{"claim_id": str(c.id), "sequence": c.sequence, "kind": c.claim_kind,
+          "text": c.claim_text, "cites": cites_by_claim.get(c.id) or []}
+         for c in structured],
+        named_docs,
+    )
+    for entry in unnamed:
+        issues.append(naming.objection(entry))
+    if unnamed:
+        await _tele(run_id, "validate", **{f"unnamed_sources_{cycle_no}": [
+            {"sequence": e.get("sequence"),
+             "sources": [u.get("filename") for u in e.get("unnamed") or []]}
+            for e in unnamed]})
 
     # What the answer has not accounted for, decided from the ledger rather
     # than asked of the model. The gate is given two jobs in one call and

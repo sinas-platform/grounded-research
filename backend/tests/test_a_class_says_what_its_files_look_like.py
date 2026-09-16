@@ -26,11 +26,10 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from pydantic import ValidationError
-
 from app.schemas.package import PackageFilenameRule
 from app.services import ingestion_oneshot as one
 from app.services import package as package_service
+from pydantic import ValidationError
 
 _PACKAGE = """
 apiVersion: sgr.sinas.co/v1

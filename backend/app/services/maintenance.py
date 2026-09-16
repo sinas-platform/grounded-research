@@ -12,6 +12,11 @@ pass, run on a timer by the backend (SGR_MAINTENANCE_INTERVAL_SECONDS,
 
     python -m app.services.maintenance
 
+It also carries the out-of-band work that is not repair: the corpus profile,
+the entity-type sizes and example values the planner is grounded in, which
+used to be computed on the hot path of every question out of the two largest
+tables in the database. See services/corpus_profile.
+
 Every step is deterministic — no model calls, no spend — except the
 extraction-retry step, which respawns the bulk pipeline over documents
 whose extraction failed (capped per pass; the pipeline itself skips
@@ -168,6 +173,7 @@ async def _retry_failed_extractions(session) -> int:
 async def run_maintenance() -> dict[str, Any]:
     """One idempotent upkeep pass. Order matters: resolutions and minting
     change the graph that rematerialization then walks."""
+    from app.services.corpus_profile import refresh_corpus_profile
     from app.services.entity_keys import shared_index
     from app.services.key_replay import (backfill_full_text_entities,
                                          rematerialize, replay_unresolved)
@@ -186,6 +192,18 @@ async def run_maintenance() -> dict[str, Any]:
         subjects = await _full_text_entity_ids(session)
         stats["rematerialized_values"] = await rematerialize(session, subjects)
         stats["remat_subjects"] = len(subjects)
+    # Last, and on its own session: the corpus profile describes the corpus
+    # the steps above have just finished repairing, and it opens and closes a
+    # transaction per statement so that it holds no snapshot across them.
+    # It skips itself while the stored profile is younger than
+    # SGR_CORPUS_PROFILE_INTERVAL_SECONDS, so it does not follow this pass's
+    # cadence, and a failure here must not lose the pass's other work.
+    try:
+        stats["corpus_profile"] = await refresh_corpus_profile()
+    except Exception:  # noqa: BLE001 — a stale profile beats a lost pass
+        log.exception("corpus profile refresh failed; the planner keeps the "
+                      "profile it has until the next pass")
+        stats["corpus_profile"] = "failed"
     log.info("maintenance pass: %s", stats)
     return stats
 

@@ -26,6 +26,22 @@ class Settings(BaseSettings):
     # annotation rematerialization, wall normalization). 0 disables.
 
     sgr_maintenance_interval_seconds: int = 21600
+
+    # The corpus profile: entity-type sizes and example values, sampled out of
+    # band so the planner never computes them (services/corpus_profile).
+    #
+    # The refresh is skipped while the stored profile is younger than this, so
+    # the profile's cadence is its own and not the maintenance pass's: a
+    # backend told to do upkeep every five minutes does not resample the
+    # corpus every five minutes. 0 refreshes on every pass.
+    sgr_corpus_profile_interval_seconds: int = 3600
+    # How old a profile the planner will still be grounded in. Generous on
+    # purpose — twenty-eight refreshes at the defaults above — because losing
+    # the examples costs the planner real grounding, so a few failed passes
+    # must not silently blank them; what this rules out is planning against a
+    # corpus that has since been replaced. 0 disables the check.
+    sgr_corpus_profile_max_age_seconds: int = 604800
+
     sgr_cors_origins: str = Field(default="", validation_alias="SGR_CORS_ORIGINS")
 
     # Auth

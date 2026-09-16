@@ -282,8 +282,15 @@ async def _invoke_json(
 
 # The corpus map describes the shape of the corpus — entity types with a few
 # example values, document classes, properties. It changes only when documents
-# are ingested, but plan_question() rebuilds it for every question, and the
-# entity half is a full-corpus aggregation. Cache it.
+# are ingested, but plan_question() rebuilds it for every question. Cache it.
+#
+# TWO CACHES, ONE BEHIND THE OTHER, AND THEY ARE NOT THE SAME KIND. This one
+# is the assembled prompt block held in this process for a quarter of an hour,
+# and it saves the small reads the map still makes. The entity half is no
+# longer one of them: it is a stored profile (services/corpus_profile),
+# refreshed out of band, because that half was a full-corpus aggregation and
+# no in-process TTL could make its first miss affordable — six concurrent
+# runs meant six misses and sixteen minutes each.
 _CORPUS_MAP_TTL_S = 900
 _corpus_map_cache: tuple[float, str] | None = None
 _corpus_map_lock = asyncio.Lock()
@@ -304,8 +311,9 @@ def invalidate_corpus_map() -> None:
 
 
 async def build_corpus_map() -> str:
-    """Schema snapshot: entity types (frequency-ranked examples), document
-    classes with counts, and per-class properties with example values.
+    """Schema snapshot: entity types (approximate sizes and most-mentioned
+    examples, read from the stored corpus profile), document classes with
+    counts, and per-class properties with example values.
 
     Cached for _CORPUS_MAP_TTL_S; see invalidate_corpus_map().
     """
@@ -325,32 +333,27 @@ async def build_corpus_map() -> str:
 
 async def _build_corpus_map_uncached() -> str:
     from app.db import AsyncSessionLocal
+    from app.services.corpus_profile import entity_type_block
 
     async with AsyncSessionLocal() as s:
-        # Aggregate entity_mention on its own first (5.2M rows -> ~485k
-        # groups), then join. The previous form joined entity to
-        # entity_mention and grouped the 5.2M-row result, which sorts far
-        # more than it needs to for an answer that is 5 examples per type:
-        # on a real corpus it spilled >1GB of temp files and died on
-        # `temp_file_limit`. Needs ix_entity_mention_entity_id — without it
-        # this is ~100s rather than ~14s, and the old form fails either way.
-        et = (await s.execute(text("""
-            WITH uses AS (
-              SELECT entity_id, count(*) AS n
-              FROM entity_mention GROUP BY entity_id
-            ), ranked AS (
-              SELECT e.entity_type_id, e.canonical_form,
-                     row_number() OVER (PARTITION BY e.entity_type_id
-                                        ORDER BY COALESCE(u.n, 0) DESC) AS rn
-              FROM entity e LEFT JOIN uses u ON u.entity_id = e.id
-              WHERE e.merged_into_id IS NULL
-            )
-            SELECT t.name,
-                   (SELECT count(*) FROM entity e
-                    WHERE e.entity_type_id = t.id AND e.merged_into_id IS NULL),
-                   (SELECT array_agg(canonical_form)
-                    FROM ranked WHERE entity_type_id = t.id AND rn <= 5)
-            FROM entity_type t ORDER BY 2 DESC"""))).all()
+        # A LOOKUP, NOT A COMPUTATION. The entity half of this map used to be
+        # computed here: count every mention of every entity, rank all of them
+        # within their type, keep five names and an exact count per type. Six
+        # concurrent runs each spent over sixteen minutes on it before
+        # planning, and the bulk load writing to the same database lost two
+        # thirds of its throughput to them. It is not per-question work — the
+        # answer is the same for every run until the next document lands — and
+        # it grows with the corpus, so it got worse every hour.
+        #
+        # services/corpus_profile computes it out of band from a bounded
+        # sample and stores it; this reads it. An unbuilt or stale profile
+        # costs the planner the sizes and examples and is logged, and is never
+        # a reason to run the old query again.
+        et_block = await entity_type_block(s)
+        # Left exact: one grouped scan of `document`, three orders of
+        # magnitude smaller than the mention table and already behind this
+        # map's own TTL. Sampling it would buy nothing and cost accuracy where
+        # the classes are few enough to be named individually.
         dc = (await s.execute(text("""
             SELECT c.name, count(d.id) FROM document_class c
             LEFT JOIN document d ON d.document_class_id = c.id
@@ -362,9 +365,7 @@ async def _build_corpus_map_uncached() -> str:
             FROM document_class_property p
             JOIN document_class c ON c.id = p.document_class_id
             LIMIT 40"""))).all()
-    lines = ["ENTITY TYPES (name, count, most-mentioned examples):"]
-    for name, cnt, ex in et:
-        lines.append(f"- {name} ({cnt}): {', '.join((ex or [])[:5])}")
+    lines = [et_block]
     lines.append("DOCUMENT CLASSES (name, count):")
     for name, cnt in dc:
         lines.append(f"- {name} ({cnt})")

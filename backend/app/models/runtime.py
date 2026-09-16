@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -177,6 +178,42 @@ class EntityMention(Base, TimestampMixin):
     # ungrounded name stays for audit but no consumer query sees it.
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, server_default="active", default="active"
+    )
+
+
+class CorpusProfile(Base):
+    """What the corpus holds of one entity type, in round numbers.
+
+    Derived, not declared: every column is computed from the corpus by
+    `services/corpus_profile` and may be recomputed at any time. It exists
+    because computing it is expensive and computing it per question was
+    costing more than the question — see that module for the method.
+
+    `entity_count_magnitude` is an ORDER OF MAGNITUDE on the 1-2-5 ladder,
+    not a count, and 0 means none observed. `examples` is a JSON array of
+    canonical forms of well-used entities of the type. `refreshed_at` says
+    when the figures were computed, and a reader that finds it older than its
+    tolerance uses no figures at all rather than old ones.
+
+    Keyed on the type rather than its name, so a dropped type takes its
+    profile with it and no name is stored twice.
+    """
+
+    __tablename__ = "corpus_profile"
+
+    entity_type_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("entity_type.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    entity_count_magnitude: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    examples: Mapped[list | None] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 

@@ -98,7 +98,7 @@ class PackageDocumentClassEntry(_Strict):
     # extracted one, is knowledge about a collection. `on_conflict: replace`
     # says the document is right and a model that disagreed was wrong;
     # `fill_only`, the default, says fill a gap and leave what is there.
-    declared_properties: list["PackageDeclaredProperty"] = Field(
+    declared_properties: list[PackageDeclaredProperty] = Field(
         default_factory=list)
     properties: list[PackagePropertyEntry] = Field(default_factory=list)
     # entity types attached to this document class, by entity-type name
@@ -211,6 +211,76 @@ class PackageRelationshipDefinitionEntry(_Strict):
     states: list[PackageRelationshipStateEntry] = Field(default_factory=list)
 
 
+#: The roles the engine looks for, and nothing else. Each names what the
+#: engine DOES with such an edge, never what a deployment calls it:
+#:
+#:   standing     — one issuing body outranks another. The engine uses it to
+#:                  find the annotation that derives a source's tier: the
+#:                  annotation whose path walks a standing relation is the
+#:                  tier annotation, whatever it is named.
+#:   supersession — one source replaces another. The engine uses it to tell a
+#:                  reader that a cited source is recorded as superseded.
+#:   full_text    — a document IS the full text of the subject it records.
+#:                  The engine uses it to get from a cited document to the
+#:                  subject other edges hang off.
+#:
+#: Adding a role here is a change to the engine, not to a deployment: a name
+#: nothing reads would be a declaration that does nothing.
+ENGINE_ROLES = ("standing", "supersession", "full_text")
+
+
+class PackageRelationshipRoles(_Strict):
+    """Which of this deployment's relationship definitions carry which
+    engine-meaningful role.
+
+    Engine features that need an edge of a particular MEANING used to find it
+    by its name — `WHERE rd.name IN ('is_full_text_of', …)`, a walk over names
+    beginning `ranks_higher_than`. A deployment that named its relations
+    anything else got no supersession check and no tier, with no error and no
+    log: the query simply matched nothing, which is byte-identical to a corpus
+    that records no supersession. This block is where that knowledge belongs —
+    the deployment says which of ITS relations mean what, and the engine reads
+    the role.
+
+    Every role is optional and every role takes a LIST, because a meaning can
+    be spread over several definitions: a definition's name is its unique key,
+    so a deployment needing the same meaning between two different pairs of
+    types must declare two definitions, and both carry the role.
+
+    An absent role disables the feature that needs it, loudly — see
+    `app.services.relationship_roles`, which logs which role is missing and
+    what stopped working. The one exception is `full_text`, which has a
+    structural fallback that needs no name at all (a document→entity
+    definition with cardinality "one"); that fallback is documented at its
+    reader and is what the engine used before this block existed.
+    """
+
+    standing: list[str] = Field(default_factory=list)
+    supersession: list[str] = Field(default_factory=list)
+    full_text: list[str] = Field(default_factory=list)
+
+    def names_for(self, role: str) -> list[str]:
+        return list(getattr(self, role, []) or [])
+
+    @model_validator(mode="after")
+    def _one_role_per_definition(self):
+        """A definition carrying two roles would leave the engine to guess
+        which feature meant it, so it is refused where it is written rather
+        than resolved arbitrarily at read time."""
+        seen: dict[str, str] = {}
+        for role in ENGINE_ROLES:
+            for name in self.names_for(role):
+                if not str(name).strip():
+                    raise ValueError(f"role {role!r} lists an empty name")
+                if name in seen:
+                    raise ValueError(
+                        f"{name!r} is declared under both {seen[name]!r} and "
+                        f"{role!r}; a definition carries one role"
+                    )
+                seen[name] = role
+        return self
+
+
 class PackageDossierDocumentClassLink(_Strict):
     document_class: str  # document class name
     required: bool = False
@@ -281,6 +351,12 @@ class PackageSpec(_Strict):
     document_classes: list[PackageDocumentClassEntry] = Field(default_factory=list)
     entity_types: list[PackageEntityTypeEntry] = Field(default_factory=list)
     relationship_definitions: list[PackageRelationshipDefinitionEntry] = Field(default_factory=list)
+    # Additive and optional: this block did not exist, the schema forbids
+    # extras, and deployment manifests live in client repos. A package that
+    # omits it keeps working — see PackageRelationshipRoles for what each
+    # absent role costs.
+    relationship_roles: PackageRelationshipRoles = Field(
+        default_factory=PackageRelationshipRoles)
     dossier_classes: list[PackageDossierClassEntry] = Field(default_factory=list)
     playbooks: list[PackagePlaybookEntry] = Field(default_factory=list)
     annotations: list[PackageAnnotationEntry] = Field(default_factory=list)

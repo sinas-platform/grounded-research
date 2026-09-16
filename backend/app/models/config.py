@@ -122,6 +122,13 @@ class RelationshipDefinition(Base, TimestampMixin):
         String(10), nullable=False, default="open", server_default="open"
     )
     managed_by: Mapped[str | None] = mapped_column(String(128), index=True)
+    # Which engine-meaningful role this definition carries, out of the fixed
+    # set in app.schemas.package.ENGINE_ROLES — written from the package's
+    # `spec.relationship_roles` block, NULL for a definition the deployment
+    # gave no role. This is the column engine features read instead of
+    # matching on a name the deployment chose. Indexed: every reader looks a
+    # role up, and there are a handful of rows per role at most.
+    engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
 
     states: Mapped[list["RelationshipState"]] = relationship(
         back_populates="definition", cascade="all, delete-orphan"

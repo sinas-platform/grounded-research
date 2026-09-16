@@ -38,6 +38,36 @@ named here, in one place, precisely so it appears nowhere else; the list is
 short and fixed rather than exhaustive, because what defends the rule is a
 check that stays on, and a check nobody can keep green gets deleted.
 
+THE FOURTH AND FIFTH CHECKS ARE THE TWO WAYS THE ENGINE REACHED A FIELD BY
+GUESSING ITS NAME, and they are shape again because a name list cannot help
+here: the role names the engine uses for these meanings — `date`, `status`,
+`superseded_by` — are spelled exactly like the properties a deployment might
+declare for them, so banning the words would ban the vocabulary that replaced
+them. What is bannable is the SHAPE of the guess, and there were only two.
+
+  READING A FIELD BY A LITERAL NAME. `props.get("status")`,
+  `annotations.get("issuing_body")`: a dictionary of a deployment's fields,
+  subscripted by a name the engine wrote down. Which field carries a meaning
+  is the deployment's to declare (`engine_role` on the property or the
+  annotation, read through `services/declared_roles`); a literal here is the
+  engine deciding for it. The engine's own row fields — `r.get("filename")`,
+  `doc.get("title")` — are not this and are not matched: the receivers are
+  named, and they are the four bags that hold another party's fields.
+
+  MATCHING A FIELD NAME BY REGEX. `re.compile(r"date")`,
+  `re.compile(r"jurisdiction|country|member_?state")`: a pattern made of
+  nothing but bare words and alternation is not matching TEXT, it is matching
+  a NAME, and the only names in reach are a deployment's. A regex with a
+  character class, an escape or an anchor is doing ordinary string work and
+  is not matched.
+
+Neither shape can catch a list of names held in a constant and read
+elsewhere — `_NUMBER_KEYS = ("case_number", "celex", ...)`, which was real and
+is gone — because a tuple of strings looks exactly like the engine's own list
+of its own columns. That gap is stated rather than papered over: what closes
+it is the second check in `test_the_answer_reads_as_prose`, which reads
+`answer_render`'s code and fails on those five spellings by name.
+
 It runs over `app/` only — the engine. Two areas are out of scope by design:
 
   THE PACKAGE AND CONFIG LAYER is where a deployment's vocabulary is supposed
@@ -148,10 +178,37 @@ _CONFIG_LAYER = frozenset({
     "services/package.py",
 })
 
+# ── reaching a deployment's field by a name the engine wrote ─────────────────
+
+# The bags that hold another party's fields. A row's own keys are the engine's
+# and are read by literal name everywhere, legitimately; these four are not.
+_FIELD_BAG = r"(?:props|properties|raw_props|annotations|annotation_values)"
+
+# `props.get("status")`, `annotations["issuing_body"]`, and the same with a
+# default. What the deployment calls the field carrying a meaning is declared
+# on the property or the annotation and read through `declared_roles`.
+_LITERAL_FIELD = re.compile(
+    _FIELD_BAG + r"\s*(?:\.get\(\s*|\[\s*)[\"']([a-z][a-z0-9_]*)[\"']")
+
+# A regex literal that is matching a NAME rather than text: bare words,
+# alternation, an optional character or two, and nothing else. `r"date"` and
+# `r"jurisdiction|country|member_?state"` were both of these; every regex the
+# engine legitimately runs carries a class, an escape or an anchor.
+_REGEX_LITERAL = re.compile(r"re\.(?:compile|match|search|fullmatch)\(\s*"
+                            r"r?[\"']([^\"'\n]+)[\"']")
+_NAME_SHAPED = re.compile(r"[a-z][a-z0-9_?|]{2,}")
+
 # Modules that still key on a deployment's vocabulary, with what clearing each
 # one needs. Every entry is a finding, not an exception — see the staleness
 # check below, which fails the moment an entry stops being true.
 _PENDING: dict[str, str] = {}
+
+
+def _name_matching_regexes(line: str):
+    """The regex literals on this line that are matching a field name."""
+    for pattern in _REGEX_LITERAL.findall(line):
+        if _NAME_SHAPED.fullmatch(pattern):
+            yield pattern
 
 
 def _sources():
@@ -226,6 +283,44 @@ def test_no_engine_module_names_a_deployments_vocabulary():
         "and read the declaration instead:\n  " + "\n  ".join(bad))
 
 
+def test_no_engine_module_reads_a_deployments_field_by_a_literal_name():
+    """Which property carries a date, a status, what replaced a source, or
+    who issued it is the deployment's to declare. An engine that writes the
+    name down works for the collection that happens to spell it that way and
+    is silent for every other — and silent is indistinguishable from a corpus
+    that holds nothing."""
+    bad = []
+    for rel, lines in _engine_modules():
+        for n, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                continue  # a module has to be able to say what it replaced
+            for m in _LITERAL_FIELD.finditer(line):
+                bad.append(f"app/{rel}:{n}: {m.group(0)}")
+    assert not bad, (
+        "these read a deployment's field by a name this repository chose; "
+        "declare the meaning on the property or the annotation "
+        "(`engine_role`) and read it through services/declared_roles:\n  "
+        + "\n  ".join(bad))
+
+
+def test_no_engine_module_finds_a_field_by_matching_its_name():
+    """The other half of the same guess. A pattern of bare words is not
+    matching text, it is matching a name — `date` found a date property,
+    `jurisdiction|country|member_?state` found a jurisdiction — and a name it
+    fails to match is a feature that goes quiet."""
+    bad = []
+    for rel, lines in _engine_modules():
+        for n, line in enumerate(lines, 1):
+            if line.lstrip().startswith("#"):
+                continue
+            for pattern in _name_matching_regexes(line):
+                bad.append(f"app/{rel}:{n}: {pattern}")
+    assert not bad, (
+        "these match a field NAME with a regex; the deployment declares what "
+        "a field means and the engine reads the declaration:\n  "
+        + "\n  ".join(bad))
+
+
 def test_the_pending_list_names_only_modules_that_are_still_dirty():
     """An exemption that outlives what it excuses is how a guard rots. A
     pending module with nothing left to find must leave the list."""
@@ -254,6 +349,31 @@ def test_the_vocabulary_check_can_see_an_offender():
                "superseded by a later source", "the full text of the subject",
                "jurisdiction_note", "the issuing body"):
         assert not _VOCABULARY.search(ok), ok
+
+
+def test_the_field_checks_can_see_the_two_guesses_they_replaced():
+    """Both patterns are exercised against the code that was actually there
+    and against the code that replaced it, so a narrowing that empties either
+    one fails here rather than in six months' silence."""
+    # What was there.
+    assert _LITERAL_FIELD.search('status = unwrap(props.get("status"))')
+    assert _LITERAL_FIELD.search('unwrap(props.get("superseded_by"))')
+    assert _LITERAL_FIELD.search('annotations.get("issuing_body")')
+    assert _LITERAL_FIELD.search('v = annotation_values["authority_tier"]')
+    assert list(_name_matching_regexes('_DATE_KEY = re.compile(r"date")'))
+    assert list(_name_matching_regexes(
+        're.compile(r"jurisdiction|country|member_?state", re.IGNORECASE)'))
+    # What replaced it, and the ordinary work that must not trip either.
+    for ok in ('name = by_class.get(class_name)',
+               'return props.get(name)',
+               'roles.value(roles.status, props, class_name)',
+               'fn = r.get("filename")',
+               'entry["properties"][str(name)] = value',
+               'raw = (doc or {}).get("properties") or {}'):
+        assert not _LITERAL_FIELD.search(ok), ok
+    for ok in ('re.fullmatch(r"\\d+", s)', 're.compile(r"^[a-z]")',
+               're.split(r"[;,]", text)', 're.compile(r"revision_\\d+")'):
+        assert not list(_name_matching_regexes(ok)), ok
 
 
 def test_the_checks_can_see_an_offender():

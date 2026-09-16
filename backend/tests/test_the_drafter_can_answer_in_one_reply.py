@@ -41,6 +41,7 @@ import textwrap
 
 import pytest
 from app.services import answer_structure as st
+from app.services import declared_roles
 from app.services import drafting_chat as dc
 from app.services import query_runner as qr
 
@@ -275,20 +276,41 @@ def test_the_label_comes_from_the_class_the_deployment_declared():
     assert "labelled" not in ctx["a.md"]["line"]
 
 
+#: What this fixture's deployment declared: the class calls its jurisdiction
+#: property `where_it_binds`, which no engine rule could have guessed, and
+#: that is the point — the rules below work on the declaration, not the name.
+ROLES = declared_roles.DeclaredRoles(
+    jurisdiction={"Court Decision": "where_it_binds"})
+
+
+def _jurisdiction_rows(values: list[str]) -> list[dict]:
+    return [{"filename": f"{i}.md", "class": "Court Decision",
+             "props": {"where_it_binds": v}} for i, v in enumerate(values)]
+
+
 def test_a_jurisdiction_note_is_the_minority_one_in_the_retrieved_set():
-    rows = [{"filename": f"{i}.md", "props": {"jurisdiction": "Wide"}}
-            for i in range(3)]
-    rows.append({"filename": "odd.md", "props": {"jurisdiction": "Narrow"}})
-    notes = st.jurisdiction_notes(rows)
+    rows = _jurisdiction_rows(["Wide", "Wide", "Wide", "Narrow"])
+    rows[-1]["filename"] = "odd.md"
+    notes = st.jurisdiction_notes(rows, ROLES)
     assert notes == {"odd.md": "jurisdiction: Narrow"}
 
 
 def test_no_note_where_every_source_is_in_the_same_jurisdiction():
     """A note every claim carries is a note that says nothing."""
-    rows = [{"filename": f"{i}.md", "props": {"jurisdiction": "Wide"}}
-            for i in range(4)]
-    assert st.jurisdiction_notes(rows) == {}
-    assert st.jurisdiction_notes([{"filename": "a.md", "props": {}}]) == {}
+    rows = _jurisdiction_rows(["Wide"] * 4)
+    assert st.jurisdiction_notes(rows, ROLES) == {}
+    assert st.jurisdiction_notes(
+        [{"filename": "a.md", "class": "Court Decision", "props": {}}],
+        ROLES) == {}
+
+
+def test_a_class_that_declares_no_jurisdiction_gets_no_note():
+    """The engine used to match `jurisdiction|country|member_?state` against
+    every property name, so a class calling it anything else was invisible
+    and a class calling something else that has no sources' jurisdiction in
+    it at all was a note nobody could explain. Undeclared is silent."""
+    rows = _jurisdiction_rows(["Wide", "Wide", "Narrow"])
+    assert st.jurisdiction_notes(rows, declared_roles.NONE) == {}
 
 
 # ── a silent drafter is a named failure ──────────────────────────────────────

@@ -70,7 +70,7 @@ RENDERED = answer_render.render_markdown(
       "position": 1, "claim_text": "It applies."}],
     [{"claim_id": "c1", "document_id": "d1", "span": {"paragraph_ref": "42"}}],
     {"d1": {"title": "Kestrel Holdings v Northmoor Authority",
-            "properties": {"case_number": "T-100/20"}}},
+            "identifier": "T-100/20"}},
 )
 
 

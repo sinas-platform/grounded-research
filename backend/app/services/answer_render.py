@@ -37,7 +37,7 @@ from typing import Any
 
 from app.services.answer_structure import (
     UNCLASSIFIED_HEADING,
-    document_date,
+    parse_date,
     part_heading,
     unwrap,
 )
@@ -51,9 +51,18 @@ from app.services.answer_structure import (
 # deployment that files its sources differently gets its own words without
 # SGR learning any of them.
 
-#: Property names a citation is built from, in order of preference.
-_NUMBER_KEYS = ("case_number", "celex", "reference", "number")
-_ECLI_KEYS = ("ecli",)
+# A citation used to be built from the first property found among
+# ("case_number", "celex", "reference", "number"), with the ECLI taken from a
+# property called "ecli" — four guesses at one deployment's spelling and a
+# fifth at another's. A collection naming its identifiers anything else was
+# cited by title and date alone, and nothing said so.
+#
+# No property name is written in this module now, and none may be. A document
+# row arrives carrying its identity already resolved — `identifier` from the
+# class's own `identifier_property`, `alternate_identifier` from the property
+# the class declares for that role, and `date` from the property it declares
+# as its date — put there by `assemble`, which is the one function here with a
+# session. Everything below is a function of the rows it is given.
 
 
 @dataclass
@@ -88,32 +97,43 @@ def _props(doc: dict | None) -> dict:
     return {str(k): unwrap(v) for k, v in raw.items()} if isinstance(raw, dict) else {}
 
 
-def _first(props: dict, keys: tuple[str, ...]) -> str | None:
-    for k in keys:
-        v = props.get(k)
-        if v not in (None, "", [], {}):
-            return _str(v)
-    return None
+def _field(doc: dict | None, key: str) -> str | None:
+    """One of the identity fields a row carries, as text, or None. The keys
+    are the engine's own — `identifier`, `alternate_identifier` — and the
+    values are whatever the deployment's declared properties held."""
+    v = (doc or {}).get(key)
+    return _str(v) if v not in (None, "", [], {}) else None
+
+
+def _date_of(doc: dict | None) -> date | None:
+    """The row's date. `assemble` resolves it from the property the class
+    declares; parsing here as well costs nothing and lets a caller that holds
+    a stored string hand it over as it stands."""
+    return parse_date((doc or {}).get("date"))
 
 
 def citation(doc: dict | None) -> str:
-    """`<title> (<case_number or celex>, <ecli if present>, <date>)` — and
-    never a filename. A document with no number is cited by title and date
+    """`<title> (<identifier>, <second identifier if present>, <date>)` — and
+    never a filename. A document with no identifier is cited by title and date
     alone; one with no title either is named by what it is.
 
     The identifier slot holds a declared property and nothing else. It used
     to fall back to `external_ref`, which is the source's natural key when a
     connector supplies one and the FILE'S NAME when it does not — so every
-    document without a case number or a CELEX was cited by a storage name a
-    reviewer called useless. A citation that cannot say which authority it
-    points at should say less, not say a filename.
+    document without an identifier was cited by a storage name a reviewer
+    called useless. A citation that cannot say which authority it points at
+    should say less, not say a filename.
+
+    The identifiers are the class's own: `identifier` is the value of the
+    property the class names as its identity, and `alternate_identifier` the
+    value of the property it declares as a second citable one — a neutral
+    identifier beside a register number. Both arrive on the row.
     """
     doc = doc or {}
-    props = _props(doc)
     title = _str(doc.get("title")).strip()
-    number = _first(props, _NUMBER_KEYS)
-    ecli = _first(props, _ECLI_KEYS)
-    d = document_date(props)
+    number = _field(doc, "identifier")
+    ecli = _field(doc, "alternate_identifier")
+    d = _date_of(doc)
     if not title:
         title = number or _str(doc.get("class")).strip() or "Untitled source"
         if title == number:
@@ -315,7 +335,7 @@ def _authorities(claims: list[dict], evidence: list[dict], documents: dict,
         heading = (_str((documents.get(did) or {}).get("class")).strip()
                    or UNCLASSIFIED_HEADING)
         tier = min(entry["tiers"]) if entry["tiers"] else None
-        d = document_date(_props(documents.get(did)))
+        d = _date_of(documents.get(did))
         rows.append((heading, tier, d, did, entry["refs"]))
     # A group sorts by the highest authority it holds, so the classes a
     # deployment treats as authoritative lead without SGR being told which
@@ -472,11 +492,12 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
 
 def latest_document_date(documents: dict[str, dict]) -> date | None:
     """The latest date any of these documents carries, or None. The answer
-    states the law as at this date; a run whose sources carry no date at all
-    falls back to the run date, which the caller supplies. Pure."""
+    states the law as at this date; a run whose sources carry no date at all —
+    including one whose classes declare no date property — falls back to the
+    run date, which the caller supplies. Pure."""
     best = None
     for doc in (documents or {}).values():
-        d = document_date(_props(doc))
+        d = _date_of(doc)
         if d and (best is None or d > best):
             best = d
     return best
@@ -499,6 +520,12 @@ async def assemble(session: Any, answer_id: Any,
     publish path passes for a corpus whose sources are all undated — the run
     date — so the answer still says how current it is. A read passes none:
     a reader must not be handed a date nothing in the answer supports.
+
+    This is also where the declarations are read: which property each class
+    calls its date, and which its second identifier. They are resolved ONCE
+    for the whole answer and turned into three plain fields on each document
+    row, so everything downstream renders from data and no renderer ever
+    learns a property name.
     """
     from sqlalchemy import select
 
@@ -511,6 +538,8 @@ async def assemble(session: Any, answer_id: Any,
         DocumentClassProperty,
         PropertyValue,
     )
+    from app.services import declared_roles
+    from app.services.answer_structure import document_date
     from app.services.document_identity import document_title_subquery
 
     answer = await session.get(Answer, answer_id)
@@ -536,13 +565,15 @@ async def assemble(session: Any, answer_id: Any,
         # `external_ref` is the file's name whenever the connector supplied
         # no natural key. What the assembler never holds, it cannot print.
         rows = (await session.execute(
-            select(Document.id, DocumentClass.name, document_title_subquery())
+            select(Document.id, DocumentClass.name,
+                   DocumentClass.identifier_property, document_title_subquery())
             .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
             .where(Document.id.in_(doc_ids))
         )).all()
-        for did, class_name, title in rows:
+        for did, class_name, ident_prop, title in rows:
             documents[str(did)] = {
-                "title": title, "class": class_name, "properties": {}}
+                "title": title, "class": class_name,
+                "identifier_property": ident_prop, "properties": {}}
         prop_rows = (await session.execute(
             select(PropertyValue.document_id, DocumentClassProperty.name,
                    PropertyValue.value)
@@ -554,6 +585,18 @@ async def assemble(session: Any, answer_id: Any,
             entry = documents.get(str(did))
             if entry is not None and value is not None:
                 entry["properties"][str(name)] = value
+        # What each class declared, read once for the answer and written onto
+        # the rows as the three fields the renderer knows about. A class that
+        # declared nothing leaves them empty, and the citation says less.
+        roles = await declared_roles.resolve(session)
+        for entry in documents.values():
+            props = _props(entry)
+            cls = str(entry.get("class") or "")
+            ident_prop = entry.pop("identifier_property", None)
+            entry["identifier"] = props.get(ident_prop) if ident_prop else None
+            entry["alternate_identifier"] = roles.value(
+                roles.alternate_identifier, props, cls)
+            entry["date"] = document_date(props, cls, roles.date)
 
     as_at = (answer.law_stated_as_at
              or latest_document_date(documents) or fallback_as_at)

@@ -38,6 +38,8 @@ from collections.abc import Sequence
 from datetime import date, datetime
 from typing import Any
 
+from app.services.declared_roles import DeclaredRoles
+
 # ── budgets ──────────────────────────────────────────────────────────────────
 
 #: Claims a one-part question may hold.
@@ -118,15 +120,21 @@ STALE_STATUSES = ("repealed", "superseded")
 #: from a `length` reducer over a standing walk, or a bare integer.
 #:
 #: WHICH annotation carries it is not decided here and is not a name in engine
-#: code. The caller passes the annotations whose path walks a relation the
-#: deployment declared with the `standing` role — see
-#: `app.services.relationship_roles.standing_annotation_names`. What is left
-#: below is the fallback for a deployment that has declared no role yet: the
-#: engine-contract name, kept so that such a deployment keeps the tier it has
-#: today, and documented rather than hidden. A deployment that declares the
-#: role may call its annotation anything.
+#: code. The caller passes the annotations resolved from what the deployment
+#: declared — an annotation carrying the `standing_tier` role, else one whose
+#: path walks a relation declared `standing`; both are resolved together in
+#: `app.services.declared_roles.resolve`. What is left below is the fallback
+#: for a deployment that has declared neither: the engine-contract name, kept
+#: so that such a deployment keeps the tier it has today, and documented
+#: rather than hidden. A deployment that declares either may call its
+#: annotation anything.
+#:
+#: The issuing body had a name here too and has none now: it never had a
+#: documented fallback, only a literal, so a deployment that calls it anything
+#: else had the field silently empty. It is read from the annotation declared
+#: `issuing_body`, and where nothing declares one the absence is announced
+#: where it is resolved rather than guessed at here.
 TIER_ANNOTATION = "authority_tier"
-ISSUING_BODY_ANNOTATION = "issuing_body"
 
 
 def claim_cap(n_parts: int) -> int:
@@ -698,10 +706,18 @@ def tier_of(annotations: dict | None,
     return None
 
 
-def issuing_body_of(annotations: dict | None) -> str | None:
-    if not isinstance(annotations, dict):
+def issuing_body_of(annotations: dict | None, name: str | None) -> str | None:
+    """Who issued the source, out of the annotation the deployment declared
+    for it (`roles.issuing_body_annotation`). Pure.
+
+    `None` for `name` is a deployment that declares no such annotation, and
+    the answer is then None rather than a lookup under a name the engine
+    picked — there is no issuing body to report, and `resolve` has already
+    said so in the log.
+    """
+    if not name or not isinstance(annotations, dict):
         return None
-    v = unwrap(annotations.get(ISSUING_BODY_ANNOTATION))
+    v = unwrap(annotations.get(name))
     return str(v) if v not in (None, "") else None
 
 
@@ -770,16 +786,22 @@ def jurisdiction_of(
     return str(v) if v not in (None, "") else None
 
 
-def currency_notes(rows: list[dict]) -> dict[str, str]:
+def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:
     """Per filename, why the document is not current law — or absent.
 
-    Two rules, both from the retrieved set alone. A document whose `status`
-    property is repealed or superseded is stale, and `superseded_by` names
-    what replaced it. A document that shares its class's identifier with a
-    later-dated document in the set is a decision with a later ruling in the
-    same case beside it. Rows are `_manifest_rows` rows carrying `props`
-    (unwrapped property dict) and `identifier` (the class's identifier
-    property value, or None). Pure.
+    Two rules, both from the retrieved set alone. A document whose declared
+    status property says repealed or superseded is stale, and the property it
+    declares for `superseded_by` names what replaced it. A document that
+    shares its class's identifier with a later-dated document in the set is a
+    decision with a later ruling in the same case beside it. Rows are
+    `_manifest_rows` rows carrying `props` (unwrapped property dict), `class`
+    and `identifier` (the class's identifier property value, or None).
+
+    Both properties used to be read by the literal names `status` and
+    `superseded_by`, so a class calling either anything else was current law
+    for ever. `roles` says what each class calls them; a class that declares
+    neither gets no note, which is the truthful answer. Pure — the
+    declarations are resolved once, by the caller, and handed in.
     """
     out: dict[str, str] = {}
     by_case: dict[tuple[str, str], list[dict]] = {}
@@ -788,18 +810,26 @@ def currency_notes(rows: list[dict]) -> dict[str, str]:
         if not fn:
             continue
         props = r.get("props") or {}
-        status = str(unwrap(props.get("status")) or "").strip().lower()
+        cls = str(r.get("class") or "")
+        # WHICH property says how the source stands is the deployment's to
+        # name; WHAT its value has to say to mean "not current law" is the
+        # engine's own vocabulary — `STALE_STATUSES` is the contract a class
+        # writes its status values against, not a guess at another party's
+        # words, and it stays here for that reason.
+        status = str(unwrap(roles.value(roles.status, props, cls))
+                     or "").strip().lower()
         if status in STALE_STATUSES:
             note = f"{status}"
-            by = unwrap(props.get("superseded_by"))
+            by = unwrap(roles.value(roles.superseded_by, props, cls))
             if by:
                 note += f"; superseded by {by}"
             out[fn] = note[:500]
         ident = r.get("identifier")
         if ident:
-            by_case.setdefault((str(r.get("class") or ""), str(ident)), []).append(r)
-    for (_cls, ident), group in by_case.items():
-        dated = [(document_date(r.get("props")), r) for r in group]
+            by_case.setdefault((cls, str(ident)), []).append(r)
+    for (cls, ident), group in by_case.items():
+        dated = [(document_date(r.get("props"), cls, roles.date), r)
+                 for r in group]
         dated = [(d, r) for d, r in dated if d is not None]
         if len(dated) < 2:
             continue
@@ -814,7 +844,7 @@ def currency_notes(rows: list[dict]) -> dict[str, str]:
     return out
 
 
-def jurisdiction_notes(rows: list[dict]) -> dict[str, str]:
+def jurisdiction_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:
     """Per filename, a note where the document is not in the jurisdiction the
     retrieved set is mostly in — or absent.
 
@@ -831,7 +861,8 @@ def jurisdiction_notes(rows: list[dict]) -> dict[str, str]:
     seen: dict[str, str] = {}
     for r in rows:
         fn = r.get("filename")
-        j = jurisdiction_of(r.get("props"))
+        j = jurisdiction_of(r.get("props"), str(r.get("class") or ""),
+                            roles.jurisdiction)
         if fn and j:
             seen[str(fn)] = str(j)
     if len(seen) < 2:
@@ -866,11 +897,13 @@ def source_context_line(r: dict, label: str | None = None) -> str:
     return "; ".join(bits)
 
 
-def latest_source_date(rows: list[dict]) -> date | None:
-    """The latest date any of these documents carries, or None."""
+def latest_source_date(rows: list[dict], roles: DeclaredRoles) -> date | None:
+    """The latest date any of these documents carries, or None. Each row's
+    date is the property ITS class declares, so two classes may date
+    themselves differently and both count."""
     best = None
     for r in rows:
-        d = document_date(r.get("props"))
+        d = document_date(r.get("props"), str(r.get("class") or ""), roles.date)
         if d and (best is None or d > best):
             best = d
     return best

@@ -31,25 +31,31 @@ PARTS = [
     {"index": 1, "label": "Whether it is mandatory", "text": "..."},
 ]
 
+# A document row as `assemble` builds it. The identity is already resolved
+# when it gets here — `identifier` from the property the class names as its
+# identity, `alternate_identifier` from the property it declares as a second
+# citable one, `date` from the property it declares as its date — because the
+# renderer is pure and knows no property names at all. What each class CALLS
+# those properties is not visible in this file, and that is the contract.
 DOCS = {
     "d1": {
         "title": "Kestrel Holdings v Northmoor Authority",
         "external_ref": "T-100/20",
         "class": "Court Decision",
-        "properties": {"case_number": "T-100/20",
-                       "ecli": "ECLI:XX:YY:2021:1",
-                       "decision_date": "2021-05-04"},
+        "identifier": "T-100/20",
+        "alternate_identifier": "ECLI:XX:YY:2021:1",
+        "date": date(2021, 5, 4),
     },
     "d2": {
         "title": "An Instrument",
         "class": "Legislation",
-        "properties": {"celex": "3XX0001", "date": "2003-01-01",
-                       "status": "repealed"},
+        "identifier": "3XX0001",
+        "date": date(2003, 1, 1),
     },
     "d3": {
         "title": "A Textbook Chapter",
         "class": "Commentary",
-        "properties": {"date": "2024-03-01"},
+        "date": date(2024, 3, 1),
     },
 }
 
@@ -370,7 +376,7 @@ def test_a_document_is_never_cited_by_its_filename():
         [{"claim_id": "x", "document_id": "d9", "span": {}}],
         {"d9": {"title": None, "class": "Court Decision",
                 "filename": "storage-name-9174.md",
-                "properties": {"case_number": "T-451/20"}}}).markdown
+                "identifier": "T-451/20"}}).markdown
     assert "storage-name-9174" not in md
     assert "- [1] T-451/20" in md
 
@@ -390,14 +396,15 @@ def _cite_only(doc: dict) -> str:
 def test_a_document_with_no_number_is_cited_by_title_and_date_alone():
     """The identifier slot used to fall back to `external_ref`, which is the
     file's name whenever the connector supplied no natural key — so every
-    source without a case number or a CELEX was cited by a storage name a
-    reviewer called useless. It says less instead."""
+    source without an identifier was cited by a storage name a reviewer
+    called useless. It says less instead. A class that declares no identifier
+    property at all arrives here the same way: with no identifier."""
     md = _cite_only({
         "title": "Professional duties: what the deciding body said",
         "external_ref": "stored-file-9174.md",
         "filename": "stored-file-9174.md",
         "class": "Commentary",
-        "properties": {"date": "2010-09-14"}})
+        "date": "2010-09-14"})
     assert ("- [1] Professional duties: what the deciding body said "
             "(2010-09-14), para. 44") in md
     assert ".md" not in md
@@ -413,7 +420,7 @@ def test_a_document_with_a_case_number_is_cited_as_it_always_was():
 def test_a_document_with_no_title_is_named_by_what_it_is_not_by_its_file():
     md = _cite_only({"title": None, "external_ref": "storage-name-9174.md",
                      "filename": "storage-name-9174.md", "class": "Commentary",
-                     "properties": {"date": "2010-09-14"}})
+                     "date": "2010-09-14"})
     assert "- [1] Commentary (2010-09-14), para. 44" in md
     assert "storage-name-9174" not in md
 
@@ -451,11 +458,34 @@ def test_a_citation_with_nothing_to_say_still_names_something():
 def test_the_identifier_slot_holds_a_declared_property_or_nothing():
     """`external_ref` is the source's natural key when a connector supplies
     one and the file's name when it does not, and the citation cannot tell
-    the two apart. So it holds neither."""
+    the two apart. So it holds neither: only what the class declared, which
+    reaches the renderer already resolved."""
     assert citation({"title": "A Textbook Chapter", "class": "Commentary",
                      "external_ref": "chapter-2024.md",
-                     "properties": {"date": "2024-03-01"}}
+                     "date": "2024-03-01"}
                     ) == "A Textbook Chapter (2024-03-01)"
+
+
+def test_the_renderer_holds_no_property_name_of_its_own():
+    """The four names a citation's number used to be looked for under, and
+    the one its ECLI came from, were five guesses at one collection's
+    spelling. A row now arrives with its identity resolved, so a document
+    whose properties are all there but whose class declared none of them
+    is cited by title and date — never by whatever a property happens to be
+    called."""
+    import inspect
+
+    from app.services import answer_render
+
+    # Comments are excluded: the file has to be able to say what it replaced,
+    # and a module that cannot name the defect it fixed teaches nobody.
+    code = "\n".join(ln for ln in inspect.getsource(answer_render).splitlines()
+                     if not ln.lstrip().startswith("#"))
+    for guessed in ("case_number", "celex", '"reference"', '"number"',
+                    '"ecli"'):
+        assert guessed not in code, guessed
+    assert citation({"title": "An Instrument", "class": "Legislation",
+                     "properties": {"celex": "3XX0001"}}) == "An Instrument"
 
 
 def test_a_bare_integer_gets_the_word_and_every_other_label_is_verbatim():

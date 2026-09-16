@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass, field
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -153,3 +154,120 @@ async def annotation_name(
         _announce(role, disabled)
         return None
     return names[0]
+
+
+# ── every declaration at once ────────────────────────────────────────────────
+#
+# What a reader of an answer needs is not one role but all of them, and it
+# needs them for the whole answer rather than per row: the currency rules read
+# a status, what replaced it and a date; the jurisdiction note reads a
+# jurisdiction; a citation reads a second identifier; a claim carries a tier
+# and, where anything derives it, an issuing body. Resolved one role at a time
+# at each use, that is a query per document per rule, and — worse — a session
+# in the middle of code that has no business holding one.
+#
+# So the session-holding caller resolves ONCE, at the top of the answer, and
+# carries this object into the pure code. What travels is data: five mappings
+# from a class's name to the property that class declared for a role, and the
+# annotation names that were resolved. Nothing here can reach the database,
+# which is the point — `answer_render` and the readers in `answer_structure`
+# stay functions of their arguments.
+
+
+@dataclass(frozen=True)
+class DeclaredRoles:
+    """Which field means what, for every class of one deployment.
+
+    Each mapping is class NAME → the name of the property that class declared
+    for that role. A class absent from a mapping declared none, and the only
+    correct reading of that is "this class has no such field" — never a reason
+    to look at other names. `DeclaredRoles()` (see `NONE`) is the honest
+    answer for a caller that has resolved nothing: every role absent.
+    """
+
+    #: When the source speaks.
+    date: dict[str, str] = field(default_factory=dict)
+    #: Whose law or authority it belongs to.
+    jurisdiction: dict[str, str] = field(default_factory=dict)
+    #: In force, repealed, superseded.
+    status: dict[str, str] = field(default_factory=dict)
+    #: What replaced it.
+    superseded_by: dict[str, str] = field(default_factory=dict)
+    #: A second citable identifier, beside the class's `identifier_property`.
+    alternate_identifier: dict[str, str] = field(default_factory=dict)
+    #: The annotations that carry a source's standing, in the order a reader
+    #: should try them. Empty when nothing derives one.
+    tier_annotations: tuple[str, ...] = ()
+    #: The annotation that carries who issued the source, or None.
+    issuing_body_annotation: str | None = None
+
+    def value(self, by_class: dict[str, str], props: dict | None,
+              class_name: str) -> object | None:
+        """The value this row holds for one of the mappings above.
+
+        `roles.value(roles.status, props, class_name)` reads as what it is:
+        the status property THIS class declared, and nothing when it declared
+        none.
+        """
+        return value_for(props or {}, class_name, by_class)
+
+
+#: Nothing is declared. The default for pure code called without a resolved
+#: set — a test, an older row, a caller not yet threaded — and it disables
+#: every rule that needs a declaration rather than guessing one.
+NONE = DeclaredRoles()
+
+
+async def resolve(session: AsyncSession) -> DeclaredRoles:
+    """Every declaration this deployment made, read once.
+
+    Seven small queries at the top of an answer, against columns that are
+    indexed and rows that number in the tens. The alternative is the same
+    lookups inside loops over documents, which is how the engine came to read
+    a name in the first place: the cheap thing to write there was a literal.
+
+    Each absence is announced once per process, naming what it switches off,
+    because a role nothing declares and a corpus holding nothing look
+    identical in the output and want opposite fixes.
+    """
+    from app.services.relationship_roles import standing_annotation_names
+
+    by_role: dict[str, dict[str, str]] = {}
+    for role, disabled in (
+        (DATE, "no source carries a date: no currency comparison, no ordering, "
+               "and an answer states the law as at the run date"),
+        (JURISDICTION, "no claim says the source it cites is from another "
+                       "jurisdiction than the rest of the set"),
+        (STATUS, "no claim says the source it cites is no longer in force"),
+        (SUPERSEDED_BY, "a note that a source is superseded cannot name what "
+                        "replaced it"),
+        (ALTERNATE_IDENTIFIER, "a citation carries one identifier rather than "
+                               "two"),
+    ):
+        by_role[role] = await property_names_by_class_name(session, role)
+        if not by_role[role]:
+            _announce(role, disabled)
+
+    # The tier has two declaration paths and they mean the same thing, so
+    # either will do and the annotation's own declaration wins where both are
+    # written. `standing_annotation_names` finds the annotation by the
+    # relation its path WALKS — a deployment that declared the `standing`
+    # relationship role has already said which that is — and announces its own
+    # absence. What is deliberately NOT here is a fallback to a name: that
+    # lives, documented, in `answer_structure.tier_of`, for a deployment that
+    # has declared neither.
+    tiers = await annotation_names(session, STANDING_TIER)
+    if not tiers:
+        tiers = await standing_annotation_names(session)
+
+    return DeclaredRoles(
+        date=by_role[DATE],
+        jurisdiction=by_role[JURISDICTION],
+        status=by_role[STATUS],
+        superseded_by=by_role[SUPERSEDED_BY],
+        alternate_identifier=by_role[ALTERNATE_IDENTIFIER],
+        tier_annotations=tuple(tiers),
+        issuing_body_annotation=await annotation_name(
+            session, ISSUING_BODY,
+            "no claim carries the issuing body of the source it cites"),
+    )

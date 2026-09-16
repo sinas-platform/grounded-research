@@ -53,13 +53,13 @@ from app.services import (
     answer_render,
     answer_structure,
     claim_naming,
+    declared_roles,
     drafting_chat,
     objections,
     obligations,
     strikes,
     supersession,
 )
-from app.services.relationship_roles import standing_annotation_names
 
 #: How many findings one round puts to the drafter. A round that named
 #: thirty would be a redraft with extra steps, and the ones past the cap are
@@ -644,11 +644,13 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         definitions = list(
             (await session.execute(select(AnnotationDefinition))).scalars()
         )
-        # Which of those annotations says how a source stands against another,
-        # found by the relation it walks rather than by what it is called: the
-        # deployment declares the `standing` role, and this is every annotation
-        # whose path crosses one. Resolved once per manifest, not per document.
-        tier_annotations = await standing_annotation_names(session)
+        # What every field of this deployment means to the engine: which
+        # property of each class is its date, its jurisdiction, its status,
+        # what replaced it and its second identifier, and which annotations
+        # carry standing and the issuing body. Resolved once per manifest,
+        # never per document, and never again downstream — the readers of
+        # these rows are pure and could not resolve it if they wanted to.
+        roles = await declared_roles.resolve(session)
         per_doc: dict = {}
         if definitions and rows:
             per_doc = await annotations_for_documents(
@@ -716,10 +718,11 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
             "title": title,
             "props": raw_props,
             "annotation_values": values,
-            # The annotations that carry standing, for the code reading the
-            # tier off this row. Carried per row so the pure readers stay
-            # pure — nothing downstream touches a session to learn a name.
-            "tier_annotations": tier_annotations,
+            # What this deployment declared, carried per row so the pure
+            # readers stay pure — nothing downstream touches a session to
+            # learn a name. The same object on every row: it is the
+            # deployment's configuration, not the document's.
+            "roles": roles,
             "identifier": (raw_props.get(ident_prop) if ident_prop else None),
             # What a claim citing this document says about the source, as
             # the class declares it. None for a class that declares none,
@@ -3075,15 +3078,22 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
     every claim citing it. Pure over `_manifest_rows` rows.
 
     The label is the document class's own, declared by the deployment; the
-    tier comes from the annotations the row names as carrying standing —
-    resolved in `_manifest_rows` from the deployment's declared role, so no
-    annotation name appears here; the jurisdiction note and the
+    tier, the date behind a currency comparison, the status and the
+    jurisdiction all come from what the rows carry as `roles` — resolved in
+    `_manifest_rows` from the deployment's declarations, so no annotation or
+    property name appears here; the jurisdiction note and the
     currency note are decided across the whole retrieved set, because both
     are comparisons — one against what the other sources are, the other
     against what else in the set is about the same instrument or case.
+
+    Rows that carry no declarations — a caller that built them by hand — get
+    the empty set, which is every rule that needs one switched off rather
+    than any of them guessed.
     """
-    currency = answer_structure.currency_notes(rows)
-    jurisdiction = answer_structure.jurisdiction_notes(rows)
+    roles = next((r["roles"] for r in rows if r.get("roles")),
+                 declared_roles.NONE)
+    currency = answer_structure.currency_notes(rows, roles)
+    jurisdiction = answer_structure.jurisdiction_notes(rows, roles)
     out: dict[str, dict] = {}
     for r in rows:
         fn = r.get("filename")
@@ -3093,8 +3103,9 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
         out[fn] = {
             "line": answer_structure.source_context_line(r, label),
             "label": label,
-            "tier": answer_structure.tier_of(r.get("annotation_values"),
-                                             r.get("tier_annotations")),
+            "tier": answer_structure.tier_of(
+                r.get("annotation_values"),
+                roles.tier_annotations if r.get("roles") else None),
             "jurisdiction": jurisdiction.get(fn),
             "currency": currency.get(fn),
         }
@@ -5000,13 +5011,15 @@ async def _open_notes(raw: list[dict]) -> list[dict]:
 
         rows = (await session.execute(
             select(Document.id, Document.filename, DocumentClass.name,
+                   DocumentClass.identifier_property,
                    document_title_subquery())
             .outerjoin(DocumentClass,
                        DocumentClass.id == Document.document_class_id)
             .where(Document.filename.in_(names))
         )).all()
-        by_id = {did: {"title": title, "class": cls, "properties": {}}
-                 for did, _fn, cls, title in rows}
+        by_id = {did: {"title": title, "class": cls,
+                       "identifier_property": ident_prop, "properties": {}}
+                 for did, _fn, cls, ident_prop, title in rows}
         if by_id:
             for did, prop, value in (await session.execute(
                 select(PropertyValue.document_id, DocumentClassProperty.name,
@@ -5018,7 +5031,22 @@ async def _open_notes(raw: list[dict]) -> list[dict]:
                 entry = by_id.get(did)
                 if entry is not None and value is not None:
                     entry["properties"][str(prop)] = value
-        for did, fn, _cls, _title in rows:
+            # The renderer is pure and is handed the identity rather than the
+            # properties to find it in: the same three fields `assemble`
+            # writes, from the same declarations.
+            roles = await declared_roles.resolve(session)
+            for entry in by_id.values():
+                props = {str(k): answer_structure.unwrap(v)
+                         for k, v in (entry.get("properties") or {}).items()}
+                cls_name = str(entry.get("class") or "")
+                ident_prop = entry.pop("identifier_property", None)
+                entry["identifier"] = (props.get(ident_prop) if ident_prop
+                                       else None)
+                entry["alternate_identifier"] = roles.value(
+                    roles.alternate_identifier, props, cls_name)
+                entry["date"] = answer_structure.document_date(
+                    props, cls_name, roles.date)
+        for did, fn, _cls, _ident_prop, _title in rows:
             docs[fn] = answer_render.citation(by_id.get(did))
     return [{**n, "source_citation": docs.get(str(n.get("source")) or "")}
             for n in raw]

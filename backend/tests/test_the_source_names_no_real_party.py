@@ -96,10 +96,9 @@ its own once it is fixed. The three it held were cleared like this:
   every definition with an unresolved row queued against it.
 
   `answer_rubric.py` — _KIND_WORDS read an Authorities group heading for
-  legal vocabulary to decide what a complete citation is. The heading is a
-  document-class name the deployment chose and the rubric now treats it as
-  the opaque label it is; what a class's citations carry is read off the
-  class's own entries.
+  vocabulary to decide what a complete citation is. That module scored
+  answers for us while we worked; it was never part of the product and it
+  has left the repository, so the leak left with it.
 """
 
 from __future__ import annotations

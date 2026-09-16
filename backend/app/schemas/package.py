@@ -161,6 +161,24 @@ class PackageDocumentClassEntry(_Strict):
     # labelled source states what it says rather than what the law is. A
     # class that declares none is unlabelled and carries rules.
     authority_label: str | None = Field(default=None, max_length=40)
+    # How high a source of this class stands against the other classes of the
+    # same deployment, as a rank: 1 stands highest, larger numbers stand
+    # lower. Absent means UNRANKED, and an unranked class is inert — a source
+    # of it neither satisfies the rule that a general proposition rests on the
+    # highest-standing source available nor violates it.
+    #
+    # A rank rather than a list of class names in order, for two reasons. It
+    # sits on the class, like `authority_label` and like `engine_role` on a
+    # property, so adding a class is one edit in one place and a class cannot
+    # be silently left out of an ordering written somewhere else. And it
+    # admits TIES: two classes that stand equally share a number, which a
+    # total ordering would have to break arbitrarily.
+    #
+    # The number is an ordinal and nothing else. The engine compares two of
+    # them and never reads a meaning into the value, so a deployment may
+    # number 1,2,3 or 10,20,30 and leave room to insert a class between two
+    # others without renumbering its corpus.
+    standing: int | None = Field(default=None, ge=1)
     attribution_cues: list[str] = Field(default_factory=list)
     # Properties whose value a document of this class states about itself, in
     # its front matter. Each entry is {key, property, on_conflict}: which

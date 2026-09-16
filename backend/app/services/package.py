@@ -324,6 +324,7 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "identifier_pattern": dc.identifier_pattern,
                 "name_property": dc.name_property,
                 "authority_label": dc.authority_label,
+                "standing": dc.standing,
                 "declared_properties": [d.model_dump()
                                         for d in dc.declared_properties] or None,
                 "filename_rules": [r.model_dump()
@@ -891,6 +892,11 @@ async def export_package(
                     "identifier_pattern": dc.identifier_pattern,
                     "name_property": dc.name_property,
                     "authority_label": dc.authority_label,
+                    # The rank, round-tripped. An export that dropped it would
+                    # hand back a manifest that silently unranks every class
+                    # when pasted over the original — and an unranked class is
+                    # inert, so the rule would go quiet with nothing saying so.
+                    "standing": dc.standing,
                     "attribution_cues": list(dc.attribution_cues or []),
                     # Both of these are declarations the deployment wrote and
                     # the import stored; an export that drops one hands back a

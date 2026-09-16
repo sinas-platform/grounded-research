@@ -37,6 +37,16 @@ class DocumentClass(Base, TimestampMixin):
     #: the words a reader needs. Null means the class needs no label, which
     #: is also what says the class may carry a rule on its own.
     authority_label: Mapped[str | None] = mapped_column(String(40))
+    #: How high a source of this class stands against the deployment's other
+    #: classes: 1 highest, larger lower, ties allowed. NULL means unranked,
+    #: and an unranked class is inert — a claim citing one neither satisfies
+    #: the highest-standing rule nor breaches it. Written from the class's own
+    #: declaration at import.
+    #:
+    #: NOT the annotation carrying the `standing_tier` role, which is derived
+    #: per DOCUMENT by walking the graph. This is declared per CLASS, is the
+    #: same for every document of it, and needs no graph.
+    standing: Mapped[int | None] = mapped_column(Integer)
     #: Which front-matter keys this class reads directly, as a list of
     #: {key, property, on_conflict}. Empty or null means every property is
     #: extracted, which is what every class did before this existed.

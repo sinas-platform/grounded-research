@@ -96,22 +96,88 @@ def test_aliases_of_a_merged_entity_resolve_to_the_survivor():
 
 def test_validator_prompt_carries_document_identity():
     """The judge must see what each cited document IS, not only what the
-    passage says: one answer attributed a holding to Delivery Hero/Glovo
-    while citing the Naspers/Just Eat Takeaway decision, and per-span
-    entailment had no way to notice."""
+    passage says: one answer attributed a finding to one proceeding while
+    citing the document of another, and per-span entailment had no way to
+    notice — the passage really does discuss those facts."""
     from app.services.faithfulness import _PROMPT
 
     assert "{doc_heads}" in _PROMPT
     assert "Attribution is itself a proposition" in _PROMPT
-    # Voice and modality rules are generic in core; what they look like in a
-    # given corpus arrives via the deployment's `validation` playbook.
+    # Voice, modality and the weight of a heading are generic in core; what
+    # they look like in a given corpus arrives via the deployment's
+    # `validation` playbook.
     assert "{domain_guidance}" in _PROMPT
     assert "Voice is part of attribution" in _PROMPT
     assert "Modality is part of coverage" in _PROMPT
+    assert "A NAME IS NOT A STATEMENT" in _PROMPT
     rendered = _PROMPT.format(claim="c", n=1, spans_block="s",
-                              doc_heads="[m11936.md]\nCase M.11936",
+                              doc_heads="[minutes.md]\nMinutes of 4 March",
                               domain_guidance="")
-    assert "Case M.11936" in rendered
+    assert "Minutes of 4 March" in rendered
+
+
+def test_the_judging_prompt_is_written_for_no_particular_corpus():
+    """This prompt taught the judge in the vocabulary of one deployment —
+    case captions, party lists, what a court held, an advocate's reported
+    words — in about ten places. Every one of those is a SHAPE with a
+    generic name (a heading, a document's own voice, speech it reports), and
+    the corpus-specific version of it belongs in the deployment's validation
+    playbook, which the same prompt composes in. A word from one corpus here
+    is guidance every other deployment's judge is given and cannot use."""
+    from app.services.faithfulness import _PROMPT
+
+    for word in ("court", "advocate", "case caption", "party list", "holding",
+                 "judgment", "legal", "jurisdiction", "decider", "counsel",
+                 "tribunal", "statute"):
+        assert word not in _PROMPT.lower(), word
+    # And the generic shapes it teaches instead are all still there.
+    for shape in ("A NAME IS NOT A STATEMENT", "Voice is part of attribution",
+                  "Reported speech NESTS", "Modality is part of coverage",
+                  "Attribution is itself a proposition"):
+        assert shape in _PROMPT, shape
+
+
+def test_the_playbook_reaches_the_judge_where_the_corpus_words_went():
+    """Moving guidance out of core is only safe if the deployment's own copy
+    arrives in the same prompt. The composed block is labelled as corpus
+    guidance and sits with the rules it makes concrete."""
+    import asyncio
+    from unittest.mock import patch
+
+    from app.services import faithfulness as f
+
+    class _Rows:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def all(self):
+            return self._rows
+
+    class _Session:
+        def __init__(self):
+            self.n = 0
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def execute(self, _stmt):
+            self.n += 1
+            # first call: the playbooks; second: their scope rows
+            return _Rows([("pb1", "Whose words is the passage.")]
+                         if self.n == 1 else [])
+
+    with patch("app.db.AsyncSessionLocal", lambda: _Session()):
+        guidance = asyncio.run(f._domain_guidance(set()))
+    assert "CORPUS GUIDANCE" in guidance
+    assert "Whose words is the passage." in guidance
+    rendered = f._PROMPT.format(claim="c", n=1, spans_block="s",
+                                doc_heads="h", domain_guidance=guidance)
+    assert "Whose words is the passage." in rendered
+    # and it lands before the verdict instructions, not after them
+    assert rendered.index("CORPUS GUIDANCE") < rendered.index("COVERAGE is FULL")
 
 
 def test_per_document_callers_share_one_index():

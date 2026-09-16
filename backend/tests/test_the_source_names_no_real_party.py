@@ -51,7 +51,25 @@ It runs over `app/` only — the engine. Two areas are out of scope by design:
 `_PENDING` names modules that still hold a leak this check would fail on,
 each with what it would take to clear it. It is not an amnesty: a pending
 module that no longer holds one fails the suite, so an entry cannot outlive
-what it excuses.
+what it excuses. IT IS NOW EMPTY, and the shape is kept rather than deleted
+because the next finding wants somewhere to be written down that fails on
+its own once it is fixed. The three it held were cleared like this:
+
+  `services/ingestion_oneshot.py` — CLASS_RULES mapped five filename
+  patterns to four class names. A class now declares its own filename rules
+  (`document_class.filename_rules`, from the package), and the entity prompt
+  is built from the declared entity types rather than listing kinds of thing
+  by example.
+
+  `services/citation_adjudicate.py` — _DEFAULT_DEFS listed five relationship
+  names as the default set to adjudicate. The default is structural now:
+  every definition with an unresolved row queued against it.
+
+  `answer_rubric.py` — _KIND_WORDS read an Authorities group heading for
+  legal vocabulary to decide what a complete citation is. The heading is a
+  document-class name the deployment chose and the rubric now treats it as
+  the opaque label it is; what a class's citations carry is read off the
+  class's own entries.
 """
 
 from __future__ import annotations
@@ -133,21 +151,7 @@ _CONFIG_LAYER = frozenset({
 # Modules that still key on a deployment's vocabulary, with what clearing each
 # one needs. Every entry is a finding, not an exception — see the staleness
 # check below, which fails the moment an entry stops being true.
-_PENDING = {
-    "services/ingestion_oneshot.py":
-        "CLASS_RULES maps filename patterns to document-class names, and the "
-        "entity prompt names kinds of entity by example. Needs the class to "
-        "declare its own filename patterns and the prompt to be built from "
-        "the declared entity types.",
-    "services/citation_adjudicate.py":
-        "_DEFAULT_DEFS lists five relationship names as the default set to "
-        "adjudicate. Needs a structural default (definitions with unresolved "
-        "rows) or no default at all.",
-    "answer_rubric.py":
-        "_KIND_WORDS classifies an authorities-section heading by legal "
-        "vocabulary. Needs the class's own name, which the rubric already "
-        "has elsewhere.",
-}
+_PENDING: dict[str, str] = {}
 
 
 def _sources():

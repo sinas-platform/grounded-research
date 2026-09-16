@@ -48,16 +48,18 @@ DOC_METADATA_AGENT = "sgr/doc-metadata-agent"
 GAZETTEER_MIN_ALIAS_LEN = 4
 RULE_WRITE_CONFIDENCE = 0.95  # rules at/above this write the class directly
 
-# Filename → class rules. Patterns are matched against the bare filename.
-# Confidence below RULE_WRITE_CONFIDENCE is passed to the LLM as a hint
-# instead of being written directly.
-CLASS_RULES: list[tuple[str, str, float, str]] = [
-    (r"^\d{5}M\d+", "Regulatory Decision", 0.98, "EU merger-register filename (3xxxxMxxxx)"),
-    (r"^\d{5}AT\d+", "Regulatory Decision", 0.98, "EU antitrust-register filename (5xxxxATxxxx)"),
-    (r"-merger-inquiry", "Regulatory Decision", 0.97, "CMA merger-inquiry filename"),
-    (r"^c\d{6}", "Regulatory Decision", 0.95, "CNMC case-number filename"),
-    (r"^\d{4,6}(_\d+)?\.md$", "Bulletin article", 0.80, "numeric Bulletin-feed id"),
-]
+#: One filename rule as this module uses it: (class name, pattern,
+#: confidence, reason). Declared by the deployment on the document class
+#: (`document_class.filename_rules`, written from the package) and loaded by
+#: `load_class_rules`.
+#:
+#: This used to be a module constant: five patterns mapped to four class
+#: names one deployment chose. Which filenames mean what is knowledge about a
+#: COLLECTION — a regulator's register scheme, a feed's numeric ids — so
+#: every other deployment matched nothing, paid for a model call on every
+#: document, and had nothing to tell it why. The ladder is unchanged; only
+#: the place the rungs are written moved.
+ClassRule = tuple[str, str, float, str]
 
 
 def wrap_property_value(value):
@@ -126,8 +128,44 @@ def _prop_for_prompt(p) -> dict:
     }
 
 
-def classify_by_rules(filename: str) -> tuple[str, float, str] | None:
-    for pattern, cls, conf, reason in CLASS_RULES:
+async def load_class_rules(session: AsyncSession) -> list[ClassRule]:
+    """Every filename rule any class declares, highest confidence first.
+
+    Ordered here rather than trusted from the config, so two classes whose
+    patterns both match a filename resolve the same way on every run: the
+    surer rule wins, and equal confidence falls back to the class name so
+    the order does not depend on the row order the database happens to
+    return. A rule whose pattern does not compile is dropped with a warning
+    rather than taken down the ingestion path per document — the package
+    schema refuses those at import, so one here means the row predates the
+    check or was written around it.
+    """
+    out: list[ClassRule] = []
+    for cls in (await session.execute(select(DocumentClass))).scalars():
+        for rule in cls.filename_rules or []:
+            pattern = str(rule.get("pattern") or "")
+            if not pattern:
+                continue
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                logging.getLogger(__name__).warning(
+                    "document class %r declares a filename rule that does not "
+                    "compile (%s); it is ignored", cls.name, exc)
+                continue
+            out.append((cls.name, pattern,
+                        float(rule.get("confidence") or 0.0),
+                        str(rule.get("reason") or "")))
+    out.sort(key=lambda r: (-r[2], r[0]))
+    return out
+
+
+def classify_by_rules(filename: str,
+                      rules: list[ClassRule]) -> tuple[str, float, str] | None:
+    """(class name, confidence, reason) for the first declared rule this
+    filename matches, or None. Pure — the rules are passed in, because the
+    callers already hold an open session and this runs per document."""
+    for cls, pattern, conf, reason in rules:
         if re.search(pattern, filename):
             return cls, conf, reason
     return None
@@ -248,35 +286,31 @@ _ENTITY_CHUNK_PROMPT = """Extract EVERY named entity from this document chunk. R
 TYPE GUIDANCE (follow exactly):
 {type_guidance}
 
-Be EXHAUSTIVE: every named company, competition authority, court,
-decision/case, legal instrument (treaty articles, acts, regulations),
-jurisdiction and market in the text — including every item of long
-enumerations. Lists of cases or decisions (often italicised, starred or
-comma-separated) must be unpacked: one entity PER item, named exactly as
-written (keep any year in parentheses); never merge list items into one
-name and never append words like "cartel" or "decision" that the text
-does not use. If an entity appears only by a shortened or generic
-reference, extract that reference exactly as written — never expand it
-to a fuller name the text does not contain. When both a full name and
-short references to the same entity appear, the fullest form suffices.
+Be EXHAUSTIVE: every named thing belonging to one of the types above,
+in any language — including every item of long enumerations. Lists (often
+italicised, starred or comma-separated) must be unpacked: one entity PER
+item, named exactly as written (keep any year in parentheses); never merge
+list items into one name, and never append a word describing what the item
+IS when the text does not use it. If an entity appears only by a shortened
+or generic reference, extract that reference exactly as written — never
+expand it to a fuller name the text does not contain. When both a full name
+and short references to the same entity appear, the fullest form suffices.
 Do not invent names; do not stop early; no duplicates.
 
 A NAME, NOT A WORD. Exhaustive means every named thing, not every
-capitalised one. A common noun is not an entity: "decision", "court",
-"authority", "jurisdiction", "case", "agreement", "services",
-"distribution", "control" and their equivalents in any language name a
-kind of thing, not a thing, and belong in no list here. Neither does a
-word that is only capitalised because it begins a sentence: "Only",
-"Thus", "Will", "Even", "First", "This" are ordinary words wherever
-they appear, and a capital at the start of a sentence says nothing
-about what they are. The test is whether the word would still be
-capitalised in the middle of a sentence. "European Commission" and
-"France" would; "the decision" and "thus" would not.
+capitalised one. A common noun is not an entity: a word naming a KIND of
+thing — the ordinary word for any of the types above, in any language —
+names a kind, not a thing, and belongs in no list here. Neither does a word
+that is only capitalised because it begins a sentence: "Only", "Thus",
+"Will", "Even", "First", "This" are ordinary words wherever they appear,
+and a capital at the start of a sentence says nothing about what they are.
+The test is whether the word would still be capitalised in the middle of a
+sentence.
 
-A bare category with no name attached is not an entity either: "the
-Court" is a court, "the Decision" is a decision, "the Parties" are
-parties. Take the named form where the text gives one and take nothing
-where it does not.
+A bare category with no name attached is not an entity either. "The
+<type>", "the Parties", "the Agreement" — an article and the kind-word,
+capitalised as a document's internal shorthand — name nothing. Take the
+named form where the text gives one and take nothing where it does not.
 
 Skip entities from this already-recorded list: {known}
 
@@ -525,6 +559,7 @@ async def oneshot_ingest_document(
     gazetteer: list[tuple[str, uuid.UUID, str]],
     classes: list[tuple[uuid.UUID, str, str]],
     entity_types: list[dict],
+    class_rules: list[ClassRule] | None = None,
     write: bool = True,
     resummarise: bool = False,
 ) -> dict[str, Any]:
@@ -556,8 +591,8 @@ async def oneshot_ingest_document(
 
     report: dict[str, Any] = {"document": doc.filename, "llm_calls": 0}
 
-    # 1. rules (pure)
-    rule = classify_by_rules(doc.filename or "")
+    # 1. rules (pure — the rules themselves were loaded once by the caller)
+    rule = classify_by_rules(doc.filename or "", class_rules or [])
 
     # 2. gazetteer scan (pure CPU — no connection held)
     known = gazetteer_scan(content, gazetteer)
@@ -917,6 +952,10 @@ async def oneshot_ingest(
             (c.id, c.name, c.description or "")
             for c in (await session.execute(select(DocumentClass))).scalars()
         ]
+        # Kept beside `classes` rather than folded into its tuple: four call
+        # sites unpack that tuple, and widening one several readers unpack is
+        # how the naming check was silently killed twice.
+        class_rules = await load_class_rules(session)
         entity_types = [
             {
                 "id": t.id,
@@ -953,6 +992,7 @@ async def oneshot_ingest(
                         gazetteer=gazetteer,
                         classes=classes,
                         entity_types=entity_types,
+                        class_rules=class_rules,
                         write=write,
                         resummarise=resummarise,
                     )

@@ -221,12 +221,12 @@ _PARA = re.compile(r"\b(?:para(?:graph)?s?\.?|points?|recital)\s+\(?\d+", re.I)
 #
 #     ## Authorities
 #
-#     **Court Decision**
+#     **<a document-class name, whatever the deployment calls it>**
 #
-#     - [1] Case 155/79 - X v Y (C-155/79, ECLI:EU:C:1982:95, 1982-05-18)
-#     - [4] Case T-125/03 - X v Y (T-125/03, 2007-01-01), para. 83
+#     - [1] A title (an identifier, an identifier, a date), a locator
+#     - [4] Another title (an identifier, a date), a locator
 #
-# Scoring a marker-carrying sentence for a case number is scoring the wrong
+# Scoring a marker-carrying sentence for an identifier is scoring the wrong
 # text, so the marker is resolved to its entry first and the entry is scored.
 
 _AUTHORITIES_HEADING = re.compile(
@@ -245,25 +245,14 @@ _ALPHA_WORD = re.compile(r"[^\W\d_]{3,}", re.UNICODE)
 # is a docket, not a title.
 _FILLER = frozenset({"case", "cases", "joined", "and", "others", "nos"})
 
-# Document classes, by what the group heading says. A court decision is
-# expected to identify itself by number; a commentary article legitimately
-# cannot, and holding that against it is what made the old check unusable.
-_KIND_WORDS = (
-    ("decision", re.compile(
-        r"\b(?:courts?|decisions?|judgments?|judgements?|orders?|rulings?|"
-        r"case[ -]law|jurisprudence)\b", re.I)),
-    ("instrument", re.compile(
-        r"\b(?:legislation|regulations?|directives?|treaty|treaties|statutes?|"
-        r"conventions?|charters?|notices?|guidelines?|acts?)\b", re.I)),
-)
-# What "complete" means per class: the attributes an entry of that class must
-# carry. An ECLI is recorded but never required — a source either has one or
-# does not, and the text cannot tell which.
-_COMPLETE_BY_KIND = {
-    "decision": ("title", "number", "date"),
-    "instrument": ("title", "number", "date"),
-    "commentary": ("title", "date"),
-}
+# What "complete" means, and the one thing it turns on: whether a source of
+# this kind identifies itself by a number at all. One that does must cite the
+# number — without it a reader cannot find the source — and one that does not
+# legitimately cannot, and holding that against it is what made the old check
+# unusable. An ECLI or equivalent is recorded but never required: a source
+# either has one or does not, and the text cannot tell which.
+_COMPLETE_NUMBERED = ("title", "number", "date")
+_COMPLETE_UNNUMBERED = ("title", "date")
 
 
 def split_authorities(body: str) -> tuple[str, str]:
@@ -277,17 +266,30 @@ def split_authorities(body: str) -> tuple[str, str]:
     return (body or "").strip(), ""
 
 
-def _entry_kind(group: str, has_identifier: bool) -> str:
-    """The document class of an entry, from its group heading. With no
-    heading to go on, an entry that identifies itself by docket or ECLI is
-    read as a decision and everything else as commentary."""
-    heading = (group or "").strip()
-    for kind, pattern in _KIND_WORDS:
-        if pattern.search(heading):
-            return kind
-    if heading:
-        return "commentary"
-    return "decision" if has_identifier else "commentary"
+def _numbered_groups(entries: dict[int, dict]) -> dict[str, bool]:
+    """Which Authorities groups hold a kind of source that carries a number.
+
+    A group heading is the name of a DOCUMENT CLASS the deployment chose —
+    whatever it calls that family of sources. This module used to read that
+    heading for the vocabulary of one field — a dozen words that meant
+    "must cite a number", a dozen more that meant the same, anything else
+    treated as needing no number — which made a rubric that scores any
+    answer into a rubric that scores one deployment's answers and silently
+    mis-scored everyone else's: a class called `Inspection Report` or
+    `Standard` fell through to the no-number branch and was never asked for
+    the identifier its sources carry.
+
+    The heading is an opaque label here. What is read instead is the group's
+    own entries: a class whose sources carry numbers has entries that carry
+    them, so if ANY entry in the group does, the class numbers its sources
+    and every entry in it is expected to cite one. A group where none does
+    is a class that does not number, and none is. Pure.
+    """
+    numbered: dict[str, bool] = {}
+    for e in entries.values():
+        g = e["group"]
+        numbered[g] = numbered.get(g, False) or bool(e["number"] or e["ecli"])
+    return numbered
 
 
 def _parse_entry(marker: int, text: str, group: str) -> dict:
@@ -308,7 +310,6 @@ def _parse_entry(marker: int, text: str, group: str) -> dict:
     return {
         "marker": marker,
         "group": group,
-        "kind": _entry_kind(group, bool(ecli or _NUMBER.search(body))),
         "title": len(words) >= 2 or bool(_INSTRUMENT.search(bare)),
         "number": bool(_NUMBER.search(body)),
         "ecli": ecli,
@@ -347,8 +348,18 @@ def parse_authorities(block: str) -> dict[int, dict]:
                 open_marker, f"{e['text']} {line.strip()}", e["group"])
         else:
             open_marker = None
+    # Completeness is a second pass, because what an entry must carry depends
+    # on its SIBLINGS: the group says which class the entry belongs to, and
+    # the group's entries say whether that class numbers its sources.
+    numbered = _numbered_groups(entries)
     for e in entries.values():
-        e["complete"] = all(e[a] for a in _COMPLETE_BY_KIND[e["kind"]])
+        # An entry under no heading has no siblings to read, so it answers
+        # for itself: one that identifies by number is a source that numbers.
+        e["numbered"] = (numbered[e["group"]] if e["group"]
+                         else bool(e["number"] or e["ecli"]))
+        e["complete"] = all(
+            e[a] for a in (_COMPLETE_NUMBERED if e["numbered"]
+                           else _COMPLETE_UNNUMBERED))
     return entries
 
 
@@ -430,7 +441,7 @@ def _resolved_precheck(body: str, entries: dict[int, dict]) -> dict:
             "claim": i,
             "markers": markers,
             "unresolved": missing,
-            "kinds": sorted({e["kind"] for e in seen}),
+            "groups": sorted({e["group"] for e in seen if e["group"]}),
             "name": any(e["title"] for e in seen),
             "number": any(e["number"] for e in seen),
             "date": any(e["date"] for e in seen),
@@ -443,22 +454,25 @@ def _resolved_precheck(body: str, entries: dict[int, dict]) -> dict:
     complete = sum(1 for p in cited if p["complete"])
     share = complete / len(cited) if cited else 0.0
     # The thresholds are stricter than the inline check's 0.8/0.3 because
-    # what they measure is easier to satisfy: completeness is now judged per
-    # source class — a commentary article needs a title and a date, not a
-    # case number — so "complete throughout" should mean nearly all of them.
-    # A filename anywhere is still the hard failure it always was.
+    # what they measure is easier to satisfy: completeness is judged per
+    # source class — a class whose sources carry no number is not asked for
+    # one — so "complete throughout" should mean nearly all of them. A
+    # filename anywhere is still the hard failure it always was.
     if filenames:
         cap = 0 if share < 0.5 else 1
     else:
         cap = 2 if share >= 0.9 else 1 if share >= 0.5 else 0
-    kinds: dict[str, int] = {}
+    # Counted by the deployment's own class names, as the answer prints
+    # them. The rubric reports what it saw; it does not rename it.
+    by_group: dict[str, int] = {}
     for e in entries.values():
-        kinds[e["kind"]] = kinds.get(e["kind"], 0) + 1
+        g = e["group"] or "(ungrouped)"
+        by_group[g] = by_group.get(g, 0) + 1
     return {
         "format": "authorities",
         "claims": len(per),
         "authorities": len(entries),
-        "authorities_by_kind": kinds,
+        "authorities_by_group": by_group,
         # Marker numbers, not claim numbers: the judge reads this and will
         # say "claims 2, 4, 9" if the name lets it.
         "incomplete_authority_markers": sorted(

@@ -245,6 +245,7 @@ class BatchClient:
 # ── stages ──────────────────────────────────────────────────────────────────
 async def _load_shared(session):
     from app.models import DocumentClass, EntityType
+    from app.services import ingestion_oneshot as one_module
     from app.services.ingestion_oneshot import _load_gazetteer
 
     gazetteer = await _load_gazetteer(session)
@@ -262,7 +263,11 @@ async def _load_shared(session):
          "guidance": (t.guidance or t.description or "").strip(),
          "creation_mode": t.creation_mode}
         for t in (await session.execute(select(EntityType))).scalars()]
-    return gazetteer, classes, entity_types, guidance_by_class
+    # Same reason the guidance is keyed separately: the `classes` tuple is
+    # unpacked at four call sites. The rules are a deployment declaration
+    # loaded once per run — see `ingestion_oneshot.load_class_rules`.
+    class_rules = await one_module.load_class_rules(session)
+    return gazetteer, classes, entity_types, guidance_by_class, class_rules
 
 
 async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
@@ -278,8 +283,8 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
 
     # worklist from data
     async with AsyncSessionLocal() as session:
-        gazetteer, classes, entity_types, guidance_by_class = await _load_shared(
-            session)
+        (gazetteer, classes, entity_types, guidance_by_class,
+         class_rules) = await _load_shared(session)
         work = []  # (id, filename, content)
         class_by_did: dict = {}
         for did in doc_ids:
@@ -324,7 +329,7 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
             # bulk, which is most of them.
             props_by_class[cid] = [one._prop_for_prompt(p) for p in rows]
         for wi, (did, fn, content) in enumerate(work):
-            rule = one.classify_by_rules(fn)
+            rule = one.classify_by_rules(fn, class_rules)
             hint = rule
             # A filename rule is one way to know the class, not the only one.
             # A document that arrives already classified -- source-declared, or
@@ -373,7 +378,7 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
         for wi, ((did, fn, content), reply) in enumerate(zip(work, r1)):
             if not reply:
                 continue
-            rule = one.classify_by_rules(fn)
+            rule = one.classify_by_rules(fn, class_rules)
             try:
                 data = one._parse_json_reply(reply)
             except Exception:  # noqa: BLE001 — replay will surface it per-doc

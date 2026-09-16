@@ -15,7 +15,11 @@ teaches the key as an alias, so the deterministic ladder absorbs the
 pattern and this pass shrinks over time.
 
     python -m app.services.citation_adjudicate --dry-run
-    python -m app.services.citation_adjudicate --defs cites,appealed_in
+    python -m app.services.citation_adjudicate --defs cites,mentions
+
+With no `--defs` the pass takes every definition that has unresolved rows
+queued against it — see `_definitions_to_adjudicate` for why that is
+structural rather than a list of names.
 """
 
 from __future__ import annotations
@@ -38,8 +42,44 @@ _log = logging.getLogger("sgr.citation_adjudicate")
 
 _AGENT = "sgr/entity-resolution-agent"
 _BATCH = 15
-_DEFAULT_DEFS = ["cites", "book_cites_decision", "article_review_cites_decision",
-                 "appealed_in", "cites_legal_instrument"]
+
+
+def _definitions_to_adjudicate(defs: list[str] | None):
+    """Which relationship definitions this pass considers, as a SELECT.
+
+    Named explicitly, or — and this is the default — every definition that
+    has something for this pass to do: one with at least one unresolved row
+    queued against it, pointing at an entity type.
+
+    The default used to be a list of five relationship names one deployment
+    happens to use. That is a pass that runs for that deployment and does
+    nothing at all for any other, with no error: a deployment naming its
+    citation edges anything else got an empty queue report and a growing
+    queue. It also went stale in the other direction — a sixth citing
+    relationship added to that deployment's package was not in the list and
+    was never adjudicated, and nothing said so.
+
+    The structural version cannot be wrong in either direction. A definition
+    with no unresolved rows has nothing to adjudicate, so excluding it costs
+    nothing; a definition with them is exactly what this pass exists for,
+    whatever it is called. `--defs` still narrows it, for a run that wants
+    one edge.
+    """
+    stmt = select(RelationshipDefinition)
+    if defs:
+        return stmt.where(RelationshipDefinition.name.in_(defs))
+    queued = (
+        select(UnresolvedRelationship.relationship_definition_id)
+        .where(UnresolvedRelationship.status == "unresolved")
+        .distinct()
+    )
+    # `target_ref_type` is filtered again per row below, where the definition
+    # is in hand; here it keeps the batch from loading definitions the loop
+    # would only skip.
+    return stmt.where(
+        RelationshipDefinition.id.in_(queued),
+        RelationshipDefinition.target_ref_type == "entity_type",
+    )
 
 
 def _candidates(index: KeyIndex, key: str, type_id, limit: int = 6) -> list[tuple]:
@@ -68,8 +108,7 @@ async def adjudicate(defs: list[str] | None = None, *,
     async with AsyncSessionLocal() as session:
         index = await KeyIndex.load(session)
         wanted = (await session.execute(
-            select(RelationshipDefinition)
-            .where(RelationshipDefinition.name.in_(defs or _DEFAULT_DEFS)))).scalars().all()
+            _definitions_to_adjudicate(defs))).scalars().all()
         by_id = {d.id: d for d in wanted}
         rows = list((await session.execute(
             select(UnresolvedRelationship)
@@ -108,10 +147,11 @@ async def adjudicate(defs: list[str] | None = None, *,
                 prompt = (
                     "For each numbered reference below, decide which candidate "
                     "entity it refers to, or none. A reference matches a "
-                    "candidate only if they plainly denote the SAME case, "
-                    "judgment or instrument — same proceeding, not merely the "
-                    "same parties or subject. When unsure, answer none: a "
-                    "wrong link is worse than no link.\n\n" + items
+                    "candidate only if they plainly denote the SAME "
+                    "individual thing — the very same one, not merely "
+                    "another with the same participants, the same subject "
+                    "or a similar name. When unsure, answer none: a wrong "
+                    "link is worse than no link.\n\n" + items
                     + '\n\nReply ONLY JSON: {"choices": [{"i": <item number>, '
                     '"pick": <candidate letter-index as integer, or null>}]}'
                 )

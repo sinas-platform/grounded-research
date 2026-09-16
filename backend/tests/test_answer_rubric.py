@@ -204,10 +204,16 @@ def test_an_answer_with_no_authorities_heading_keeps_its_whole_body():
 def test_every_entry_is_read_for_what_the_citation_carries():
     e = parse_authorities(split_authorities(MARKER_ANSWER)[1])
     assert sorted(e) == [1, 2, 3, 4]
-    assert e[1]["kind"] == "decision" and e[1]["number"] and e[1]["ecli"]
-    assert e[3]["kind"] == "commentary"
-    assert e[4]["kind"] == "instrument"
+    assert e[1]["numbered"] and e[1]["number"] and e[1]["ecli"]
+    # Read off the group, not off the heading's words: the two entries under
+    # "Court Decision" carry numbers, so that class numbers its sources; the
+    # single article under "Article (Review)" carries none, so that one does
+    # not. Either heading could have been any word the deployment chose.
+    assert e[2]["numbered"] and not e[3]["numbered"]
+    assert e[4]["numbered"]
     assert all(x["complete"] for x in e.values())
+    assert [e[m]["group"] for m in (1, 3, 4)] == [
+        "Court Decision", "Article (Review)", "Legislation"]
 
 
 def test_a_marker_in_a_claim_is_scored_on_the_entry_it_resolves_to():
@@ -237,24 +243,51 @@ def test_a_multi_marker_claim_takes_the_best_and_the_counts_stay_honest():
     assert c["with_date"] == 1 and c["per_claim"][0]["markers"] == [1, 2]
 
 
-def test_a_commentary_entry_is_complete_without_a_case_number():
+def test_a_source_whose_class_carries_no_number_is_complete_without_one():
+    """Nothing in the group carries a number, so nothing in it is asked for
+    one. The heading's words are not consulted — `Article (Review)` could
+    have been `Standard` or `Inspection Report`."""
     body = ("Commentators agree.[1]\n\n"
             "## Authorities\n\n"
             "### Article (Review)\n\n"
             "- [1] Partial annulment reconsidered (2019-05-21)\n")
     e = parse_authorities(split_authorities(body)[1])
-    assert e[1]["kind"] == "commentary"
+    assert e[1]["numbered"] is False
     assert not e[1]["number"] and e[1]["complete"]
     assert citation_precheck(body)["cap"] == 2
 
 
-def test_a_decision_without_a_number_is_not_complete():
-    body = ("The court so held.[1]\n\n"
+def test_an_entry_missing_the_number_its_siblings_carry_is_not_complete():
+    """The defect this catches: a source cited without the identifier a
+    reader needs to find it. What makes the identifier required is that the
+    class HAS one — which the group's other entries show, and which no
+    reading of the heading can establish. The old check read the heading for
+    the words `courts?|decisions?|judgments?` and so caught this only for a
+    deployment that spelled its classes that way."""
+    body = ("The court so held.[1][2]\n\n"
             "## Authorities\n\n"
             "**Court Decision**\n\n"
-            "- [1] Ashgrove Systems v Authority (2012-11-14)\n")
-    assert parse_authorities(split_authorities(body)[1])[1]["complete"] is False
-    assert citation_precheck(body)["cap"] == 0
+            "- [1] Ashgrove Systems v Authority (2012-11-14)\n"
+            "- [2] Bellhaven Retail v Authority (T-200/10, 2013-04-09)\n")
+    e = parse_authorities(split_authorities(body)[1])
+    assert e[1]["numbered"] and e[1]["complete"] is False
+    assert e[2]["complete"] is True
+    # and the incomplete one is named to the judge by its marker
+    assert citation_precheck(body)["incomplete_authority_markers"] == [1]
+
+
+def test_the_heading_is_a_class_name_and_never_read_for_its_words():
+    """Same two entries, same shapes, under a heading from a corpus that has
+    nothing to do with law. The verdict must be identical: what the rubric
+    knows about a class comes from the class's entries."""
+    shapes = ("- [1] Ashgrove Systems v Authority (2012-11-14)\n"
+              "- [2] Bellhaven Retail v Authority (T-200/10, 2013-04-09)\n")
+    verdicts = []
+    for heading in ("**Court Decision**", "**Inspection Report**",
+                    "**Ausgangsentscheidung**", "**Widget Teardown**"):
+        e = parse_authorities(f"{heading}\n\n{shapes}")
+        verdicts.append((e[1]["numbered"], e[1]["complete"], e[2]["complete"]))
+    assert verdicts == [(True, False, True)] * 4
 
 
 def test_a_trailing_locator_is_read_off_the_entry():

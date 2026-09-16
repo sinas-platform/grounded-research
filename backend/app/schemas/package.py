@@ -52,6 +52,41 @@ class PackageDeclaredProperty(_Strict):
     on_conflict: Literal["replace", "fill_only"] = "fill_only"
 
 
+class PackageFilenameRule(_Strict):
+    """One filename shape that means a document is of this class.
+
+    `pattern` is a regular expression matched against the bare filename with
+    `re.search`. `confidence` is how sure the deployment is: at or above the
+    engine's write threshold the class is assigned outright, below it the
+    rule is passed to the classifying model as a hint. `reason` is what the
+    rule is FOR, in the deployment's own words — it is stored on the
+    document and is the only record of why a class was assigned without a
+    model ever reading the file.
+
+    This is knowledge about a collection, not about documents in general: a
+    regulator's register scheme, a feed's numeric ids. The engine carried
+    five such patterns for years, mapped to one deployment's class names,
+    and every other deployment got no rule hits and a model call per
+    document with nothing saying why.
+    """
+
+    pattern: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str
+
+    @field_validator("pattern")
+    @classmethod
+    def _pattern_compiles(cls, v: str) -> str:
+        """Refused where it is written. A rule that does not compile would
+        otherwise raise inside the ingestion path, per document, on a rung
+        that is meant to be free."""
+        try:
+            re.compile(v)
+        except re.error as exc:
+            raise ValueError(f"filename rule pattern does not compile: {exc}") from exc
+        return v
+
+
 class PackageDocumentClassEntry(_Strict):
     name: str
     slug: str | None = None
@@ -100,6 +135,9 @@ class PackageDocumentClassEntry(_Strict):
     # `fill_only`, the default, says fill a gap and leave what is there.
     declared_properties: list[PackageDeclaredProperty] = Field(
         default_factory=list)
+    # How a document of this class is recognised from its filename alone.
+    # Empty is the default and means it is not — see PackageFilenameRule.
+    filename_rules: list[PackageFilenameRule] = Field(default_factory=list)
     properties: list[PackagePropertyEntry] = Field(default_factory=list)
     # entity types attached to this document class, by entity-type name
     entity_types: list[str] = Field(default_factory=list)

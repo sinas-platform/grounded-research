@@ -42,6 +42,16 @@ class DocumentClass(Base, TimestampMixin):
     #: extracted, which is what every class did before this existed.
     declared_properties: Mapped[list | None] = mapped_column(JSONB)
     attribution_cues: Mapped[list[str] | None] = mapped_column(JSONB)
+    #: How a document of this class can be recognised from its FILENAME
+    #: alone, as a list of {pattern, confidence, reason}. Free and instant,
+    #: and the first rung of the classification ladder — but only a
+    #: deployment knows that its regulator's files are named one way and its
+    #: commentary feed another, so the rules are declared on the class rather
+    #: than listed in the ingestion code, where they named four of one
+    #: deployment's classes and classified nobody else's corpus at all.
+    #: Null or empty means the class is not recognisable by filename, which
+    #: is the default and what most classes are.
+    filename_rules: Mapped[list | None] = mapped_column(JSONB)
 
     properties: Mapped[list["DocumentClassProperty"]] = relationship(
         back_populates="document_class", cascade="all, delete-orphan"

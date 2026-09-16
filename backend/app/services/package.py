@@ -326,6 +326,8 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "authority_label": dc.authority_label,
                 "declared_properties": [d.model_dump()
                                         for d in dc.declared_properties] or None,
+                "filename_rules": [r.model_dump()
+                                   for r in dc.filename_rules] or None,
                 "attribution_cues": list(dc.attribution_cues) or None,
                 "managed_by": ctx.tag,
             },
@@ -888,6 +890,12 @@ async def export_package(
                     "name_property": dc.name_property,
                     "authority_label": dc.authority_label,
                     "attribution_cues": list(dc.attribution_cues or []),
+                    # Both of these are declarations the deployment wrote and
+                    # the import stored; an export that drops one hands back a
+                    # manifest that silently un-declares it when pasted over
+                    # the original.
+                    "declared_properties": list(dc.declared_properties or []),
+                    "filename_rules": list(dc.filename_rules or []),
                     "properties": [_export_property(p) for p in props],
                     "entity_types": [et.name for et in links],
                 }

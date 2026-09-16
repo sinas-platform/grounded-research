@@ -31,6 +31,21 @@ the app as a library, writes the DB directly); the API route
   `document_version.content_md`, restore content from source files and
   re-run extract; every stage treats empty content as failure.
 
+### An unreachable dependency pauses the run; it does not fail it
+
+A sleeping laptop or a dropped network takes both dependencies at once: the
+provider host stops resolving and the pooled database connections die. A
+round in flight now waits for them instead of spending its retry budget
+inside the outage and raising. The log says it once per outage — what is
+unreachable, that the round is PAUSED and not failed, and a matching line
+when it comes back. A real refusal is unaffected: a bad-request 400 fails on
+the first try and is never absorbed by the wait.
+
+- `BULK_OUTAGE_WAIT_SECONDS` (default `43200`, i.e. 12h): how long a round
+  waits for an unreachable dependency before giving up. Past it the process
+  exits and the job resumes from `batches.json` on the next start —
+  submitted batches are polled, never resubmitted.
+
 ## Completeness gate (run before ANY question batch)
 
 `GET /api/v1/maintenance/completeness` returns this per document class,

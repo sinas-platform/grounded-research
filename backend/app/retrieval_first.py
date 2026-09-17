@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import time
 import uuid
@@ -30,6 +31,8 @@ from sqlalchemy import String, bindparam, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
 
 from collections.abc import Sequence
+
+_log = logging.getLogger("sgr.retrieval")
 
 from app.config import get_settings
 
@@ -711,6 +714,163 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
              "score": round(sc, 3),
              "reason": "; ".join(dict.fromkeys(reasons[did]))[:480]}
             for did, sc in ranked]
+
+
+#: How many of the first pass's documents the planner reads back before it
+#: writes its second set of queries, and how many terms it may ask for.
+SECOND_PASS_READ = 25
+SECOND_PASS_TERMS = 6
+
+_SECOND_PASS_PROMPT = """\
+A first search has been run for this question and the summaries below are what
+came back. Read them for VOCABULARY, not for answers.
+
+QUESTION:
+{question}
+
+QUERIES ALREADY RUN (do not repeat these):
+{queries}
+
+WHAT CAME BACK:
+{summaries}
+
+Name up to {n} DISTINCTIVE terms — a named mechanism, procedure, doctrine,
+instrument or test — that a document answering this question would contain and
+that the queries above would not find. Prefer a phrase that is rare: a term
+that names one specific thing beats a description of it, because the search
+this feeds matches words exactly. A term that would appear in thousands of
+documents in this collection is worth nothing here.
+
+Reply ONLY JSON: {{"terms": ["<term>", ...]}}. Reply with an empty list if the
+summaries suggest nothing the queries already cover.
+"""
+
+
+async def second_pass_terms(
+    sinas, question: str, plan: dict, ranked: list[dict],
+    run_id: uuid.UUID | None = None,
+) -> list[str]:
+    """Distinctive terms learned from what the first pass returned.
+
+    Both planning rounds are blind: one reads a map of the collection, the
+    other reads entity matches, and neither ever sees a document. So the
+    queries are written in the words of the question, and a question cannot
+    contain the name of the thing that answers it — that name is what you
+    learn by reading.
+
+    Measured: a question about the privacy of employees not under
+    investigation retrieved none of the two judgments that decide it. The
+    mechanism those judgments turn on is called a virtual data room, a phrase
+    the question has no reason to contain. Searching for it returns 11
+    documents out of 126,000, both judgments among them. The retrieval was
+    not weak; it was never asked.
+
+    Returns terms only. What to do with them is the caller's.
+    """
+    from app.db import AsyncSessionLocal
+
+    if not ranked:
+        return []
+    async with AsyncSessionLocal() as s:
+        rows = (await s.execute(text("""
+            SELECT filename, left(coalesce(summary, ''), 400)
+            FROM document WHERE id = ANY(CAST(:dids AS uuid[]))"""),
+            {"dids": [r["document_id"] for r in ranked[:SECOND_PASS_READ]]})).all()
+    summaries = "\n".join(f"- {fn}: {s_}" for fn, s_ in rows if (s_ or "").strip())
+    if not summaries:
+        return []
+    try:
+        data = await _invoke_json(
+            sinas, PLAN_AGENT,
+            _SECOND_PASS_PROMPT.format(
+                question=question, n=SECOND_PASS_TERMS, summaries=summaries,
+                queries="\n".join(f"- {q}" for q in plan.get("queries") or [])),
+            (("terms",),), run_id, "second pass")
+    except Exception:  # noqa: BLE001 — a blind plan is the old behaviour
+        _log.warning("second-pass terms unavailable", exc_info=True)
+        return []
+    seen = {q.strip().lower() for q in plan.get("queries") or []}
+    out = []
+    for t in (data.get("terms") or []):
+        t = str(t).strip()
+        if 3 <= len(t) <= 80 and t.lower() not in seen:
+            out.append(t)
+    return out[:SECOND_PASS_TERMS]
+
+
+async def retrieve_by_terms(terms: list[str], limit: int = 30) -> dict[str, dict]:
+    """Documents carrying a distinctive term, by full text AND by summary.
+
+    The summary channel is what makes this work across languages. Every
+    document's summary is written in one language whatever the document's own
+    is, so an English term reaches a French judgment and a Hungarian decision
+    through their summaries where it could never reach their text. The
+    collection already held that normalisation; nothing had ever searched it.
+
+    Weighted by how rare the term is. A term in three documents says those
+    three are about it; a term in nine thousand says nothing, and the point of
+    asking for a distinctive term is that the rare case is the common one.
+    """
+    from app.db import AsyncSessionLocal
+
+    found: dict[str, dict] = {}
+    if not terms:
+        return found
+    async with AsyncSessionLocal() as s:
+        for term in terms:
+            rows = (await s.execute(text("""
+                SELECT d.id, d.filename, 'summary' AS via
+                FROM document d
+                WHERE d.summary ILIKE :like AND d.staged IS NOT TRUE
+                UNION
+                SELECT d.id, d.filename, 'text' AS via
+                FROM document d
+                JOIN document_version dv ON dv.id = d.current_version_id
+                WHERE dv.content_tsvector @@ phraseto_tsquery('simple', :term)
+                  AND d.staged IS NOT TRUE
+                LIMIT :lim"""),
+                {"like": f"%{term}%", "term": term, "lim": limit})).all()
+            if not rows or len(rows) >= limit:
+                # Nothing, or so many that the term was not distinctive after
+                # all — either way it carries no signal about these documents.
+                continue
+            weight = 12.0 / max(len(rows), 1) ** 0.5
+            for did, fn, via in rows:
+                e = found.setdefault(str(did), {"filename": fn, "score": 0.0,
+                                                "reasons": []})
+                e["score"] += weight
+                e["reasons"].append(f"{term!r} ({via})")
+    return found
+
+
+def merge_ranked(ranked: list[dict], extra: dict[str, dict],
+                 top_n: int = STORE_TOP) -> list[dict]:
+    """Fold the second pass's finds into the first pass's ranking. Pure.
+
+    A document the first pass already had keeps its provenance and gains the
+    term's score, so a document both passes agree on rises rather than
+    appearing twice. One only the second pass found enters on the term's score
+    alone — which is the case the whole pass exists for.
+
+    Re-sorted and re-cut, with the same id tie-break the first pass uses: a
+    stable order is what keeps membership from being decided by the order rows
+    happened to come back in.
+    """
+    by_id = {r["document_id"]: dict(r) for r in ranked}
+    for did, e in extra.items():
+        row = by_id.get(did)
+        if row is None:
+            by_id[did] = {"document_id": did, "filename": e["filename"],
+                          "score": round(e["score"], 3),
+                          "reason": ("second pass: "
+                                     + "; ".join(e["reasons"]))[:480]}
+            continue
+        row["score"] = round(row["score"] + e["score"], 3)
+        row["reason"] = (row["reason"] + "; second pass: "
+                         + "; ".join(e["reasons"]))[:480]
+    out = sorted(by_id.values(),
+                 key=lambda r: (-r["score"], r["document_id"]))[:top_n]
+    return out
 
 
 async def build_briefing(ranked: list[dict], effort: str) -> list[dict]:

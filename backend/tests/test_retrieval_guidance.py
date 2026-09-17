@@ -92,3 +92,47 @@ def test_a_dossier_only_scope_is_a_restriction_not_the_sentinel():
         "dossier-only scope indistinguishable from the everywhere sentinel")
     assert "cls_id is not None or dossier_id is not None" in src, (
         "either ref being set is a restriction")
+
+
+def test_the_second_pass_merges_finds_without_duplicating_them():
+    """A document both passes found rises; one only the second found enters."""
+    from app.retrieval_first import merge_ranked
+
+    ranked = [{"document_id": "a", "filename": "a.md", "score": 9.0,
+               "reason": "matched 'x'"},
+              {"document_id": "b", "filename": "b.md", "score": 4.0,
+               "reason": "mentions Y x3"}]
+    extra = {"b": {"filename": "b.md", "score": 6.0,
+                   "reasons": ["'virtual data room' (summary)"]},
+             "c": {"filename": "c.md", "score": 12.0,
+                   "reasons": ["'virtual data room' (summary)"]}}
+
+    out = merge_ranked(ranked, extra)
+    assert [r["document_id"] for r in out] == ["c", "b", "a"]
+    assert len(out) == 3, "a document both passes found must not appear twice"
+    # provenance survives the merge, both halves of it
+    b = next(r for r in out if r["document_id"] == "b")
+    assert "mentions Y" in b["reason"] and "virtual data room" in b["reason"]
+    assert b["score"] == 10.0
+    # one only the second pass found carries the term as its whole reason
+    c = next(r for r in out if r["document_id"] == "c")
+    assert c["reason"].startswith("second pass:")
+
+
+def test_the_merge_is_stable_on_equal_scores():
+    """Membership must not be decided by the order rows came back in."""
+    from app.retrieval_first import merge_ranked
+
+    ranked = [{"document_id": "z", "filename": "z.md", "score": 5.0,
+               "reason": "r"},
+              {"document_id": "a", "filename": "a.md", "score": 5.0,
+               "reason": "r"}]
+    assert [r["document_id"] for r in merge_ranked(ranked, {})] == ["a", "z"]
+
+
+def test_a_second_pass_that_finds_nothing_changes_nothing():
+    from app.retrieval_first import merge_ranked
+
+    ranked = [{"document_id": "a", "filename": "a.md", "score": 1.0,
+               "reason": "r"}]
+    assert merge_ranked(ranked, {}) == ranked

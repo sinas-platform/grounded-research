@@ -77,6 +77,17 @@ def gate_env(monkeypatch):
                     scalar_one_or_none=lambda: None,
                     all=lambda: [],
                 )
+            # The owed-source look reads (filename, content) for the documents
+            # the gate named as unused. Empty here: these tests are about what
+            # the gate decides, and a document with no text is skipped without
+            # a model call, so the stubbed reply sequences stay in step. The
+            # look itself is exercised in test_a_named_source_is_opened.py.
+            if "document_version" in str(statement):
+                return SimpleNamespace(
+                    scalars=lambda: SimpleNamespace(all=lambda: []),
+                    scalar_one_or_none=lambda: None,
+                    all=lambda: [],
+                )
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(all=lambda: []),
                 scalar_one_or_none=lambda: None,

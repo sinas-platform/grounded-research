@@ -4196,6 +4196,53 @@ async def _standing_objections(
     return issues, points, counts
 
 
+async def _look_owed(
+    sinas: _Sinas, owed: list[dict]
+) -> dict[str, dict]:
+    """Open each document the review named as unused, for the point it owes.
+
+    The same whole-document read the standing check makes, pointed at the
+    third case that needs it. A source is put to the drafter as owed — cite
+    it, waive it after reading its passages, or refuse it — and until now
+    nothing opened it. Extraction reads per planned claim from that claim's
+    anchors, so a document the plan never pointed at has no passages, and a
+    drafter with nothing verbatim to quote can only refuse however apt the
+    document is.
+
+    That is the mechanical form of a finding the expert review made six times
+    over, naming the missing material by its rank in the retrieved set: 11,
+    26, 31, 33, 41, 51. Retrieved every time; read none of them.
+
+    Returns {filename: hit} for the documents that yielded a passage. A
+    document that yields nothing is not an error and not a hit — the drafter
+    is then refusing on an informed basis, which is the whole point.
+    """
+    from app.services.reread import Cited, owed_prompt
+
+    if not owed:
+        return {}
+    names = [u["doc"] for u in owed]
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename, DocumentVersion.content_md)
+            .join(DocumentVersion,
+                  DocumentVersion.id == Document.current_version_id)
+            .where(Document.filename.in_(names)))).all()
+    text_of = {str(f): str(c or "") for f, c in rows}
+    notes = {u["doc"]: str(u.get("note") or "") for u in owed}
+    found: dict[str, dict] = {}
+    for name in names:
+        body = text_of.get(name, "")
+        if len(body) < 40:
+            continue
+        hit = await _ask_document(
+            sinas, owed_prompt(notes.get(name, ""),
+                               Cited(filename=name, text=body)), name)
+        if hit:
+            found[name] = hit
+    return found
+
+
 async def _look_higher(sinas: _Sinas, gap, counts: dict[str, int]) -> dict | None:
     """Read the higher-standing documents for this claim's proposition.
 
@@ -4714,8 +4761,33 @@ async def _gate_answer(
             feed.remove(u)
             continue
         ids[u["doc"]] = oid
+    # Open each owed document for the point it is said to carry, BEFORE the
+    # request goes out. The request has always told the drafter to waive "with
+    # a rationale you can only give after reading its passages" — and nothing
+    # opened it. Extraction reads per planned claim from that claim's anchors,
+    # so a document the plan never pointed at has no passages, and a drafter
+    # with nothing verbatim to quote can only refuse, whatever the document
+    # says. The expert review named that failure six times over, each time by
+    # the missing source's rank in the retrieved set.
+    looked = await _look_owed(sinas, feed)
+    if feed:
+        await _tele(run_id, "validate", **{f"owed_looks_{cycle_no}": {
+            "asked": [u["doc"] for u in feed],
+            "carried": sorted(looked),
+        }})
     stronger = [f"{u['note']} [obligated document: {u['doc']}]" for u in feed]
     for u in feed:
+        hit = looked.get(u["doc"]) or {}
+        quote = str(hit.get("quote") or "").strip()
+        carried = (
+            f"\nThe document was opened for this point and says, at lines "
+            f"{hit.get('line_from')}-{hit.get('line_to')}: \"{quote[:700]}\""
+            "\nCite THAT, verbatim, if it carries the point."
+            if quote else
+            "\nThe document was opened for this point and no passage stating "
+            "it came back. Refusing is then the right answer, and the "
+            "rationale is that — not a guess about what it might hold."
+        )
         issues.append(
             f"Owed source unused: {u['doc']} — {u['note']} Cite it for the "
             "point it carries, or waive it with a rationale you can only "
@@ -4723,6 +4795,7 @@ async def _gate_answer(
             f'{{"objection": "{ids[u["doc"]]}", "rationale": "<why this '
             'source cannot carry the point asked of it>"}, which is an '
             "answer and will be ruled on rather than ignored."
+            + carried
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
 

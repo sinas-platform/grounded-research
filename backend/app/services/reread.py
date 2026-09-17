@@ -115,6 +115,28 @@ def standing_prompt(proposition: str, source: Cited) -> str:
         "PROPOSITION", proposition, source)
 
 
+def owed_prompt(point: str, source: Cited) -> str:
+    """Ask one document the review named as UNUSED whether it carries a point.
+
+    The third caller of the same look, and the one that was missing. When the
+    review finds a retrieved document that settles something the answer left
+    thin, the engine records it as owed and puts it to the drafter: cite it,
+    waive it "with a rationale you can only give after reading its passages",
+    or refuse it. Nothing opened the document. Extraction reads per planned
+    claim from that claim's anchors, so a document the plan never pointed at
+    has no passages at all — and a drafter with nothing verbatim to quote can
+    only refuse, whatever the document actually says.
+
+    Measured against an expert's review: her findings name the missing
+    material by its rank in the retrieved set — 11, 26, 31, 33, 41, 51. It
+    was retrieved every time. It was never read.
+    """
+    return look_prompt(
+        "A review of an answer named the document below as one the answer "
+        "should have used and did not.",
+        "POINT IT IS SAID TO CARRY", point, source)
+
+
 def apply_reread(
     parts: list[dict],
     found: dict[int, dict | None],

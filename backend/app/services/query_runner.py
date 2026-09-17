@@ -5702,11 +5702,23 @@ def _structure_of(c: dict) -> dict:
 
 
 def _derived_patch_item(c: dict) -> bool:
-    """May this patch item stand without a span? Only an inference that names
-    what it follows from: a reasoning step rests on other claims, and one
-    that names none rests on nothing. Pure."""
+    """May this patch item stand without a span? Pure.
+
+    A claim that rests on other claims rather than on passages: an inference
+    always, and a conclusion that cites nothing and names what it follows
+    from. That rule is `answer_structure.is_derived` and is asked here rather
+    than restated, because a second copy of it is what this function was.
+
+    It admitted inferences only. The gate's own correctness finding is "the
+    answer has no overall conclusion: add one claim of kind conclusion with
+    part null" — a claim that by construction cites nothing and follows from
+    others. The drafter wrote it, this dropped it for having no span, the
+    gate asked again, and the run ended "could not be made internally
+    consistent" having been handed the thing it asked for every cycle.
+    """
     kind = str(c.get("kind") or c.get("type") or "").strip().lower()
-    return kind == "inference" and bool(answer_structure.ref_list(c.get("follows_from")))
+    return answer_structure.is_derived(
+        kind, bool(_spans_of(c)), answer_structure.ref_list(c.get("follows_from")))
 
 
 def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:

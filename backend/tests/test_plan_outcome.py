@@ -104,3 +104,60 @@ def test_the_sequence_field_is_named_for_the_numbering_it_holds():
         "the unqualified name is the one that misleads; it must not survive "
         "beside the qualified one"
     )
+
+
+def test_an_added_conclusion_survives_having_no_source_of_its_own():
+    """The gate asks for an overall conclusion; the patch path must accept one.
+
+    A conclusion reasons from other claims and cites nothing — the engine says
+    so itself in `answer_structure.is_derived`: "an inference always; a
+    conclusion when it cites nothing and names what it follows from". The
+    patch parser admitted inferences only, so the claim the gate kept asking
+    for was written by the drafter and dropped here for having no span, every
+    cycle, until the run ended "could not be made internally consistent"
+    having been handed the thing it asked for each time.
+    """
+    from app.services.query_runner import _parse_patch
+    import json
+
+    patch = _parse_patch(json.dumps({"add": [{
+        "text": "Taken together, privilege does not extend to advice from a "
+                "company's own in-house lawyers.",
+        "type": "conclusion",
+        "part": None,
+        "follows_from": [2, 5],
+        "rationale": "Draws the parts together into the overall answer.",
+        "evidence": [],
+    }]}))
+    assert patch is not None
+    assert len(patch["add"]) == 1, patch["add"]
+    assert patch["add"][0]["type"] == "conclusion"
+    assert patch["add"][0]["evidence"] == []
+
+
+def test_a_conclusion_that_follows_from_nothing_is_still_dropped():
+    """Derived means resting on named claims, not resting on nothing."""
+    from app.services.query_runner import _parse_patch
+    import json
+
+    patch = _parse_patch(json.dumps({"add": [{
+        "text": "Taken together, the protection does not extend that far at all.",
+        "type": "conclusion",
+        "follows_from": [],
+        "evidence": [],
+    }]}))
+    assert patch is None or patch["add"] == []
+
+
+def test_an_ordinary_claim_still_needs_a_source(): 
+    """Only derived kinds are exempt; a rule without a span is not a claim."""
+    from app.services.query_runner import _parse_patch
+    import json
+
+    patch = _parse_patch(json.dumps({"add": [{
+        "text": "The authority may seal business premises during an inspection.",
+        "type": "rule",
+        "follows_from": [1],
+        "evidence": [],
+    }]}))
+    assert patch is None or patch["add"] == []

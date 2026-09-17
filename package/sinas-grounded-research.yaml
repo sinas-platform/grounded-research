@@ -1562,31 +1562,6 @@ spec:
         with a single JSON object exactly as instructed - no prose, no
         markdown fences. Quote text EXACTLY as it appears; never paraphrase.
     - namespace: sgr
-      name: document-reader-agent
-      description: Looks through ONE whole document for a passage stating a given proposition, and answers with a verbatim quote or nothing. Invoked by SGR's query runner when a cited source is re-read.
-      # Extraction tier, deliberately. This looks for a passage; it does not
-      # judge one. Whatever comes back is checked against the document
-      # afterwards and discarded unless the quote is verbatim, so the tier
-      # decides recall and cost, never whether a fabrication can get through.
-      #
-      # It was on the verdict tier by accident — it reached for the gate
-      # agent because the gate's reply shape suited it — and the whole
-      # document goes in the prompt. Measured over one night: 19 such calls
-      # averaged 173,000 tokens and cost $62, against $35 for the 75 actual
-      # verdict calls. The collection holds documents up to 5.5MB; asking the
-      # most expensive model in the deployment to read one end to end is not
-      # a judgement anyone made.
-      llmProviderName: ${{ vars.EXTRACTION_LLM }}
-      model: ${{ vars.EXTRACTION_MODEL }}
-      temperature: 0.0
-      systemPrompt: |
-        You look through one document for a passage that states a given
-        proposition. Reply with a single JSON object exactly as instructed -
-        no prose, no markdown fences. Quote text EXACTLY as it appears;
-        never paraphrase. If no passage states it, say so — a document that
-        does not contain the proposition is a normal and useful answer, and
-        an approximate quote is worse than none.
-    - namespace: sgr
       name: note-writer-agent
       description: Writes short client-facing notes (e.g. a partial run's explanation) from material supplied in the message. Never judges, never asks for more input.
       # Strong tier: the honest-scope rule below is load-bearing (a note

@@ -4010,15 +4010,21 @@ async def _ask_document(sinas: _Sinas, prompt: str, filename: str) -> dict | Non
     condition for "found" is written once — a second copy of this is a second
     place for `found: true` with an empty quote to become evidence.
 
-    It asks the DOCUMENT READER, not the gate. This looks for a passage; it
+    It asks the PASSAGE EXTRACTOR, not the gate. This looks for a passage; it
     does not judge one, and what comes back is checked against the document
-    below and dropped unless the quote is verbatim. It reached for the gate
-    agent originally because the gate's reply shape suited it, and the whole
-    document rides in the prompt: measured over one night, 19 of these calls
-    averaged 173,000 tokens and cost $62, against $35 for the 75 calls that
-    actually asked the gate to judge anything.
+    below and dropped unless the quote is verbatim — so the tier decides
+    recall and cost, never whether a fabrication gets through. Extraction is
+    already that agent's whole job, and its instruction is the one this needs:
+    quote exactly, never paraphrase.
+
+    It reached for the gate agent originally because the gate's reply shape
+    suited it, and the whole document rides in the prompt. Measured over one
+    night: 19 of these calls averaged 173,000 tokens and cost $62, against $35
+    for the 75 calls that actually asked the gate to judge an answer. The
+    collection holds documents up to 5.5MB; asking the deployment's dearest
+    model to read one end to end was not a judgement anyone made.
     """
-    reply = await sinas.invoke("sgr/document-reader-agent", prompt)
+    reply = await sinas.invoke("sgr/passage-extractor-agent", prompt)
     try:
         cleaned = (reply or "").strip().strip("`")
         cleaned = cleaned.removeprefix("json").strip()

@@ -58,7 +58,7 @@ async def test_a_named_document_is_opened_and_its_passage_comes_back(monkeypatch
     found = await qr._look_owed(
         _Sinas(), [{"doc": "a-judgment.md", "note": "It states the rule."}])
 
-    assert asked == ["sgr/document-reader-agent"]
+    assert asked == ["sgr/passage-extractor-agent"]
     assert found["a-judgment.md"]["quote"].startswith("The protection extends")
     assert found["a-judgment.md"]["line_from"] == 12
 

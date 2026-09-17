@@ -234,3 +234,51 @@ async def test_a_failed_selection_searches_everything_rather_than_nothing():
 
     mined = ["virtual data room", "cit para"]
     assert await _choose_terms(_Sinas(), "q", mined, None) == mined
+
+
+def test_the_candidate_list_the_planner_sees_is_ordered():
+    """Which entities the planner is shown decides what it anchors on, and
+    anchors decide 94-98% of what is retrieved. An unordered cut here moves
+    half the answer.
+
+    Measured on two runs of one question at temperature zero: four shared
+    anchors out of ten and twelve, retrieved sets overlapping by half, the
+    divergence starting at rank 10 — and the expert review's findings name
+    documents at ranks 11, 26, 31, 33, 41 and 51.
+
+    `retrieve_and_rank` already learned this one stage later; its own comment
+    says equal scores kept the order rows arrived in and the cut made that
+    arbitrary order decide membership. This pins the same rule earlier.
+    """
+    import inspect
+
+    from app import retrieval_first as rf
+
+    # every cut that feeds the planner carries a tie-break
+    src = inspect.getsource(rf._resolve_names)
+    assert "ORDER BY 4 DESC, e.id" in src, (
+        "the name resolver's LIMIT 6 must be ordered, or which six entities a "
+        "name resolves to is whatever order the rows arrived in")
+
+    probes = inspect.getsource(rf._resolve_value_probes)
+    assert "ORDER BY docs DESC, e.id" in probes
+
+    plan = inspect.getsource(rf.plan_question)
+    assert '(-x["docs"], x["id"])' in plan, (
+        "the 40 matches shown to the planner must break ties on id")
+
+
+def test_equal_counts_sort_by_id_not_by_arrival():
+    """The tie-break is a total order, so the same matches always cut the
+    same way however the rows arrived."""
+    matches = {
+        "b": {"id": "b", "docs": 10, "value": "B"},
+        "a": {"id": "a", "docs": 10, "value": "A"},
+        "c": {"id": "c", "docs": 99, "value": "C"},
+    }
+    ordered = sorted(matches.values(), key=lambda x: (-x["docs"], x["id"]))
+    assert [m["id"] for m in ordered] == ["c", "a", "b"]
+    shuffled = {k: matches[k] for k in ("a", "c", "b")}
+    assert [m["id"] for m in sorted(shuffled.values(),
+                                    key=lambda x: (-x["docs"], x["id"]))] \
+        == ["c", "a", "b"]

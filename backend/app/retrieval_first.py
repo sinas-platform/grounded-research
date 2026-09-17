@@ -399,7 +399,7 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
                 WHERE e.merged_into_id IS NULL
                   AND (:tname = '' OR t.name ILIKE :tname)
                   AND e.canonical_form ILIKE :pat
-                ORDER BY docs DESC LIMIT 12"""),
+                ORDER BY docs DESC, e.id LIMIT 12"""),
                 {"tname": tname, "pat": f"%{m}%"})).all()
             for eid, cf, tn, docs in rows:
                 out.append({"id": str(eid), "value": cf, "type": tn,
@@ -451,9 +451,31 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
     genuinely about that entity is the one case the mark must not foreclose.
     """
     anchors = [a for a in model_picks if a in matches]
+    # Never force-picked on no recognition at all, and ties broken on id.
+    # `docs` counts every mention including the gazetteer's blind string
+    # matches, so an entity recognised NOWHERE could be force-picked for
+    # being written everywhere; `validated_docs` counts only the mentions
+    # something actually recognised, and is computed for every match already.
+    # Ranking still goes by `docs` — strongest means most present — and the
+    # id tie-break makes the cut the same every run rather than however the
+    # resolver's rows happened to arrive.
+    #
+    # Measured: an article's headline was registered as an entity of a
+    # substantive type, carried 470 documents and not one validated mention. Two runs of one
+    # question shared four anchors out of ten and twelve, and their retrieved
+    # sets overlapped by half, with the divergence starting at rank 10 —
+    # which is the band the expert review's findings live in.
+    #
+    # Being blind-only is not itself disqualifying: half the collection's
+    # entities have no validated mention, most of them in a handful of
+    # documents where they do no harm. What harms is the combination this
+    # sort selected for — never recognised, yet apparently everywhere.
+    # `validated_docs` is computed for every match already; nothing here is
+    # new except reading it.
     strongest = sorted(
-        (m for m in matches.values() if not m.get("generic")),
-        key=lambda x: -x["docs"])
+        (m for m in matches.values()
+         if not m.get("generic") and m.get("validated_docs", 0) > 0),
+        key=lambda x: (-x["docs"], x["id"]))
     for m in strongest[:6]:
         if m["id"] not in anchors:
             anchors.append(m["id"])
@@ -461,7 +483,24 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
 
 
 async def _resolve_names(names: list[str]) -> list[dict]:
-    """Named entities / seed cases -> entity matches (alias-tolerant)."""
+    """Named entities / seed cases -> entity matches (alias-tolerant).
+
+    The cut is ordered, and that is not tidiness. This took SIX rows with no
+    ORDER BY, so which six a name resolved to was whatever order the rows
+    came back in — and those matches are the list the planner picks its
+    anchors from, which decide what the graph channel traverses, which is 94
+    to 98% of everything retrieved. An unordered cut here moves half the
+    answer.
+
+    Measured on two runs of one question at temperature zero: four shared
+    anchors out of ten and twelve, retrieved sets overlapping by half, the
+    divergence starting at rank 10. The band the expert review's findings
+    live in is ranks 11 to 51.
+
+    `retrieve_and_rank` learned this one stage later and says so in its own
+    comment — equal scores kept the order rows arrived in, and the cut made
+    that arbitrary order decide membership. Same bug, earlier, costlier.
+    """
     from app.db import AsyncSessionLocal
 
     seen: dict[str, dict] = {}
@@ -484,6 +523,7 @@ async def _resolve_names(names: list[str]) -> list[dict]:
                   AND (e.canonical_form ILIKE :pat OR e.id IN
                        (SELECT entity_id FROM entity_alias
                         WHERE alias ILIKE :pat))
+                ORDER BY 4 DESC, e.id
                 LIMIT 6"""), {"pat": f"%{n}%"})).all()
             for eid, cf, tn, docs in rows:
                 seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,
@@ -516,7 +556,8 @@ async def plan_question(
         + (" — GENERIC TERM: matches the word, almost never the thing;"
            " anchor only if the question is really about this entity"
            if m.get("generic") else "")
-        for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
+        for m in sorted(all_matches.values(),
+                        key=lambda x: (-x["docs"], x["id"]))[:40]
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
         matches=match_lines, question=question, guidance=guidance),

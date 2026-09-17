@@ -26,6 +26,7 @@ anything already extracted, so a retry costs only the failed docs).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Any
@@ -126,6 +127,138 @@ async def _sweep_exact_duplicates(session) -> int:
     return len(canonical)
 
 
+async def _merge_casing_duplicates(session) -> int:
+    """Entities of one type whose names differ only in case or a leading
+    article: `General Court` and `THE GENERAL COURT`, `European Commission`
+    and `The European Commission`.
+
+    They are one thing, and holding them apart costs more than tidiness. The
+    planner anchors retrieval on entities and picks from this list, so two
+    runs of ONE question anchor on different members of a duplicate cluster
+    and traverse the graph from different starting points. Measured on two
+    runs of the same question eleven hours apart: four anchors shared out of
+    ten and twelve, and the retrieved sets overlapped by half — 8 of the top
+    10 the same, then 10 of the top 20. The reviewer's own findings name
+    documents at ranks 11, 26, 31, 33, 41 and 51, which is exactly the band
+    where that instability lives.
+
+    The oldest row of a cluster wins, which is the same rule
+    `_sweep_exact_duplicates` uses on documents, and for the same reason: it
+    is stable across passes, so a second run of this changes nothing.
+    Mentions and relationships are repointed; nothing is deleted, and
+    `_purge_stale_annotations` below already cleans up after a merge.
+    """
+    rows = (await session.execute(text("""
+        WITH norm AS (
+          SELECT id, entity_type_id, created_at,
+                 lower(regexp_replace(btrim(canonical_form),
+                                      '^(the|le|la|les|de|het|een|der|die|das)\\s+',
+                                      '', 'i')) AS key
+          FROM entity
+          WHERE merged_into_id IS NULL AND canonical_form IS NOT NULL
+        )
+        SELECT a.id, b.id
+        FROM norm a JOIN norm b
+          ON a.key = b.key AND a.entity_type_id IS NOT DISTINCT FROM b.entity_type_id
+         AND (b.created_at < a.created_at
+              OR (b.created_at = a.created_at AND b.id < a.id))
+        WHERE length(a.key) > 2"""))).all()
+    winner: dict = {}
+    for dup_id, earlier_id in rows:
+        winner.setdefault(dup_id, earlier_id)
+    if not winner:
+        return 0
+    # Resolve chains so a merge never points at something itself merged away.
+    def final(e):
+        seen = set()
+        while e in winner and e not in seen:
+            seen.add(e)
+            e = winner[e]
+        return e
+
+    for dup_id in list(winner):
+        target = final(dup_id)
+        if target == dup_id:
+            continue
+        await session.execute(text(
+            "UPDATE entity_mention SET entity_id = :t WHERE entity_id = :d"),
+            {"t": target, "d": dup_id})
+        for col in ("source_id", "target_id"):
+            await session.execute(text(
+                f"UPDATE relationship SET {col} = :t WHERE {col} = :d"),
+                {"t": target, "d": dup_id})
+        await session.execute(text(
+            "UPDATE entity SET merged_into_id = :t WHERE id = :d"),
+            {"t": target, "d": dup_id})
+    await session.commit()
+    return len(winner)
+
+
+#: Below this, an entity seen only by string match is just new — it has not
+#: had the chance to be validated anywhere yet, and marking it would be
+#: judging on no evidence. The number is the same floor the lower-case test
+#: uses, for the same reason.
+_UNSEEN_MIN_DOCUMENTS = 5
+
+
+async def _mark_never_actually_seen(session) -> int:
+    """Entities every one of whose mentions is a blind string match.
+
+    The gazetteer finds text; it does not see things. A mention it produces
+    says the characters occurred, and a context-validated mention says the
+    thing was recognised — and an entity with hundreds of the first and none
+    of the second has never actually been sighted anywhere in the corpus.
+
+    Measured: an article's headline was registered as an entity of a
+    substantive type and carried 470 mentions, every one from the gazetteer. It has a
+    document count like any real entity, so the planner's deterministic
+    anchor top-up — which takes the entities present in the most documents —
+    could pick it, and a run would then traverse the graph outward from a
+    headline. Two runs of one question shared four anchors out of ten and
+    twelve, and their retrieved sets overlapped by half.
+
+    This is the generic-term judgement on a second kind of evidence, so it
+    writes the same mark: `retrieval_first` already discards blind mentions
+    for a marked entity and never force-picks one as an anchor, and every
+    other reader of the mark applies unchanged. What it is NOT is a rule
+    about names — nothing here reads the text of an entity, which is what
+    kept the first attempt at this both arbitrary and specific to one
+    deployment's vocabulary.
+    """
+    from app.services import generic_entities
+    from app.services.query_runner import _iso
+    from app.retrieval_first import BLIND_LINK_METHODS
+
+    rows = (await session.execute(text("""
+        SELECT e.id,
+               count(DISTINCT m.document_id) AS docs,
+               count(*) FILTER (WHERE m.link_method IS NULL
+                                   OR NOT (m.link_method = ANY(:blind))) AS seen
+        FROM entity e
+        JOIN entity_mention m ON m.entity_id = e.id AND m.status = 'active'
+        WHERE e.merged_into_id IS NULL AND NOT (e.metadata ? 'generic_term')
+        GROUP BY e.id
+        HAVING count(DISTINCT m.document_id) >= :floor
+           AND count(*) FILTER (WHERE m.link_method IS NULL
+                                   OR NOT (m.link_method = ANY(:blind))) = 0"""),
+        {"blind": list(BLIND_LINK_METHODS),
+         "floor": _UNSEEN_MIN_DOCUMENTS})).all()
+    when = _iso()
+    for entity_id, docs, _seen in rows:
+        meta = generic_entities.mark(
+            "", int(docs),
+            {"lowercase_share": 0.0, "as_written": 0, "lowercase": 0}, when)
+        meta["generic_term"]["test"] = (
+            f"every mention is a blind string match ({', '.join(BLIND_LINK_METHODS)}) "
+            f"and none was ever validated in context, across {docs} documents"
+        )
+        await session.execute(text("""
+            UPDATE entity SET metadata = coalesce(metadata, '{}'::jsonb) || :m
+            WHERE id = :i"""), {"m": json.dumps(meta), "i": entity_id})
+    await session.commit()
+    return len(rows)
+
+
 async def _purge_stale_annotations(session) -> int:
     """Annotation values whose subject entity was merged away — inert
     (nothing reads a merged entity), but debt that accumulates."""
@@ -187,6 +320,7 @@ async def run_maintenance() -> dict[str, Any]:
         stats["walls_normalized"] = await _normalize_new_walls(session)
         stats["hashes_backfilled"] = await _backfill_content_hashes(session)
         stats["duplicates_marked"] = await _sweep_exact_duplicates(session)
+        stats["entities_merged"] = await _merge_casing_duplicates(session)
         stats["stale_annotations_purged"] = await _purge_stale_annotations(session)
         stats["extraction_retries"] = await _retry_failed_extractions(session)
         subjects = await _full_text_entity_ids(session)

@@ -23,6 +23,7 @@ completed stages short-circuit off the persisted state.
 from __future__ import annotations
 
 import asyncio
+import bisect
 import html
 import json
 import re
@@ -1569,21 +1570,37 @@ def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
     rows = [(n, t) for n, t in _numbered_pairs(numbered)
             if line_from - back <= n <= line_to + fwd]
 
+    if not rows:
+        return None
+
+    # The window is canonicalised ONCE and the quote found in it once, and the
+    # lines it lands on are read back off the offset map. Narrowest still
+    # wins: the span of a single occurrence IS the narrowest window that
+    # contains it, so the answer is the same and the work is not.
+    #
+    # It used to scan every start line and, inside that, extend an accumulator
+    # one line at a time, re-joining and re-canonicalising it at each step —
+    # quadratic in lines and cubic in characters. That is harmless on the
+    # ten-line window a passage normally claims and ruinous on a wrong one:
+    # the extractor's claimed ranges run to 1,967 lines, the collection holds
+    # 347 documents over half a megabyte and one of 5.5MB, and this function
+    # is called on the event loop. A single passage with a wild line range
+    # therefore stopped the server — measured at 55 minutes of one core with
+    # every concurrent run frozen behind it, which is how it was found.
+    joined = "\n".join(t for _, t in rows)
+    canon, src = _canonical_offsets(joined)
+    starts, off = [], 0
+    for _, t in rows:
+        starts.append(off)
+        off += len(t) + 1
+
     def window(want: str) -> tuple[int, int] | None:
-        best: tuple[int, int] | None = None
-        for i in range(len(rows)):
-            acc: list[str] = []
-            for j in range(i, len(rows)):
-                acc.append(rows[j][1])
-                if want in _canonical(" ".join(acc)):
-                    # Narrowest wins, earliest breaking the tie. Taking the
-                    # first window that matches would return the earliest
-                    # start instead, and a quote sitting on one line would be
-                    # recorded as the several lines that happen to precede it.
-                    if best is None or (j - i) < (best[1] - best[0]):
-                        best = (i, j)
-                    break
-        return best
+        at = canon.find(want)
+        if at < 0:
+            return None
+        first = bisect.bisect_right(starts, src[at]) - 1
+        last = bisect.bisect_right(starts, src[at + len(want) - 1]) - 1
+        return first, last
 
     # The whole quote first. Verification matches on the first 200 characters
     # and up to 2,000 are stored, so locating on the prefix alone would end the

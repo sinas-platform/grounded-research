@@ -188,3 +188,39 @@ def test_no_configuration_key_claims_to_know_what_a_paragraph_looks_like():
         if "paragraph_pattern" in path.read_text(errors="ignore"):
             hits.append(str(path.relative_to(REPO)))
     assert not hits, "paragraph_pattern is back in: " + ", ".join(hits)
+
+
+def test_a_wild_line_range_does_not_stop_the_server():
+    """A passage claiming a huge range is located in bounded time.
+
+    The extractor reports where it believes a quote sits and is sometimes very
+    wrong: across the stored runs the claimed ranges reach 1,967 lines. The
+    locator used to scan every start line and re-canonicalise a growing
+    accumulator inside that scan, which on a range that size is millions of
+    passes over a string that grows to the length of the span. It runs on the
+    event loop, so one such passage froze the server — 55 minutes of one core
+    with every concurrent run stopped behind it.
+
+    Two seconds is not a performance target; it is far enough below the
+    minutes the old shape took that a regression cannot hide under it.
+    """
+    import time
+
+    from app.services.query_runner import _locate_passage
+
+    lines = [f"Paragraph {i} of a long chapter, saying something unremarkable "
+             f"about the procedure and its limits." for i in range(1, 2001)]
+    lines[1500] = ("The tribunal held that the requirement as to position and "
+                   "status must be fulfilled by the person from whom the "
+                   "communication comes.")
+    numbered = "\n".join(f"{i}: {t}" for i, t in enumerate(lines, start=1))
+    quoted = ("The tribunal held that the requirement as to position and "
+              "status must be fulfilled by the person from whom the "
+              "communication comes.")
+
+    start = time.perf_counter()
+    found = _locate_passage(numbered, 1, 2000, quoted)
+    elapsed = time.perf_counter() - start
+
+    assert found == (1501, 1501), found
+    assert elapsed < 2.0, f"took {elapsed:.1f}s"

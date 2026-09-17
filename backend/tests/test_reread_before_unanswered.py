@@ -104,3 +104,32 @@ def test_the_verdict_may_not_invent_a_document_the_answer_does_not_cite():
         apply_reread(PARTS, {1: {"filename": "elsewhere.md", "line_from": 1,
                                  "line_to": 2, "quote": "x"}},
                      cited={"a-judgment.md", "an-opinion.md"})
+
+
+@pytest.mark.asyncio
+async def test_the_re_read_asks_the_document_reader_not_the_judge():
+    """A whole-document look goes to the extraction tier.
+
+    This step looks for a passage; it does not judge one, and whatever comes
+    back is checked against the document and dropped unless the quote is
+    verbatim. It used to reach for the gate agent because the gate's reply
+    shape suited it, and the whole document rides in the prompt — measured
+    over one night, 19 of these calls averaged 173,000 tokens and cost $62,
+    against $35 for the 75 calls that actually asked the gate to judge
+    something. The collection holds documents up to 5.5MB.
+
+    Pinned because the cost of this mistake is invisible in any test that
+    only checks the answer: the wrong tier gives the same verdict.
+    """
+    from app.services.query_runner import _ask_document
+
+    asked: list[str] = []
+
+    class _Sinas:
+        async def invoke(self, agent: str, prompt: str) -> str:
+            asked.append(agent)
+            return '{"found": false, "line_from": 0, "line_to": 0, "quote": ""}'
+
+    await _ask_document(_Sinas(), reread_prompt(PARTS[1], CITED[0]),
+                        CITED[0].filename)
+    assert asked == ["sgr/document-reader-agent"]

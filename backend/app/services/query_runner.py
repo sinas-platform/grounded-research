@@ -4009,8 +4009,16 @@ async def _ask_document(sinas: _Sinas, prompt: str, filename: str) -> dict | Non
     quote. Shared by the two callers of `services.reread` so that the
     condition for "found" is written once — a second copy of this is a second
     place for `found: true` with an empty quote to become evidence.
+
+    It asks the DOCUMENT READER, not the gate. This looks for a passage; it
+    does not judge one, and what comes back is checked against the document
+    below and dropped unless the quote is verbatim. It reached for the gate
+    agent originally because the gate's reply shape suited it, and the whole
+    document rides in the prompt: measured over one night, 19 of these calls
+    averaged 173,000 tokens and cost $62, against $35 for the 75 calls that
+    actually asked the gate to judge anything.
     """
-    reply = await sinas.invoke("sgr/answer-gate-agent", prompt)
+    reply = await sinas.invoke("sgr/document-reader-agent", prompt)
     try:
         cleaned = (reply or "").strip().strip("`")
         cleaned = cleaned.removeprefix("json").strip()

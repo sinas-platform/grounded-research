@@ -929,6 +929,14 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
     reproduce to within a few percent. Gemini used to fall through to the
     Sonnet branch — a 60x over-count on the agents that do most of the work.
 
+    THE RATES MUST TRACK THE CARD, and for a while they did not. Opus stood
+    at 5.0/25.0 and Sonnet at 2.0/10.0 — the previous generation's prices,
+    left behind when the models moved. Opus was therefore counted at exactly
+    a third of what it cost, and it is the model the publish gate runs on. A
+    night of benchmark runs spent about $25 a question against a $10 ceiling
+    without tripping it; the two runs that did trip it had spent near $30.
+    A ceiling that measures a third of the spend is not a ceiling.
+
     Fails open (0.0): the cap must never be the thing that kills an otherwise
     healthy run on a transient error.
     """
@@ -958,14 +966,14 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
                           + cache_write_tokens * 1.25 + cache_read_tokens * 0.10
                           + completion_tokens * 5.0
                         WHEN model ILIKE '%opus%' THEN
-                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 5.0
-                          + cache_write_tokens * 6.25 + cache_read_tokens * 0.50
-                          + completion_tokens * 25.0
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 15.0
+                          + cache_write_tokens * 18.75 + cache_read_tokens * 1.50
+                          + completion_tokens * 75.0
                         ELSE
-                          -- sonnet-5 tier (console price table, 24 Aug 2026)
-                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 2.0
-                          + cache_write_tokens * 2.50 + cache_read_tokens * 0.20
-                          + completion_tokens * 10.0
+                          -- sonnet-5 tier
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 3.0
+                          + cache_write_tokens * 3.75 + cache_read_tokens * 0.30
+                          + completion_tokens * 15.0
                       END) / 1e6, 0)
                     FROM llm_usage
                     WHERE chat_id = ANY(CAST(:cids AS uuid[]))

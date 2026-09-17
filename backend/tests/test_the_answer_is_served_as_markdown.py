@@ -18,6 +18,7 @@ Run from the backend directory:
 """
 
 import inspect
+from types import SimpleNamespace
 import uuid
 
 import pytest
@@ -56,12 +57,15 @@ class _FakeSession:
 
 
 class _Answer:
-    def __init__(self, rendered_markdown=None):
+    def __init__(self, rendered_markdown=None, status="draft"):
         self.id = uuid.uuid4()
         self.question = "Does it apply?"
         self.question_parts = None
         self.law_stated_as_at = None
         self.rendered_markdown = rendered_markdown
+        # Draft by default: these tests are about rendering, and the
+        # published path carries a validation check of its own.
+        self.status = status
 
 
 RENDERED = answer_render.render_markdown(
@@ -193,3 +197,49 @@ def test_one_identifier_is_unchanged_by_that():
     said = citation({"title": "Kestrel Holdings v the authority",
                      "identifier": "T-289/11", "date": "2013-09-06"})
     assert "(T-289/11, 2013-09-06)" in said
+
+
+@pytest.mark.asyncio
+async def test_an_answer_edited_after_publication_is_not_served_as_published(
+        monkeypatch):
+    """A published answer is still writable, and that is the hole.
+
+    Changing a claim resets its evidence to unvalidated and binding new
+    evidence adds another unvalidated row; neither clears `published`. This
+    endpoint reassembles from the claims as they NOW stand, so the edited
+    answer would go out as published prose that nothing had checked — the one
+    thing publication is supposed to mean.
+    """
+    from fastapi import HTTPException
+
+    from app.api.v1 import answers as mod
+
+    class _Result:
+        def __init__(self, value):
+            self._v = value
+
+        def scalar_one_or_none(self):
+            return self._v
+
+    class _Session:
+        """A published answer with one claim whose evidence is unvalidated."""
+
+        def __init__(self):
+            self.calls = 0
+
+        async def execute(self, *_a, **_k):
+            self.calls += 1
+            return _Result("a-claim-id" if self.calls == 1 else "unvalidated-row")
+
+    async def _row(*_a, **_k):
+        return SimpleNamespace(status="published", rendered_markdown="# stale")
+
+    # via monkeypatch: a bare assignment here leaks into every later test
+    # that calls this function, which is how three unrelated visibility
+    # tests started failing only when the suite ran as a whole.
+    monkeypatch.setattr(mod, "_visible_answer_or_404", _row)
+    with pytest.raises(HTTPException) as exc:
+        await mod.get_answer_markdown(
+            answer_id=uuid.uuid4(), session=_Session(), caller=None)
+    assert exc.value.status_code == 409
+    assert "re-validated" in str(exc.value.detail)

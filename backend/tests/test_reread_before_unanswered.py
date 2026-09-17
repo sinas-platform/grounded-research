@@ -69,17 +69,30 @@ def test_the_prompt_carries_the_part_and_the_whole_document():
     assert CITED[0].filename in p
 
 
-def test_a_found_passage_flips_the_part_and_says_where():
-    """The point of the exercise. The part stops being uncovered and the
-    reader is told which document and which lines, so the finding is
-    checkable rather than asserted."""
+def test_a_found_passage_is_carried_to_revision_not_spent_on_the_verdict():
+    """A passage existing is not the answer addressing the part.
+
+    This test used to assert the opposite — that a found passage flipped the
+    part to covered — and that was the defect. No claim has been written when
+    this runs, and the prose a reader receives is unchanged; marking the part
+    covered took it off the gate's uncovered list and let the run publish an
+    answer still silent on it. "Looks answered, is not" is the failure every
+    other check here exists to stop, and this was quietly manufacturing it.
+
+    So the finding is carried rather than spent: the part keeps its gap, gains
+    the passage, and revision is given something verbatim to write from. It
+    becomes covered when a claim covers it.
+    """
     parts, found = apply_reread(
         PARTS, {1: {"filename": "a-judgment.md", "line_from": 80,
                     "line_to": 84, "quote": "the copy is returned"}})
-    assert parts[1]["covered"] is True
+    assert parts[1]["covered"] is False, "a passage is not a claim"
+    assert parts[1]["gap"], "the part must still say what is missing"
+    assert "write the claim" in parts[1]["gap"]
     assert parts[1]["reread_from"]["filename"] == "a-judgment.md"
     assert parts[1]["reread_from"]["line_from"] == 80
-    assert found == 1
+    assert parts[1]["reread_from"]["quote"] == "the copy is returned"
+    assert found == 1, "the read still counts as a find, for the telemetry"
 
 
 def test_a_part_nothing_answers_stays_uncovered_and_records_the_attempt():

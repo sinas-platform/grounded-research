@@ -191,8 +191,20 @@ def apply_reread(
             raise ValueError(
                 f"re-read returned {filename!r}, which the answer has not "
                 "cited; a re-read may not reach outside the citations")
-        out[i]["covered"] = True
-        out[i]["gap"] = ""
+        # NOT covered. A passage existing in a cited document is not the
+        # answer addressing the part — no claim has been written, and the
+        # prose a reader receives is unchanged. Marking it covered here
+        # removed the part from the gate's uncovered list and let the run
+        # publish an answer still silent on it, which is the "looks answered,
+        # is not" failure every other check in this codebase exists to stop.
+        #
+        # So the finding is carried, not spent: the part keeps its gap and
+        # gains the located passage, and revision is given something verbatim
+        # to write the claim from. It becomes covered when a claim covers it.
+        out[i]["gap"] = (str(out[i].get("gap") or "").strip()
+                         or "no claim addresses this part") + (
+            " — a cited source carries a passage on it (see reread_from); "
+            "write the claim")
         out[i]["reread_from"] = {
             "filename": filename,
             "line_from": hit.get("line_from"),

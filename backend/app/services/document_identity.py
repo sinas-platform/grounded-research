@@ -89,13 +89,24 @@ async def properties_for_documents(
     """
     if not document_ids:
         return {}
+    # Only properties of the document's CURRENT class. A property value is
+    # written against a property definition, and a definition belongs to one
+    # class — so a document that was reclassified keeps values pointing at its
+    # old class's definitions. Without this join those values come back as
+    # though they were the document's own, and what they carry is exactly the
+    # citation metadata a reader trusts: a case number, a date, a status. The
+    # collection has had orphaned property values from reclassification
+    # before; this is the read side of that.
     rows = (
         await session.execute(
             select(PropertyValue.document_id, DocumentClassProperty.name,
                    PropertyValue.value)
             .join(DocumentClassProperty,
                   DocumentClassProperty.id == PropertyValue.property_id)
-            .where(PropertyValue.document_id.in_(document_ids))
+            .join(Document, Document.id == PropertyValue.document_id)
+            .where(PropertyValue.document_id.in_(document_ids),
+                   DocumentClassProperty.document_class_id
+                   == Document.document_class_id)
             .order_by(PropertyValue.created_at, PropertyValue.id)
         )
     ).all()

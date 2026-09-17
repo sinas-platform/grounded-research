@@ -106,6 +106,31 @@ async def get_answer_markdown(
     if not has_claims and not row.rendered_markdown:
         raise HTTPException(status.HTTP_404_NOT_FOUND,
                             "answer has no rendered markdown")
+    # A published answer is still writable: changing a claim resets its
+    # evidence to unvalidated, and binding new evidence adds another
+    # unvalidated row, neither of which clears `published`. This endpoint
+    # reassembles from the claims as they NOW stand, so an answer edited after
+    # publication would be served as published prose that nothing has checked
+    # — the one thing a published answer is supposed to guarantee.
+    #
+    # Refused rather than served. The alternative, serving the text stored at
+    # publication, would be a different answer from the claims and evidence
+    # every other endpoint returns for this id, and two answers under one id
+    # is the worse failure. A caller that sees this needs the run re-validated,
+    # which is a thing it can ask for.
+    if row.status == "published":
+        unvalidated = (await session.execute(
+            select(ClaimEvidence.id)
+            .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+            .where(AnswerClaim.answer_id == answer_id,
+                   ClaimEvidence.validated.is_(False))
+            .limit(1))).scalar_one_or_none()
+        if unvalidated is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "this answer was edited after publication and carries evidence "
+                "no validation has passed; it must be re-validated before its "
+                "markdown can be served")
     rendered = await answer_render.assemble(session, answer_id)
     if rendered is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "answer not found")

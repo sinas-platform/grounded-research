@@ -6293,12 +6293,18 @@ async def _revise_answer(
         parts = [p for p in (getattr(answer_row, "question_parts", None) or [])
                  if isinstance(p, dict)]
     cap = answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS
-    corpus_rows = (await _manifest_rows(parent_id))[:60]
+    manifest_rows = await _manifest_rows(parent_id)
+    # The list SHOWN to the reviser is capped, because it is prompt and a
+    # prompt has a budget.
+    corpus_rows = manifest_rows[:60]
     corpus = [r["filename"] for r in corpus_rows if r.get("filename")]
-    # The same per-document facts the drafter's claims were labelled from,
-    # so a revised or added claim is labelled by the document it ends up
-    # citing rather than by whatever the row carried before.
-    src_facts = _source_context(corpus_rows)
+    # The facts are a LOOKUP, and are not capped. A revised claim can cite a
+    # document from anywhere in the retrieved set — the gate names owed
+    # sources by rank, and obligations reach past sixty — and a document with
+    # no entry here silently loses its authority label, its tier, and its
+    # jurisdiction and currency notes in the rendered answer. Capping a
+    # lookup to the size of a prompt was the whole mistake.
+    src_facts = _source_context(manifest_rows)
 
     # Two claims restating one proposition from one source are found here,
     # by arithmetic, and handed to the reviser as a merge to judge. The

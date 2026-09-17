@@ -100,9 +100,22 @@ def _props(doc: dict | None) -> dict:
 def _field(doc: dict | None, key: str) -> str | None:
     """One of the identity fields a row carries, as text, or None. The keys
     are the engine's own — `identifier`, `alternate_identifier` — and the
-    values are whatever the deployment's declared properties held."""
+    values are whatever the deployment's declared properties held.
+
+    A declared property may hold several values, and one of the commonest
+    reasons is the honest one: a judgment given in joined cases carries every
+    case number it decides. Those are printed as the list of identifiers they
+    are. Handing the raw value to `str` printed Python's own notation for a
+    list — `['T-289/11', 'T-290/11', 'T-521/11']`, quotes and brackets and
+    all — into the authorities of a published answer.
+    """
     v = (doc or {}).get(key)
-    return _str(v) if v not in (None, "", [], {}) else None
+    if v in (None, "", [], {}):
+        return None
+    if isinstance(v, (list, tuple, set)):
+        seen = [t for t in (_str(unwrap(x)).strip() for x in v) if t]
+        return ", ".join(dict.fromkeys(seen)) or None
+    return _str(v)
 
 
 def _date_of(doc: dict | None) -> date | None:

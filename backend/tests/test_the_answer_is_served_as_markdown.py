@@ -167,3 +167,29 @@ def test_a_failure_to_render_does_not_unpublish_the_answer():
     # The publish commit happens before the render is attempted, so a
     # rollback cannot take it with it.
     assert src.index('row.status = "published"') < src.index("except Exception")
+
+
+def test_a_judgment_in_joined_cases_cites_every_case_number():
+    """A published citation never shows Python's notation for a list.
+
+    A judgment given in joined cases carries every case number it decides, and
+    the declared property holds all of them. Handed to `str`, that printed
+    `['T-289/11', 'T-290/11', 'T-521/11']` — brackets, quotes and all — into
+    the authorities of an answer that went to a reviewer.
+    """
+    from app.services.answer_render import citation
+
+    said = citation({"title": "Kestrel Holdings and Others v the authority",
+                     "identifier": ["T-289/11", "T-290/11", "T-521/11"],
+                     "date": "2013-09-06"})
+    assert "T-289/11, T-290/11, T-521/11" in said
+    for ch in ("[", "]", "'"):
+        assert ch not in said
+
+
+def test_one_identifier_is_unchanged_by_that():
+    from app.services.answer_render import citation
+
+    said = citation({"title": "Kestrel Holdings v the authority",
+                     "identifier": "T-289/11", "date": "2013-09-06"})
+    assert "(T-289/11, 2013-09-06)" in said

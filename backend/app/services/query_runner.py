@@ -23,6 +23,7 @@ completed stages short-circuit off the persisted state.
 from __future__ import annotations
 
 import asyncio
+import html
 import json
 import re
 import time
@@ -1313,7 +1314,58 @@ _DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015)}
 # The only character deleted rather than replaced: PDF extraction leaves it
 # inside a hyphenated word, nothing draws it, and no copy reproduces it.
 _SOFT_HYPHEN = {0x00AD: None}
-_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
+
+# Emphasis, as markdown writes it down. The collection is markdown, and a
+# paragraph stored as `**14.**&nbsp;The Court held` is read — and quoted, by a
+# person or by a model — as `14. The Court held`. The asterisks are how the
+# emphasis is spelled, not part of the sentence, so they fold away like the
+# soft hyphen: one character for none.
+#
+# Measured before this existed: the verifier rejected 1,043 of 3,933 proposed
+# passages, and on a sample of four rejections drawn from the stored runs
+# three were present in the source, verbatim, on exactly the line the
+# extractor named. They failed only because the stored text carries emphasis
+# markers and HTML entities that no faithful copy of the rendered text has.
+# The documents that carry the most of that markup are the judgments, which
+# is why answers came to rest on commentary: the primary source's passages
+# were extracted, then thrown away.
+_EMPHASIS = {ord("*"): None, ord("_"): None}
+
+_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN, **_EMPHASIS}
+
+#: A character reference, numeric or named. Deliberately strict: it must end
+#: in a semicolon, so the ampersand in `AM & S Europe` is left alone.
+_ENTITY = re.compile(
+    r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+
+
+def _rendered_chars(text: str) -> list[tuple[str, int]]:
+    """The text's characters as they are drawn, each with the offset in `text`
+    it came from. Pure.
+
+    Only entities expand here. `&nbsp;` is a space to every reader and to
+    every copy; `&#8220;` is a quotation mark the variant table already folds,
+    but only once it is a character rather than six. Everything else is passed
+    through for the caller's own folding.
+
+    The first character of an expansion carries the entity's opening offset
+    and the last carries its closing one, so a span located through this map
+    still covers the whole of what was written.
+    """
+    out: list[tuple[str, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "&":
+            m = _ENTITY.match(text, i)
+            if m and (rendered := html.unescape(m.group(0))) != m.group(0):
+                last = m.end() - 1
+                out.extend((c, i if k == 0 else last)
+                           for k, c in enumerate(rendered))
+                i = m.end()
+                continue
+        out.append((text[i], i))
+        i += 1
+    return out
 
 # What a passage should be, in characters rather than lines.
 #
@@ -1356,7 +1408,13 @@ def _canonical_offsets(text: str) -> tuple[str, list[int]]:
     out: list[str] = []
     src: list[int] = []
     pending = False
-    for i, ch in enumerate(text or ""):
+    text = text or ""
+    # The expansion pass costs a list the length of the document, and a
+    # document without a single entity has nothing to expand, so it is skipped
+    # where it would only allocate. This runs over full documents.
+    drawn = (_rendered_chars(text) if "&" in text
+             else [(ch, i) for i, ch in enumerate(text)])
+    for ch, i in drawn:
         rep = _RENDERING_VARIANTS.get(ord(ch), ch)
         if rep is None:            # soft hyphen: nothing draws it, no copy has it
             continue

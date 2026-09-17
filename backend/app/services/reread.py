@@ -137,6 +137,29 @@ def owed_prompt(point: str, source: Cited) -> str:
         "POINT IT IS SAID TO CARRY", point, source)
 
 
+def deeper_prompt(part_asks: str, source: Cited) -> str:
+    """Ask a CITED document what else it carries on a part of the question.
+
+    The fourth caller, and the one the reviewer's feedback kept pointing at
+    without anyone reading it that way. Her findings are rarely that an answer
+    is wrong; they are that it is thin — a rule the cited judgment states and
+    the answer does not. Measured on one: T-125/03 is retrieved, cited three
+    times, and its paragraph 123 states the rule she asked for, that
+    preparatory documents drawn up exclusively to seek legal advice are
+    protected. No claim says it.
+
+    Nothing was broken. Extraction reads per PLANNED claim from that claim's
+    own anchors, and the plan is written from the question before any document
+    has been read, so a document cited for one point is never examined for
+    another. This asks the question the plan could not: given what this part
+    of the question asks, what does this document say about it?
+    """
+    return look_prompt(
+        "The answer already cites the document below, for some other point. "
+        "This is not about that point.",
+        "PART OF THE QUESTION", part_asks, source)
+
+
 def apply_reread(
     parts: list[dict],
     found: dict[int, dict | None],

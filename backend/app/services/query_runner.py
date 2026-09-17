@@ -4259,6 +4259,80 @@ async def _gate_turn(sinas: _Sinas, run_id: uuid.UUID,
         return await sinas.invoke(GATE_AGENT, brief + "\n\n" + turn)
 
 
+#: How many whole-document reads one cycle spends looking deeper into sources
+#: the answer already cites. Bounded like the standing check beside it: the
+#: reads are cheap on the extraction tier and they are not free in wall clock,
+#: and a cycle that opened everything would be a second retrieval pass.
+MAX_DEEPER_LOOKS = 4
+
+
+async def _look_deeper(
+    sinas: _Sinas, cited: list[str], parts: list[dict]
+) -> list[dict]:
+    """Ask the highest-standing CITED documents what else they carry.
+
+    The expert review's findings are rarely that an answer is wrong. They are
+    that it is thin: a rule the cited judgment states and the answer does not.
+    Measured on one of them — T-125/03 is retrieved, cited three times by the
+    answer, and paragraph 123 of it states the rule the reviewer asked for.
+    No claim says it, and nothing in the run ever asked that document about
+    that part of the question.
+
+    Nothing was broken. Extraction reads per PLANNED claim from that claim's
+    own anchors, and the plan is written from the question before any document
+    has been read. A document opened for one point is never opened for
+    another, and the gate cannot help: it names sources the answer did NOT
+    use, and this document was used.
+
+    Bounded twice over. Only classes the deployment ranks highest are read —
+    that is where a holding lives, and a commentary chapter re-read for a
+    second point yields more commentary. And only `MAX_DEEPER_LOOKS` reads
+    happen per cycle, parts in order, so the cost is a handful of extraction
+    calls rather than a second pass over the corpus.
+    """
+    from app.services.reread import Cited, deeper_prompt
+
+    asks = [str(p.get("asks") or p.get("text") or "").strip() for p in parts]
+    asks = [a for a in asks if a]
+    if not cited or not asks:
+        return []
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename, DocumentVersion.content_md,
+                   DocumentClass.standing)
+            .join(DocumentVersion,
+                  DocumentVersion.id == Document.current_version_id)
+            .outerjoin(DocumentClass,
+                       DocumentClass.id == Document.document_class_id)
+            .where(Document.filename.in_(list(cited))))).all()
+
+    ranked = sorted(
+        ((str(f), str(c or ""), s) for f, c, s in rows if len(str(c or "")) >= 40),
+        key=lambda r: (r[2] if r[2] is not None else 10_000, r[0]))
+    if not ranked:
+        return []
+    # Only the top declared rank. A deployment that declares no standing gets
+    # nothing here rather than an arbitrary pick — the same silence the other
+    # declared checks keep.
+    best = ranked[0][2]
+    if best is None:
+        return []
+    top = [r for r in ranked if r[2] == best]
+
+    out: list[dict] = []
+    for ask in asks:
+        for filename, body, _ in top:
+            if len(out) >= MAX_DEEPER_LOOKS:
+                return out
+            hit = await _ask_document(
+                sinas, deeper_prompt(ask, Cited(filename=filename, text=body)),
+                filename)
+            if hit and str(hit.get("quote") or "").strip():
+                out.append({"doc": filename, "part": ask, "hit": hit})
+    return out
+
+
 async def _look_owed(
     sinas: _Sinas, owed: list[dict]
 ) -> dict[str, dict]:
@@ -4881,6 +4955,28 @@ async def _gate_answer(
             + carried
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
+
+    # What the answer's own strongest sources say about each part, beyond the
+    # point they were read for. The gate cannot ask this — it names sources
+    # the answer did NOT use, and these are used — and the plan could not,
+    # because it was written from the question before any document was read.
+    # The reviewer's findings are mostly of this shape: a rule the cited
+    # judgment states and the answer does not.
+    deeper = await _look_deeper(sinas, sorted(cited), fixed)
+    if deeper:
+        await _tele(run_id, "validate", **{f"deeper_looks_{cycle_no}": [
+            {"doc": d["doc"], "part": d["part"][:80]} for d in deeper]})
+        for d in deeper:
+            q = str((d["hit"] or {}).get("quote") or "").strip()
+            issues.append(
+                f"A source this answer already cites carries more on one part "
+                f"of the question than the answer uses. {d['doc']}, on \""
+                f"{d['part']}\", at lines {(d['hit'] or {}).get('line_from')}-"
+                f"{(d['hit'] or {}).get('line_to')}: \"{q[:700]}\" — if the "
+                "answer does not already state this, add a claim that does, "
+                "citing that passage. If it already does, or the passage does "
+                "not bear on the part after all, leave the answer as it is."
+            )
 
     # A claim that states a general proposition must rest on the
     # highest-standing source the retrieval actually returned that carries

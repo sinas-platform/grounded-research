@@ -124,3 +124,91 @@ def _stub_documents(monkeypatch, texts: dict[str, str]) -> None:
         yield _Session()
 
     monkeypatch.setattr(qr, "AsyncSessionLocal", _session_local)
+
+
+@pytest.mark.asyncio
+async def test_a_cited_source_is_asked_what_else_it_carries(monkeypatch):
+    """The reviewer's findings are mostly 'thin', not 'wrong'.
+
+    T-125/03 was retrieved, cited three times by the answer, and paragraph 123
+    of it states the rule the reviewer asked for. No claim said it, and
+    nothing in the run ever asked that document about that part of the
+    question — extraction reads per planned claim from that claim's anchors,
+    and the plan is written before any document is read. The gate cannot
+    catch it either: it names sources the answer did NOT use.
+    """
+    from app.services import query_runner as qr
+
+    asked: list[str] = []
+
+    class _Sinas:
+        async def invoke(self, agent: str, prompt: str) -> str:
+            asked.append(prompt)
+            return ('{"found": true, "line_from": 123, "line_to": 123, '
+                    '"quote": "Preparatory documents drawn up exclusively for '
+                    'the purpose of seeking legal advice may be covered."}')
+
+    _stub_class_documents(monkeypatch, [
+        ("a-judgment.md", "x" * 500, 10),
+        ("a-commentary.md", "y" * 500, 40),
+    ])
+    found = await qr._look_deeper(
+        _Sinas(), ["a-judgment.md", "a-commentary.md"],
+        [{"asks": "whether preparatory documents are protected"}])
+
+    # only the top declared rank is opened — a commentary re-read yields
+    # more commentary
+    assert [d["doc"] for d in found] == ["a-judgment.md"]
+    assert "whether preparatory documents are protected" in asked[0]
+    assert "already cites the document below" in asked[0]
+
+
+@pytest.mark.asyncio
+async def test_the_deeper_look_is_bounded(monkeypatch):
+    """A cycle that opened everything would be a second retrieval pass."""
+    from app.services import query_runner as qr
+
+    calls: list[str] = []
+
+    class _Sinas:
+        async def invoke(self, _agent: str, _prompt: str) -> str:
+            calls.append("x")
+            return ('{"found": true, "line_from": 1, "line_to": 2, '
+                    '"quote": "Something the document says about it."}')
+
+    _stub_class_documents(monkeypatch,
+                          [(f"j{i}.md", "x" * 500, 10) for i in range(6)])
+    parts = [{"asks": f"part {i}"} for i in range(6)]
+    found = await qr._look_deeper(_Sinas(), [f"j{i}.md" for i in range(6)], parts)
+    assert len(calls) <= qr.MAX_DEEPER_LOOKS
+    assert len(found) <= qr.MAX_DEEPER_LOOKS
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_that_declares_no_standing_is_not_guessed_at(monkeypatch):
+    """Absence is announced, never guessed — as everywhere else."""
+    from app.services import query_runner as qr
+
+    class _Sinas:
+        async def invoke(self, _agent: str, _prompt: str) -> str:
+            raise AssertionError("must not be called")
+
+    _stub_class_documents(monkeypatch, [("a.md", "x" * 500, None)])
+    assert await qr._look_deeper(_Sinas(), ["a.md"], [{"asks": "anything"}]) == []
+
+
+def _stub_class_documents(monkeypatch, rows) -> None:
+    """(filename, content, class standing) for the deeper look's one read."""
+    from contextlib import asynccontextmanager
+
+    from app.services import query_runner as qr
+
+    class _Session:
+        async def execute(self, *_a, **_k):
+            return SimpleNamespace(all=lambda: list(rows))
+
+    @asynccontextmanager
+    async def _session_local():
+        yield _Session()
+
+    monkeypatch.setattr(qr, "AsyncSessionLocal", _session_local)

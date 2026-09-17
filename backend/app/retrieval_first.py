@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -716,56 +717,87 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
             for did, sc in ranked]
 
 
-#: How many of the first pass's documents the planner reads back before it
-#: writes its second set of queries, and how many terms it may ask for.
-SECOND_PASS_READ = 25
-SECOND_PASS_TERMS = 6
+#: How many of the first pass's documents the second pass reads back, how many
+#: candidate phrases it carries forward, and how many times a phrase must
+#: repeat before it is a candidate at all.
+SECOND_PASS_READ = 12
+SECOND_PASS_TERMS = 30
+SECOND_PASS_MIN_REPEATS = 5
 
-_SECOND_PASS_PROMPT = """\
-A first search has been run for this question and the summaries below are what
-came back. Read them for VOCABULARY, not for answers.
+#: Words that carry no identity at the edge of a phrase, so a phrase starting
+#: or ending in one is a fragment of a sentence rather than a name for
+#: something. Structural and not domain: these are the joints of English, and
+#: a deployment in another language contributes nothing here and loses
+#: nothing — its phrases simply are not trimmed.
+_EDGE_WORDS = frozenset("""
+the a an of to in on for by with and or that this these those it its as at
+from is are was were be been has have had not which such any all may must can
+shall would their his her them they he she we who whom under within into out
+up down over if then than so but also other same more most one two first
+second third
+""".split())
 
-QUESTION:
-{question}
 
-QUERIES ALREADY RUN (do not repeat these):
-{queries}
+def mine_terms(texts: list[str]) -> list[str]:
+    """Phrases that repeat in the documents a search returned. Pure.
 
-WHAT CAME BACK:
-{summaries}
+    The second pass used to ask a model to name distinctive vocabulary after
+    reading the retrieved SUMMARIES, and it could not: a summary is written to
+    abstract a document, so the name of the mechanism a document turns on is
+    the first thing it loses. Measured on one question — the phrase that finds
+    the two judgments deciding it appears in the TEXT of nine retrieved
+    documents and in the summary of none of them, and the model named six
+    plausible terms, none of them that one.
 
-Name up to {n} DISTINCTIVE terms — a named mechanism, procedure, doctrine,
-instrument or test — that a document answering this question would contain and
-that the queries above would not find. Prefer a phrase that is rare: a term
-that names one specific thing beats a description of it, because the search
-this feeds matches words exactly. A term that would appear in thousands of
-documents in this collection is worth nothing here.
+    So nothing is asked and nothing is recalled. Every two-to-four word run in
+    the retrieved text is counted, and the ones that repeat are carried
+    forward. Rarity is not scored here: the search that follows already drops
+    a term matching more documents than a distinctive term would, so scoring
+    it twice costs a scan of the collection per candidate and decides nothing.
 
-Reply ONLY JSON: {{"terms": ["<term>", ...]}}. Reply with an empty list if the
-summaries suggest nothing the queries already cover.
-"""
-
+    Every length is kept. `virtual data`, `data room` and `virtual data room`
+    were all separately able to find a judgment that mattered, and preferring
+    the longest — which this did at first — throws working paths away for
+    tidiness.
+    """
+    counts: dict[str, int] = defaultdict(int)
+    for text_ in texts:
+        words = re.findall(r"[a-z][a-z0-9-]+", (text_ or "").lower())
+        for n in (2, 3, 4):
+            for i in range(len(words) - n + 1):
+                gram = words[i:i + n]
+                if gram[0] in _EDGE_WORDS or gram[-1] in _EDGE_WORDS:
+                    continue
+                if any(len(w) < 3 for w in gram):
+                    continue
+                counts[" ".join(gram)] += 1
+    ranked = sorted(((c, p) for p, c in counts.items()
+                     if c >= SECOND_PASS_MIN_REPEATS), reverse=True)
+    return [p for _, p in ranked[:SECOND_PASS_TERMS]]
 
 async def second_pass_terms(
     sinas, question: str, plan: dict, ranked: list[dict],
     run_id: uuid.UUID | None = None,
 ) -> list[str]:
-    """Distinctive terms learned from what the first pass returned.
+    """Distinctive phrases learned from the text the first pass returned.
 
     Both planning rounds are blind: one reads a map of the collection, the
-    other reads entity matches, and neither ever sees a document. So the
-    queries are written in the words of the question, and a question cannot
-    contain the name of the thing that answers it — that name is what you
-    learn by reading.
+    other entity matches, and neither ever sees a document. So the queries are
+    written in the words of the question, and a question cannot contain the
+    name of the thing that answers it — that name is what you learn by
+    reading.
 
     Measured: a question about the privacy of employees not under
-    investigation retrieved none of the two judgments that decide it. The
+    investigation retrieved neither of the two judgments that decide it. The
     mechanism those judgments turn on is called a virtual data room, a phrase
-    the question has no reason to contain. Searching for it returns 11
-    documents out of 126,000, both judgments among them. The retrieval was
-    not weak; it was never asked.
+    appearing in 11 summaries out of 126,000 and in the text of nine documents
+    the search had already returned. The retrieval was not weak; it was never
+    asked.
 
-    Returns terms only. What to do with them is the caller's.
+    `sinas`, `question` and `plan` are unused and kept: this was a model call
+    that read the retrieved SUMMARIES and named terms, and it could not find
+    that phrase because a summary abstracts away the name of the thing. The
+    signature stays so the caller is unchanged if a model lane returns.
     """
     from app.db import AsyncSessionLocal
 
@@ -773,29 +805,75 @@ async def second_pass_terms(
         return []
     async with AsyncSessionLocal() as s:
         rows = (await s.execute(text("""
-            SELECT filename, left(coalesce(summary, ''), 400)
-            FROM document WHERE id = ANY(CAST(:dids AS uuid[]))"""),
-            {"dids": [r["document_id"] for r in ranked[:SECOND_PASS_READ]]})).all()
-    summaries = "\n".join(f"- {fn}: {s_}" for fn, s_ in rows if (s_ or "").strip())
-    if not summaries:
+            SELECT left(dv.content_md, 80000)
+            FROM document d
+            JOIN document_version dv ON dv.id = d.current_version_id
+            WHERE d.id = ANY(CAST(:dids AS uuid[]))"""),
+            {"dids": [r["document_id"]
+                      for r in ranked[:SECOND_PASS_READ]]})).all()
+    seen = {q.strip().lower() for q in plan.get("queries") or []}
+    mined = [t for t in mine_terms([r[0] for r in rows])
+             if t.lower() not in seen]
+    return await _choose_terms(sinas, question, mined, run_id)
+
+
+_CHOOSE_PROMPT = """\
+These phrases repeat in the documents a first search returned for the question
+below. They were counted, not chosen: nothing has judged whether any of them
+bears on what is being asked.
+
+QUESTION:
+{question}
+
+PHRASES:
+{phrases}
+
+Keep only the phrases that NAME SOMETHING the question is about — a mechanism,
+a procedure, a doctrine, an instrument, a test, a body. Drop the rest: a
+phrase can repeat because it is a fixture of the writing rather than a name
+for anything ("having regard", "applicant claims"), and a phrase can name
+something real that this question is not about.
+
+Keep a phrase and its longer form both where both name something; they find
+different documents. Keep nothing if nothing qualifies.
+
+Reply ONLY JSON: {{"keep": ["<phrase, copied exactly>", ...]}}
+"""
+
+
+async def _choose_terms(sinas, question: str, mined: list[str],
+                        run_id: uuid.UUID | None) -> list[str]:
+    """Which mined phrases bear on the question. One call, or all of them.
+
+    Counting finds candidates a model could not, because it has not read the
+    documents. Judging them is the other way round: `cit para` and `bahn and
+    others` are as rare as `virtual data room` and name nothing anyone asked
+    about, and no arithmetic over frequency separates those. So the miner
+    proposes and the planner disposes.
+
+    A failure here keeps every mined phrase rather than none. The search that
+    follows drops a phrase that finds nothing or finds too much, so an
+    unjudged list costs a few more lookups and no correctness — where an empty
+    list would silently turn the whole second pass off.
+    """
+    if not mined:
         return []
     try:
         data = await _invoke_json(
             sinas, PLAN_AGENT,
-            _SECOND_PASS_PROMPT.format(
-                question=question, n=SECOND_PASS_TERMS, summaries=summaries,
-                queries="\n".join(f"- {q}" for q in plan.get("queries") or [])),
-            (("terms",),), run_id, "second pass")
-    except Exception:  # noqa: BLE001 — a blind plan is the old behaviour
-        _log.warning("second-pass terms unavailable", exc_info=True)
-        return []
-    seen = {q.strip().lower() for q in plan.get("queries") or []}
-    out = []
-    for t in (data.get("terms") or []):
-        t = str(t).strip()
-        if 3 <= len(t) <= 80 and t.lower() not in seen:
-            out.append(t)
-    return out[:SECOND_PASS_TERMS]
+            _CHOOSE_PROMPT.format(
+                question=question,
+                phrases="\n".join(f"- {p}" for p in mined)),
+            (("keep",),), run_id, "second pass: choosing terms")
+    except Exception:  # noqa: BLE001
+        _log.warning("second-pass term selection unavailable; "
+                     "searching every mined phrase", exc_info=True)
+        return mined
+    allowed = {p.lower(): p for p in mined}
+    kept = [allowed[str(t).strip().lower()]
+            for t in (data.get("keep") or [])
+            if str(t).strip().lower() in allowed]
+    return kept or mined
 
 
 async def retrieve_by_terms(terms: list[str], limit: int = 30) -> dict[str, dict]:

@@ -121,6 +121,12 @@ class QueryRun(Base, TimestampMixin, OwnedMixin):
     parent_result_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     answer_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     synthesis_chat_id: Mapped[str | None] = mapped_column(String(64))
+    # The review's side of the same argument. One conversation for the life of
+    # the answer, so the brief — the question, its parts and the whole
+    # retrieved set — is sent once and read back from cache on every later
+    # cycle, and so the gate can see what it already ruled instead of being
+    # told again.
+    gate_chat_id: Mapped[str | None] = mapped_column(String(64))
     # fire relationship discovery asynchronously after the parent publishes
     run_discovery: Mapped[bool] = mapped_column(
         nullable=False, default=False, server_default="false"

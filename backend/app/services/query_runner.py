@@ -4196,6 +4196,55 @@ async def _standing_objections(
     return issues, points, counts
 
 
+GATE_AGENT = "sgr/answer-gate-agent"
+
+
+async def _gate_turn(sinas: _Sinas, run_id: uuid.UUID,
+                     brief: str, turn: str) -> str:
+    """One cycle of judging, as a turn in the review's own conversation.
+
+    Judging used to be a fresh call per cycle, and each call carried the
+    question, its parts, the whole retrieved document set and every rule for
+    judging it. Measured over one night: 40,000 tokens a call, 39,266 of them
+    written to the prompt cache and 732 read back. Sinas' Anthropic provider
+    sets a rolling cache breakpoint on the last message precisely so a
+    sequence of calls reuses the previous one's prefix; a freshly assembled
+    body each time gives it nothing to roll onto. The drafting conversation
+    was built for this exact defect — this is the review's half of it.
+
+    Turn one is the brief and is sent once. Every later turn carries the draft
+    and nothing else. Two things follow, and the second is not about money:
+    the working set is read from cache rather than rewritten, and the gate can
+    SEE what it already ruled, where before its own rulings had to be read
+    back to it every cycle because it had no memory of making them.
+
+    A conversation that cannot be opened falls back to a single call carrying
+    both halves — the old behaviour exactly. Judging is the stage that decides
+    whether an answer may publish, and it does not get to fail because a chat
+    could not be created.
+    """
+    chat = drafting_chat.DraftingChat(
+        client=sinas, agent=GATE_AGENT, title="[query-run] gate")
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        chat_id = (run.gate_chat_id or None) if run else None
+    try:
+        await chat.start(brief, chat_id=chat_id)
+        if chat.chat_id and chat.chat_id != chat_id:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(QueryRun, run_id)
+                if run is not None:
+                    run.gate_chat_id = (chat.chat_id or "")[:64] or None
+                    await session.commit()
+        return await chat.ask(turn)
+    except CancelledOutcome:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.warning("gate conversation unavailable for run %s; "
+                     "judging this cycle in one call", run_id, exc_info=True)
+        return await sinas.invoke(GATE_AGENT, brief + "\n\n" + turn)
+
+
 async def _look_owed(
     sinas: _Sinas, owed: list[dict]
 ) -> dict[str, dict]:
@@ -4406,9 +4455,13 @@ async def _gate_answer(
     mrows = await _manifest_rows(parent_result_id) if parent_result_id else []
     claims = "\n".join(f"{seq}. {text}" for seq, text, _ in rows)
     claims_by_seq = {seq: cid for seq, _, cid in rows}
+    # WITHOUT the CITED marks. The marks change every cycle and the set does
+    # not, and this block is 90% of what is sent: marking it inline made the
+    # largest stable thing in the run look different on every call, so the
+    # prompt cache had nothing to match and rewrote all of it, every time.
+    # Which documents the draft cites travels with the draft instead.
     source_lines = "\n".join(
-        f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
-        f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
+        f"- {r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
         f"{r.get('properties') or '-'} | "
         f"{r['summary'].replace(chr(10), ' ')[:200]}"
         for r in mrows
@@ -4440,14 +4493,14 @@ async def _gate_answer(
                       "as an acceptance, and so is saying nothing about a "
                       "request listed here."
                       ) if open_refusals else ""
-    reply = await sinas.invoke(
-        "sgr/answer-gate-agent",
+    # Turn one is the brief: the question, its parts, the whole retrieved set
+    # and every rule for judging. It is sent once per run and read back from
+    # cache on every later cycle. Turn two onward carries only the draft.
+    brief = (
         "QUESTION:\n" + run_question
-        + "\n\nCLAIMS OF THE DRAFT ANSWER (the number before each claim is "
-          "its identifier, not its position: revision drops claims, so gaps "
-          "in the numbering are expected and are not a defect — there is no "
-          "claim missing from this list):\n" + claims
-        + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
+        + "\n\nWORKING DOCUMENT SET (every document retrieved for this "
+          "question; which of them the draft cites comes with the draft):\n"
+        + source_lines
         + (('\n\nPARTS OF THE QUESTION (fixed for this run; judge'
             ' each against the claims, and do not add, merge or drop'
             ' one):\n'
@@ -4481,7 +4534,6 @@ async def _gate_answer(
         'cannot justify. "supporting" means relevant: the answer would be '
         'better with it and is not wrong without it. Most named sources are '
         'supporting.'
-        + refusals_block
         + '\n\nReply ONLY JSON: {"publishable": true|false,'
         + (' "parts": [{"n": <the number of the part above>, "covered": '
            'true|false, "covered_by": [<the sequence numbers of the claims '
@@ -4507,12 +4559,29 @@ async def _gate_answer(
         ' "importance": "essential|supporting",'
         ' "essential_because": "<REQUIRED when essential: which part of the question is not properly answered without this source, in one line. Leave empty for supporting.>",'
         ' "part": <the number of the part it bears on, or null>}, ...]'
-        + (', "objection_rulings": [{"id": "<one of the ids listed above>",'
-           ' "ruling": "accept|restate",'
-           ' "new": "<for a restatement only: what you are adding that you have'
-           ' not already said>"}]' if open_refusals else "")
-        + '}',
+        + ', "objection_rulings": [{"id": "<one of the ids listed above>",'
+          ' "ruling": "accept|restate",'
+          ' "new": "<for a restatement only: what you are adding that you have'
+          ' not already said>"}] — include this key only in a cycle whose'
+          ' message lists requests to rule on'
+        + '}'
     )
+    # Every later cycle: the draft, what it cites, and what the drafter said
+    # back. Never the working set, never the rules — those are turn one and
+    # are read from cache.
+    turn = (
+        "CLAIMS OF THE DRAFT ANSWER (the number before each claim is its "
+        "identifier, not its position: revision drops claims, so gaps in the "
+        "numbering are expected and are not a defect — there is no claim "
+        "missing from this list):\n" + claims
+        + "\n\nCITED BY THIS DRAFT: "
+        + (", ".join(sorted(cited)) if cited else "(nothing yet)")
+        + "\nEvery other document in the working set is uncited."
+        + refusals_block
+        + "\n\nJudge this draft now and reply ONLY with the JSON object "
+          "described in the brief."
+    )
+    reply = await _gate_turn(sinas, run_id, brief, turn)
     # Only the parse is guarded. A wide try around the whole body turns a
     # fault in this function into "the gate had no objection" — which is what
     # happened here for three hours — so everything after the parse runs

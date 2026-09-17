@@ -62,8 +62,14 @@ def gate_env(monkeypatch):
         async def get(self, _model, _ident):
             # The gate looks for a split already made for this run, so the
             # stub reflects what _tele below recorded.
+            # `gate_chat_id` empty: these tests are about the verdict, and a
+            # fake client with no chat_create sends judging down the
+            # single-call fallback, which is the behaviour they were written
+            # against. The conversation itself is exercised in
+            # test_the_review_keeps_one_conversation.py.
             return SimpleNamespace(
-                telemetry={"validate": dict(tele.get("validate") or {})}
+                telemetry={"validate": dict(tele.get("validate") or {})},
+                gate_chat_id=None,
             )
 
         async def execute(self, statement=None, *_a, **_k):

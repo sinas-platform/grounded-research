@@ -39,6 +39,16 @@ def test_recognition_is_read_off_entity_stats_not_counted():
         "the per-match count over the mention table has come back")
 
 
+def test_the_name_lookup_is_two_indexed_branches_not_an_or():
+    """`name ILIKE … OR id IN (alias subquery)` cannot use the trigram index
+    and scans the entity table: 20 s per name, measured. Two branches
+    unioned take 0.26 s. Pinned so the OR does not come back for tidiness."""
+    src = inspect.getsource(rf._resolve_names)
+    assert "UNION" in src
+    assert "OR e.id IN" not in src
+    assert "a.alias ILIKE :pat" in src
+
+
 def test_no_resolver_and_no_scorer_counts_mentions_per_question():
     """Four readers of the same two facts, none of them a count over the
     mention table any more: both resolvers order their cut by a stored

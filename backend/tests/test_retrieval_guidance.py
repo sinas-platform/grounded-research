@@ -114,7 +114,7 @@ def test_the_candidate_list_the_planner_sees_is_ordered():
 
     # every cut that feeds the planner carries a tie-break
     src = inspect.getsource(rf._resolve_names)
-    assert "ORDER BY docs DESC, e.id" in src, (
+    assert "ORDER BY docs DESC, id" in src, (
         "the name resolver's LIMIT 6 must be ordered, or which six entities a "
         "name resolves to is whatever order the rows arrived in")
 

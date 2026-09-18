@@ -532,16 +532,26 @@ async def _resolve_names(names: list[str]) -> list[dict]:
         for n in dict.fromkeys(x.strip() for x in parts):
             if len(n) < 4:
                 continue
+            # Two branches unioned, not one WHERE with an OR: a trigram
+            # index serves `ILIKE '%…%'` on a column, and Postgres cannot
+            # use it across `name ILIKE … OR id IN (alias subquery)` — that
+            # form scans the whole entity table. Measured with the index in
+            # place, one name: 20 s as an OR, 0.26 s as a union.
             rows = (await s.execute(text("""
-                SELECT e.id, e.canonical_form, t.name,
+                SELECT e.id AS id, e.canonical_form AS value, t.name AS type,
                        coalesce(st.documents, 0) AS docs
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                 LEFT JOIN entity_stats st ON st.entity_id = e.id
-                WHERE e.merged_into_id IS NULL
-                  AND (e.canonical_form ILIKE :pat OR e.id IN
-                       (SELECT entity_id FROM entity_alias
-                        WHERE alias ILIKE :pat))
-                ORDER BY docs DESC, e.id
+                WHERE e.merged_into_id IS NULL AND e.canonical_form ILIKE :pat
+                UNION
+                SELECT e.id, e.canonical_form, t.name,
+                       coalesce(st.documents, 0)
+                FROM entity_alias a
+                JOIN entity e ON e.id = a.entity_id
+                JOIN entity_type t ON t.id = e.entity_type_id
+                LEFT JOIN entity_stats st ON st.entity_id = e.id
+                WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
+                ORDER BY docs DESC, id
                 LIMIT 6"""), {"pat": f"%{n}%"})).all()
             for eid, cf, tn, docs in rows:
                 seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,

@@ -62,6 +62,7 @@ from dataclasses import dataclass
 import sqlalchemy as sa
 
 from app.db import AsyncSessionLocal
+from app.services.naming import unaccented
 
 log = logging.getLogger(__name__)
 
@@ -270,7 +271,21 @@ NAME_WORD = re.compile(r"[^\W\d_]{4,}")
 
 
 def _name_words(text: str) -> set[str]:
-    return {w.lower() for w in NAME_WORD.findall(text or "")}
+    """The words of `text`, folded to what identifies rather than to how it
+    was typed.
+
+    Accents are removed on both sides of every comparison this feeds, using
+    the same fold `app.services.naming` applies. Without it `Générale` and
+    `Generale` are two different words, and a source whose name a claim
+    spells without its accents reads as a source the claim never named. That
+    module had the fold and this one did not, and the two ran in the same
+    gate about sixty lines apart.
+
+    The length threshold is applied AFTER folding, so a four-letter word that
+    carries an accent still counts as one: `état` folds to `etat` rather than
+    to a three-letter fragment.
+    """
+    return {w.lower() for w in NAME_WORD.findall(unaccented(text or ""))}
 
 
 def distinctive_words(names: list[str], share: float = 0.2) -> set[str]:

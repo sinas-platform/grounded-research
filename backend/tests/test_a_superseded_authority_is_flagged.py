@@ -108,3 +108,27 @@ def test_an_edge_with_no_state_counts_as_active():
 
     sql = str(_CITED_SUPERSEDED)
     assert sql.count("current_state_id IS NULL") == 2
+
+
+def test_a_source_is_never_recorded_as_superseding_itself():
+    """Measured on 18 September 2026: 22 of one collection's 307 supersession
+    edges ran from an entity to that same entity — an interim order and the
+    final judgment in one case both resolved to the case's entity, and the
+    edge extracted between the two documents collapsed to a loop. Read as a
+    finding, the loop told the drafter the deciding judgment of a question
+    was "recorded as superseded by" itself, and the drafter dropped it: the
+    one source the expert review had said was missing.
+
+    Pinned on the supersession read specifically, by position: the loop
+    guard must sit in the WHERE of the outer query, where `r` is the
+    supersession edge, not in the full-text CTE where it would mean nothing.
+    """
+    import re
+
+    from app.services.supersession import _CITED_SUPERSEDED
+
+    sql = str(_CITED_SUPERSEDED)
+    outer = sql[sql.index("SELECT DISTINCT"):]
+    assert re.search(r"r\.source_id\s*<>\s*r\.target_id", outer), (
+        "the supersession read must exclude an edge whose two ends are the "
+        "same entity")

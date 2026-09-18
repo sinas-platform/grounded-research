@@ -588,23 +588,39 @@ async def _entities_matching(s, n: str):
     # `name ILIKE … OR id IN (alias subquery)` — that form scans the whole
     # entity table. Measured with the index in place, one name: 20 s as an
     # OR, 0.26 s as a union.
+    #
+    # And only the closest, not the six closest. A key names one thing; the
+    # entities beside it — `Article 7` beside Article 7(1) to 7(7) — are its
+    # neighbourhood, and reaching a neighbourhood is what the graph walk is
+    # for. Returned from here, every proposal the planner made became six
+    # entities, so a plan that differed from the last by one proposal
+    # differed by six. Measured: single plans overlapped by 26% with the
+    # six, and the differing entities were almost all sub-articles of
+    # something both plans had named.
     return (await s.execute(text("""
-                SELECT e.id AS id, e.canonical_form AS value, t.name AS type,
-                       coalesce(st.documents, 0) AS docs,
-                       similarity(e.canonical_form, :key) AS closeness
-                FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
-                LEFT JOIN entity_stats st ON st.entity_id = e.id
-                WHERE e.merged_into_id IS NULL AND e.canonical_form ILIKE :pat
-                UNION
-                SELECT e.id, e.canonical_form, t.name,
-                       coalesce(st.documents, 0),
-                       similarity(a.alias, :key)
-                FROM entity_alias a
-                JOIN entity e ON e.id = a.entity_id
-                JOIN entity_type t ON t.id = e.entity_type_id
-                LEFT JOIN entity_stats st ON st.entity_id = e.id
-                WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
-                ORDER BY closeness DESC, docs DESC, id
+                WITH found AS (
+                    SELECT e.id AS id, e.canonical_form AS value,
+                           t.name AS type, coalesce(st.documents, 0) AS docs,
+                           similarity(e.canonical_form, :key) AS closeness
+                    FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
+                    LEFT JOIN entity_stats st ON st.entity_id = e.id
+                    WHERE e.merged_into_id IS NULL
+                      AND e.canonical_form ILIKE :pat
+                    UNION
+                    SELECT e.id, e.canonical_form, t.name,
+                           coalesce(st.documents, 0),
+                           similarity(a.alias, :key)
+                    FROM entity_alias a
+                    JOIN entity e ON e.id = a.entity_id
+                    JOIN entity_type t ON t.id = e.entity_type_id
+                    LEFT JOIN entity_stats st ON st.entity_id = e.id
+                    WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
+                ), best AS (
+                    SELECT *, max(closeness) OVER () AS top FROM found
+                )
+                SELECT id, value, type, docs, closeness FROM best
+                WHERE closeness = top
+                ORDER BY docs DESC, id
                 LIMIT 6"""), {"pat": f"%{n}%", "key": n})).all()
 
 

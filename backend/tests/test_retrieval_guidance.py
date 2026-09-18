@@ -114,7 +114,7 @@ def test_the_candidate_list_the_planner_sees_is_ordered():
 
     # every cut that feeds the planner carries a tie-break
     src = inspect.getsource(rf._entities_matching)
-    assert "ORDER BY closeness DESC, docs DESC, id" in src, (
+    assert "WHERE closeness = top" in src and "ORDER BY docs DESC, id" in src, (
         "the name resolver's LIMIT 6 must be ordered, or which six entities a "
         "name resolves to is whatever order the rows arrived in")
 

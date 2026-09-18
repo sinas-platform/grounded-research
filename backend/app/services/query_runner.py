@@ -6217,7 +6217,31 @@ def _apply_source_facts(row: AnswerClaim, evidence: Any,
                          else None)
 
 
-async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
+#: A source file named in prose. Every document in a collection is addressed
+#: by its filename, and that is how a refusal names one — "claim 5 already
+#: cites founding-judgment.md". Anything up to whitespace or a quote or
+#: bracket, ending in the extension: filenames carry dots, dashes, underscores.
+_FILE_TOKEN = re.compile(r"[^\s\"'`(),;\[\]<>]+\.md\b")
+
+
+def _named_files(text: str) -> list[str]:
+    """The source files a piece of prose names, in order, once each. Pure."""
+    return list(dict.fromkeys(_FILE_TOKEN.findall(text or "")))
+
+
+async def _cited_filenames(answer_id: uuid.UUID) -> set[str]:
+    """Every file some claim of the answer currently cites."""
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename)
+            .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
+            .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+            .where(AnswerClaim.answer_id == answer_id))).scalars().all()
+    return {str(f) for f in rows if f}
+
+
+async def _record_refusals(run_id: uuid.UUID, answer_id: uuid.UUID,
+                           patch: dict) -> int:
     """The patch's replies to the gate's requests, into the objection ledger.
 
     Three shapes, one meaning. An explicit `refuse` entry is a reply and
@@ -6228,21 +6252,53 @@ async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
     of "the drafter answered" from depending on which disposition the reviser
     happened to reach for.
 
+    One thing a reply may not do is assert a citation the answer does not
+    carry. A refusal that names a source file is checked against the files
+    the answer's claims cite — and against the files this same patch cites,
+    since a revision landing alongside the refusal may be what adds it — and
+    a refusal naming a file found in neither is rejected: the request stays
+    open and the drafter is told why. Measured: a refusal of "claim 5 already
+    cites the founding judgment" closed a correct objection on a run where
+    nothing cited it. Only files are checked, because only files are
+    checkable here without a model; a refusal that argues rather than asserts
+    is left to the review. And only the patch's CLAIMS count as citing — not
+    its replies, or the assertion would vouch for itself.
+
     Returns how many replies were recorded, for the cycle's telemetry.
     """
     seen: set[str] = set()
     cycle = int((await _next_cycle_key(run_id, "validate", "gate"))
                 .removeprefix("gate_")) - 1
-    for oid, why in (
+    replies = (
         [(r["objection"], r["rationale"]) for r in (patch.get("refuse") or [])]
         + [(oid, (patch.get("drop_reasons") or {}).get(seq, ""))
            for seq, oid in (patch.get("drop_objections") or {}).items()]
         + [(k["objection"], k["rationale"]) for k in (patch.get("keep") or [])
            if k.get("objection")]
-    ):
-        if oid and oid not in seen:
-            seen.add(oid)
-            await objections.refused(run_id, oid, why, cycle=cycle)
+    )
+    cited: set[str] | None = None
+    patch_cites = {str(e.get("filename") or "")
+                   for key in ("revise", "add")
+                   for c in (patch.get(key) or [])
+                   for e in (c.get("evidence") or [])}
+    for oid, why in replies:
+        if not oid or oid in seen:
+            continue
+        seen.add(oid)
+        named = _named_files(str(why or ""))
+        if named:
+            if cited is None:
+                cited = await _cited_filenames(answer_id) | patch_cites
+            missing = [f for f in named if f not in cited]
+            if missing:
+                _log.info("run %s: refusal of %s names %s, which the answer "
+                          "does not cite; the request stays open",
+                          run_id, oid, missing)
+                await objections.rejected(run_id, oid, why, missing,
+                                          cycle=cycle)
+                seen.discard(oid)
+                continue
+        await objections.refused(run_id, oid, why, cycle=cycle)
     return len(seen)
 
 
@@ -6517,7 +6573,7 @@ async def _revise_answer(
         # reply that mattered on the measured run was exactly that — a reason
         # why a source could not carry the point — and the shape that lost it
         # was "nothing was applied, so nothing is recorded".
-        refusals = await _record_refusals(run_id, patch)
+        refusals = await _record_refusals(run_id, answer_id, patch)
     if not patch or not (patch["revise"] or patch["add"] or patch["drop"]
                          or patch["keep"]):
         # Numbered like any other cycle, though it changed nothing. The reviser

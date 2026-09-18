@@ -266,6 +266,37 @@ async def refused(run_id: uuid.UUID, oid: str, reason: str,
     await _store(run_id, entries)
 
 
+@_best_effort(None)
+async def rejected(run_id: uuid.UUID, oid: str, reason: str,
+                   named: list[str], cycle: int = 0) -> None:
+    """A refusal that asserted something the answer does not carry.
+
+    Measured on one run: the review asked that a founding judgment be cited
+    for the two conditions it laid down; the drafter refused with "claim 5
+    already cites" that judgment; the review accepted; and no evidence row
+    in the answer cited it — the file was retrieved, at rank 29, and cited
+    by nothing. The point was right, the refusal was false, and the record
+    said it was settled.
+
+    A refusal that asserts a citation is checkable against the answer's own
+    evidence rows before anyone rules on it, and one that fails the check is
+    not a reply: the request stays OPEN, and the failed reply is kept on the
+    entry so the next round can say why the request still stands. A false
+    assertion closing an argument is the same failure shape the objections
+    exist to catch, one level up.
+    """
+    entries = await _load(run_id)
+    entry = entries.get(oid)
+    if entry is None or entry.get("state") in _SETTLED:
+        return
+    entry["rejected_replies"] = (entry.get("rejected_replies") or []) + [
+        {"reason": (reason or "").strip()[:400], "named": list(named)[:5],
+         "cycle": int(cycle)}]
+    entry["state"] = OPEN
+    entries[oid] = entry
+    await _store(run_id, entries)
+
+
 @_best_effort(list)
 async def outstanding(run_id: uuid.UUID) -> list[dict[str, Any]]:
     """Refusals the review has not yet ruled on, oldest first."""
@@ -429,6 +460,10 @@ def as_record(entry: dict) -> dict[str, Any]:
         "rulings": rulings,
         "state": entry.get("state"),
         "exchanges": int(entry.get("exchanges") or 1),
+        # Replies that asserted a citation the answer did not carry, and so
+        # never counted as replies: see `rejected`.
+        "rejected_replies": [r for r in (entry.get("rejected_replies") or [])
+                             if isinstance(r, dict)],
     }
 
 

@@ -51,8 +51,17 @@ from dataclasses import dataclass
 #: "a general proposition the source lays down", which is exactly the thing
 #: the review found resting on material that describes rather than lays down.
 #: Everything else is untouched — a claim reporting what a source SAYS, what
-#: happened, or how a process ran is not weakened by the standing of the
-#: source it reports, and a conclusion rests on the claims it follows from.
+#: happened, or what steps a process takes is not weakened by the standing of
+#: the source it reports, and a conclusion rests on the claims it follows
+#: from.
+#:
+#: `procedure` is the one to watch, because it now covers a process still to
+#: be run as well as one that has been, and steps a reader is about to take
+#: read very much like things a source requires of them. What a source
+#: requires is a `rule` and is judged here; the sequence and the actors are
+#: not. A requirement filed as a procedure is a requirement this rule no
+#: longer sees, so the two kinds have to stay apart at the point they are
+#: chosen, which is the drafting contract rather than this module.
 #:
 #: `test` is deliberately not here, though it is a rule stated as ordered
 #: conditions. Adding it is this tuple plus a test; it is left out until the

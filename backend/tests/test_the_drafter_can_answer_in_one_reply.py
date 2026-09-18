@@ -490,6 +490,19 @@ def test_every_kind_is_explained_where_it_is_named():
     assert all(st.CLAIM_KIND_GLOSS[k].strip() for k in st.CLAIM_KINDS)
 
 
+def test_a_gloss_is_one_line_because_the_block_is_one_line_each():
+    """`_KIND_GLOSS_BLOCK` joins the glosses with newlines and the drafter
+    reads the result as a list. A gloss carrying a newline of its own splits
+    into two bullets, the second of them unlabelled, and nothing says so.
+    The risk is real once a gloss is long enough to wrap in source: the
+    wrapping is implicit concatenation, and a comma where the join happens
+    is one keystroke from a line break."""
+    for kind, gloss in st.CLAIM_KIND_GLOSS.items():
+        assert "\n" not in gloss, kind
+    offered = [k for k in st.CLAIM_KINDS if k != "abstention"]
+    assert len(qr._KIND_GLOSS_BLOCK.splitlines()) == len(offered)
+
+
 def test_the_contract_the_drafter_gets_is_built_from_the_taxonomy():
     """Three prompt schemas used to list the kinds by hand. A kind added to
     the tuple and not to the schema is a kind no drafter can choose."""

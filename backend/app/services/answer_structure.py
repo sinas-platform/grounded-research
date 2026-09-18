@@ -119,6 +119,18 @@ UNCLASSIFIED_HEADING = "Unclassified"
 #: A legislation `status` value in this set means the instrument is not
 #: current law. Declared by the deployment on the class as a property; these
 #: two words are the contract's, not a deployment's.
+#:
+#: They stay English on purpose and this is not an oversight: WHICH property
+#: says how a source stands is the deployment's to name, WHAT its value has
+#: to say is the engine's, and a set of words per language would be the
+#: engine guessing at another party's vocabulary. A deployment writing
+#: `abrogé` maps it to `superseded` where it extracts, not here.
+#:
+#: What was wrong is that a value outside this set was indistinguishable from
+#: no value at all: a source whose status never mapped read as current law
+#: and nothing said so. `unrecognised_statuses` is that silence made
+#: countable, because a contract nobody can see broken is a contract nobody
+#: keeps.
 STALE_STATUSES = ("repealed", "superseded")
 
 #: The shape of a tier value, whichever annotation carries it: `{"depth": n}`
@@ -867,6 +879,94 @@ def jurisdiction_of(
     return str(v) if v not in (None, "") else None
 
 
+def status_values(props: dict, cls: str, roles: DeclaredRoles) -> list[str]:
+    """Every status value on this document, lower-cased and in order. Pure.
+
+    A status property may declare `cardinality: many`, and extraction then
+    returns a list. Reading it as one scalar stringified the list, so a
+    document whose values included `repealed` produced neither a currency
+    note nor a recognisable unknown: it read as current law, under a word
+    that is not a word.
+    """
+    raw = unwrap(roles.value(roles.status, props, cls))
+    items = raw if isinstance(raw, list) else [raw]
+    out = [str(unwrap(x) or "").strip().lower() for x in items]
+    return [v for v in out if v]
+
+
+#: How many distinct unknown status values a report carries, and how long
+#: each is allowed to be. A status has no schema length limit and the report
+#: is written into a run's telemetry, so an extraction that went wrong could
+#: otherwise put a manifest's worth of text into a row nobody can read.
+MAX_REPORTED_STATUSES = 20
+MAX_REPORTED_STATUS_LEN = 80
+
+
+def status_report(found: dict) -> dict:
+    """`unrecognised_statuses` as a bounded row. Pure.
+
+    The whole of the count is kept — `values` says how many distinct words
+    there were and `documents` how many documents carried one — so a truncated
+    list never reads as the complete picture.
+    """
+    counts = found.get("by_value") or {}
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        "values": len(counts),
+        "documents": int(found.get("documents") or 0),
+        "top": [{"value": v[:MAX_REPORTED_STATUS_LEN], "documents": n}
+                for v, n in top[:MAX_REPORTED_STATUSES]],
+        "truncated": len(counts) > MAX_REPORTED_STATUSES,
+    }
+
+
+def unrecognised_statuses(rows: list[dict],
+                          roles: DeclaredRoles) -> dict:
+    """Status values the deployment wrote that the contract does not know,
+    and how many documents carry each. Pure.
+
+    Every value here is a document the currency check waved through. A status
+    of `repealed` or `superseded` produces a note a reader sees; anything
+    else produces nothing, and nothing is exactly what a document with no
+    status at all produces. The two cases are opposite and looked identical.
+
+    The one that brought this up: a French-language source whose status
+    extracts as its own word never matches either of the contract's two, so
+    an instrument that is no longer law reads as law and the answer says
+    nothing. The fix is the deployment's mapping, and this is how anyone
+    finds out the mapping is missing.
+
+    Returns `{"by_value": {word: documents}, "documents": n}`. Counted per
+    value rather than listed per document, because the question a reader has
+    is which words are turning up and a value on three hundred documents and
+    a value on one need telling apart. The document total is carried rather
+    than derived, since one document can state two unknown words and summing
+    the per-value counts would report occurrences as documents.
+    """
+    out: dict[str, int] = {}
+    documents = 0
+    for r in rows:
+        if not r.get("filename"):
+            continue
+        values = status_values(r.get("props") or {},
+                               str(r.get("class") or ""), roles)
+        # Only where NOTHING matched. A document that also states a value the
+        # contract knows has its note and is not waved through, so counting
+        # its other words would report a mapping gap where the mapping
+        # worked.
+        if not values or any(v in STALE_STATUSES for v in values):
+            continue
+        documents += 1
+        # Per value, DOCUMENTS and not occurrences: one document that states
+        # the same unknown word twice is one document, and one that states
+        # two different unknown words is one document against each of them.
+        # Summing the per-value counts is therefore never the document
+        # total, which is why the total is carried rather than derived.
+        for v in set(values):
+            out[v] = out.get(v, 0) + 1
+    return {"by_value": out, "documents": documents}
+
+
 def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:
     """Per filename, why the document is not current law — or absent.
 
@@ -897,9 +997,9 @@ def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:
         # engine's own vocabulary — `STALE_STATUSES` is the contract a class
         # writes its status values against, not a guess at another party's
         # words, and it stays here for that reason.
-        status = str(unwrap(roles.value(roles.status, props, cls))
-                     or "").strip().lower()
-        if status in STALE_STATUSES:
+        status = next((v for v in status_values(props, cls, roles)
+                       if v in STALE_STATUSES), None)
+        if status:
             note = f"{status}"
             by = unwrap(roles.value(roles.superseded_by, props, cls))
             if by:

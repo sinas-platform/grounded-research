@@ -15,6 +15,8 @@ declared type from what it sampled.
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
 import logging
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -332,3 +334,82 @@ def test_a_failed_refresh_does_not_lose_the_pass():
     call = src.rindex("refresh_corpus_profile()")
     assert "try:" in src[:call], "the refresh must not be able to kill the pass"
     assert "except" in src[call:]
+
+
+@pytest.mark.asyncio
+async def test_the_profile_is_built_once_when_a_deployment_has_none(monkeypatch):
+    """A profile that only a timer builds is a profile a restart prevents.
+
+    The planner is shown each entity type's size and example values so it can
+    propose probes against what the corpus holds. That table is computed once
+    and stored — and the only thing that built it waited a full maintenance
+    interval first. This deployment restarts more often than its six-hour
+    interval, so the first pass never arrived: measured on 127,000 documents,
+    zero rows, every question ever asked planned by a model told the NAMES of
+    the entity types and nothing else. Building it took six minutes.
+
+    Worse on a service that ships: every release restarts the clock.
+    """
+    from app.services import maintenance
+
+    built = []
+
+    async def _refresh(force=False):
+        built.append(force)
+        return {"types": 10}
+
+    class _Empty:
+        async def execute(self, *_a, **_k):
+            return SimpleNamespace(first=lambda: None)
+
+    @asynccontextmanager
+    async def _session_local():
+        yield _Empty()
+
+    monkeypatch.setattr(maintenance, "AsyncSessionLocal", _session_local)
+    monkeypatch.setattr(
+        "app.services.corpus_profile.refresh_corpus_profile", _refresh)
+    await maintenance.ensure_corpus_profile()
+    assert built == [True], "an empty profile must be built, and forced"
+
+
+@pytest.mark.asyncio
+async def test_a_deployment_that_has_one_is_left_alone(monkeypatch):
+    """Missing is not stale. A boot never costs minutes resampling a corpus
+    that already has a profile — refreshing is the timer's job."""
+    from app.services import maintenance
+
+    built = []
+
+    async def _refresh(force=False):
+        built.append(force)
+        return {}
+
+    class _Has:
+        async def execute(self, *_a, **_k):
+            return SimpleNamespace(first=lambda: ("an-entity-type-id",))
+
+    @asynccontextmanager
+    async def _session_local():
+        yield _Has()
+
+    monkeypatch.setattr(maintenance, "AsyncSessionLocal", _session_local)
+    monkeypatch.setattr(
+        "app.services.corpus_profile.refresh_corpus_profile", _refresh)
+    await maintenance.ensure_corpus_profile()
+    assert built == []
+
+
+@pytest.mark.asyncio
+async def test_a_failure_to_build_does_not_stop_the_backend(monkeypatch):
+    """Grounding is better, not required. A database that cannot answer at
+    boot must not take the API down with it."""
+    from app.services import maintenance
+
+    @asynccontextmanager
+    async def _broken():
+        raise RuntimeError("database unavailable")
+        yield
+
+    monkeypatch.setattr(maintenance, "AsyncSessionLocal", _broken)
+    await maintenance.ensure_corpus_profile()

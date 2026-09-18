@@ -75,6 +75,17 @@ EXCLUDED_TYPES = frozenset({"Relevant Market"})
 MIN_DOCUMENTS = 350
 
 
+def _composed(s: str) -> str:
+    """`s` in NFC, without rebuilding it when it is already there. Pure.
+
+    The case tier hands the same sample of whole documents to every candidate
+    it judges, so an unconditional normalise recomposed a large string once
+    per candidate. `is_normalized` is a scan and returns on the first
+    character that is not, where the normalise allocates a copy every time.
+    """
+    return s if unicodedata.is_normalized("NFC", s) else unicodedata.normalize("NFC", s)
+
+
 def case_evidence(name: str, text: str) -> dict:
     """How often this name is written lower-case where it appears.
 
@@ -90,8 +101,8 @@ def case_evidence(name: str, text: str) -> dict:
     # matches inside `Kestrel` + U+0301 + `e` — the same word the composed
     # form correctly rejects. Which form arrives depends on where the text
     # was extracted, which is not a thing a count should vary with.
-    name = unicodedata.normalize("NFC", name)
-    text = unicodedata.normalize("NFC", text)
+    name = _composed(name)
+    text = _composed(text)
     if written_as_a_word(name):
         return {"as_written": 0, "lowercase": 0, "lowercase_share": 1.0,
                 "note": "the canonical form is itself lower-case"}
@@ -320,6 +331,10 @@ async def mark_generic_by_case(
     ))).all()]
     sample = "\n".join(t for (t,) in (await session.execute(
         _SAMPLE_TEXT, {"n": sample_documents})).all())
+    # Composed once for the whole pass: every candidate below is judged
+    # against this same sample, and composing it per candidate rebuilt a
+    # large string once per entity for no change in the answer.
+    sample = _composed(sample)
     rows = (await session.execute(_TIER2_CANDIDATES)).mappings().all()
     marked = skipped = already = excluded = identified = unmeasured = 0
     examples: list[str] = []
@@ -338,7 +353,7 @@ async def mark_generic_by_case(
         if "generic_term" in meta:
             already += 1
             continue
-        evidence = case_evidence(name, sample)
+        evidence = case_evidence(name, sample)  # sample already composed
         # Every casing counts toward the floor, matching the share's own
         # denominator: 20 lower-case plus 10 all-caps is 30 observations.
         seen = int(evidence.get("any_case") or 0)

@@ -159,6 +159,18 @@ def test_decomposed_text_counts_the_same_as_composed():
         "lowercase_share"] == 0.0
 
 
+def test_composing_is_a_check_before_it_is_a_copy():
+    """The case tier hands the same sample of whole documents to every
+    candidate, so an unconditional normalise rebuilt a large string once per
+    entity. Already-composed text must come back as the same object."""
+    from app.services.generic_entities import _composed
+
+    composed = "the \u00c9tat filing"
+    assert _composed(composed) is composed
+    decomposed = "the E\u0301tat filing"
+    assert _composed(decomposed) == composed
+
+
 def test_the_candidate_query_does_not_decide_what_lower_case_means():
     """The SQL used to ask `~ '^[a-z]'`, which made the Python test below it
     unreachable for the words it was widened to catch. The question is asked

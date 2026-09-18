@@ -879,6 +879,46 @@ def jurisdiction_of(
     return str(v) if v not in (None, "") else None
 
 
+def status_values(props: dict, cls: str, roles: DeclaredRoles) -> list[str]:
+    """Every status value on this document, lower-cased and in order. Pure.
+
+    A status property may declare `cardinality: many`, and extraction then
+    returns a list. Reading it as one scalar stringified the list, so a
+    document whose values included `repealed` produced neither a currency
+    note nor a recognisable unknown: it read as current law, under a word
+    that is not a word.
+    """
+    raw = unwrap(roles.value(roles.status, props, cls))
+    items = raw if isinstance(raw, list) else [raw]
+    out = [str(unwrap(x) or "").strip().lower() for x in items]
+    return [v for v in out if v]
+
+
+#: How many distinct unknown status values a report carries, and how long
+#: each is allowed to be. A status has no schema length limit and the report
+#: is written into a run's telemetry, so an extraction that went wrong could
+#: otherwise put a manifest's worth of text into a row nobody can read.
+MAX_REPORTED_STATUSES = 20
+MAX_REPORTED_STATUS_LEN = 80
+
+
+def status_report(counts: dict[str, int]) -> dict:
+    """`unrecognised_statuses` as a bounded row. Pure.
+
+    The whole of the count is kept — `values` says how many distinct words
+    there were and `documents` how many documents carried one — so a truncated
+    list never reads as the complete picture.
+    """
+    top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        "values": len(counts),
+        "documents": sum(counts.values()),
+        "top": [{"value": v[:MAX_REPORTED_STATUS_LEN], "documents": n}
+                for v, n in top[:MAX_REPORTED_STATUSES]],
+        "truncated": len(counts) > MAX_REPORTED_STATUSES,
+    }
+
+
 def unrecognised_statuses(rows: list[dict],
                           roles: DeclaredRoles) -> dict[str, int]:
     """Status values the deployment wrote that the contract does not know,
@@ -903,11 +943,15 @@ def unrecognised_statuses(rows: list[dict],
     for r in rows:
         if not r.get("filename"):
             continue
-        status = str(unwrap(roles.value(roles.status, r.get("props") or {},
-                                        str(r.get("class") or "")))
-                     or "").strip().lower()
-        if status and status not in STALE_STATUSES:
-            out[status] = out.get(status, 0) + 1
+        values = status_values(r.get("props") or {},
+                               str(r.get("class") or ""), roles)
+        # Only where NOTHING matched. A document that also states a value the
+        # contract knows has its note and is not waved through, so counting
+        # its other words would report a mapping gap where the mapping
+        # worked.
+        if values and not any(v in STALE_STATUSES for v in values):
+            for v in values:
+                out[v] = out.get(v, 0) + 1
     return out
 
 
@@ -941,9 +985,9 @@ def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:
         # engine's own vocabulary — `STALE_STATUSES` is the contract a class
         # writes its status values against, not a guess at another party's
         # words, and it stays here for that reason.
-        status = str(unwrap(roles.value(roles.status, props, cls))
-                     or "").strip().lower()
-        if status in STALE_STATUSES:
+        status = next((v for v in status_values(props, cls, roles)
+                       if v in STALE_STATUSES), None)
+        if status:
             note = f"{status}"
             by = unwrap(roles.value(roles.superseded_by, props, cls))
             if by:

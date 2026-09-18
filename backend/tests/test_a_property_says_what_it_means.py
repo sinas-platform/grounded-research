@@ -187,6 +187,36 @@ def test_a_status_the_contract_does_not_know_is_counted_not_swallowed():
     assert st.unrecognised_statuses(rows, ROLES) == {"abroge": 2, "in force": 1}
 
 
+def test_a_status_declared_many_is_read_as_its_values():
+    """`cardinality: many` is legal on a status property and extraction then
+    returns a list. Read as one scalar it stringified, so a document stating
+    a value the contract knows produced no note AND an unknown word that is
+    not a word."""
+    rows = [_row("a.md", how_it_stands=["repealed", "abroge"])]
+    assert st.currency_notes(rows, ROLES) == {"a.md": "repealed"}
+    # Nothing was waved through, so nothing is reported as a mapping gap.
+    assert st.unrecognised_statuses(rows, ROLES) == {}
+    # A list with no known value is counted, every word of it.
+    assert st.unrecognised_statuses(
+        [_row("b.md", how_it_stands=["abroge", "caduc"])],
+        ROLES) == {"abroge": 1, "caduc": 1}
+
+
+def test_the_report_is_bounded_because_a_status_has_no_length_limit():
+    """It is written into a run's telemetry. An extraction that went wrong
+    could otherwise put a manifest's worth of text into a row nobody can
+    read, so the count survives whole and the list is cut."""
+    counts = {f"value-{i}" * 40: i + 1 for i in range(50)}
+    rep = st.status_report(counts)
+    assert rep["values"] == 50 and rep["documents"] == sum(counts.values())
+    assert len(rep["top"]) == st.MAX_REPORTED_STATUSES and rep["truncated"]
+    assert all(len(e["value"]) <= st.MAX_REPORTED_STATUS_LEN
+               for e in rep["top"])
+    # Busiest first, so a cut list keeps the values that matter.
+    assert rep["top"][0]["documents"] >= rep["top"][-1]["documents"]
+    assert st.status_report({})["truncated"] is False
+
+
 def test_a_document_with_no_status_is_not_counted_as_an_unknown_one():
     """Silence is not a broken contract. Counting it would bury the values
     that are one under every document that simply has no status."""

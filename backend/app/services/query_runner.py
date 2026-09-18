@@ -3212,18 +3212,6 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
     roles = next((r["roles"] for r in rows if r.get("roles")),
                  declared_roles.NONE)
     currency = answer_structure.currency_notes(rows, roles)
-    # A status the contract does not know is a document the currency check
-    # waved through, and it looks exactly like a document with no status. Said
-    # out loud here because the repair is the deployment's mapping and nobody
-    # goes looking for a note that was never printed.
-    if unknown := answer_structure.unrecognised_statuses(rows, roles):
-        _log.warning(
-            "currency: %d status value(s) outside the contract, on %d "
-            "document(s): %s. These read as current law. The deployment maps "
-            "its own words onto %s where it extracts.",
-            len(unknown), sum(unknown.values()),
-            ", ".join(f"{v!r} x{n}" for v, n in sorted(unknown.items())),
-            " / ".join(answer_structure.STALE_STATUSES))
     jurisdiction = answer_structure.jurisdiction_notes(rows, roles)
     out: dict[str, dict] = {}
     for r in rows:
@@ -3396,6 +3384,17 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # retrieved set — a superseded status, a later ruling in the same case —
     # and set on the claims whether or not the drafter repeats them.
     sources = _source_context(all_rows)
+    # A status the contract does not know is a document the currency check
+    # waved through, and it looks exactly like a document with no status.
+    # Recorded once, here, where the run is identified and the retrieved set
+    # is settled: `_source_context` runs several times a run and is pure, so
+    # saying it there said it repeatedly and from a function that should not
+    # be speaking at all.
+    if unknown := answer_structure.unrecognised_statuses(
+            all_rows, next((r["roles"] for r in all_rows if r.get("roles")),
+                           declared_roles.NONE)):
+        await _tele(run_id, "retrieval",
+                    unrecognised_statuses=answer_structure.status_report(unknown))
     # One conversation for the whole answer, opened here and continued by
     # validation. A resumed run finds its chat id on the run row and rejoins
     # rather than starting a second conversation about the same answer.

@@ -392,11 +392,13 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
             tname = str(pr.get("type") or "").strip()
             if len(m) < 3:
                 continue
+            # `docs` is read off `entity_stats`, not counted: see the note on
+            # `_resolve_names`.
             rows = (await s.execute(text("""
                 SELECT e.id, e.canonical_form, t.name,
-                       (SELECT count(DISTINCT document_id)
-                        FROM entity_mention WHERE entity_id = e.id) AS docs
+                       coalesce(st.documents, 0) AS docs
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
+                LEFT JOIN entity_stats st ON st.entity_id = e.id
                 WHERE e.merged_into_id IS NULL
                   AND (:tname = '' OR t.name ILIKE :tname)
                   AND e.canonical_form ILIKE :pat
@@ -417,27 +419,34 @@ BLIND_LINK_METHODS = ("gazetteer", "legacy")
 
 
 async def _annotate_matches(matches: dict[str, dict]) -> dict[str, dict]:
-    """The generic mark and recognised-mention count for every match, from
-    whichever resolver it came. Probes and names go through one pass, so no
-    resolver can hand the planner an unlabelled match."""
+    """The generic and recognised marks for every match, from whichever
+    resolver it came. Probes and names go through one pass, so no resolver
+    can hand the planner an unlabelled match.
+
+    Both are read, not computed. `recognised` used to be a count of the
+    entity's recognised mentions across the whole mention table, made here
+    for every match of every question: 169 seconds for one ubiquitous entity
+    on 22.7 million mentions. The planner only ever compared it with zero.
+    `entity_stats` carries it, refreshed by the maintenance pass (see
+    `generic_entities.refresh_entity_stats`); an entity with no row yet
+    reads as unrecognised until the next pass.
+    """
     if not matches:
         return matches
     from app.db import AsyncSessionLocal
     async with AsyncSessionLocal() as s:
         rows = (await s.execute(text("""
             SELECT e.id, (e.metadata ? 'generic_term'),
-                   (SELECT count(DISTINCT document_id) FROM entity_mention
-                    WHERE entity_id = e.id AND status = 'active'
-                      AND link_method IS NOT NULL
-                      AND NOT (link_method = ANY(:blind)))
-            FROM entity e WHERE e.id = ANY(CAST(:ids AS uuid[]))"""),
-            {"ids": list(matches), "blind": list(BLIND_LINK_METHODS)})).all()
-    for eid, generic, vdocs in rows:
+                   coalesce(st.recognised, false)
+            FROM entity e LEFT JOIN entity_stats st ON st.entity_id = e.id
+            WHERE e.id = ANY(CAST(:ids AS uuid[]))"""),
+            {"ids": list(matches)})).all()
+    for eid, generic, recognised in rows:
         matches[str(eid)]["generic"] = bool(generic)
-        matches[str(eid)]["validated_docs"] = int(vdocs)
+        matches[str(eid)]["recognised"] = bool(recognised)
     for m in matches.values():  # an id the query did not return stays safe
         m.setdefault("generic", False)
-        m.setdefault("validated_docs", 0)
+        m.setdefault("recognised", False)
     return matches
 
 
@@ -455,8 +464,8 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
     # Never force-picked on no recognition at all, and ties broken on id.
     # `docs` counts every mention including the gazetteer's blind string
     # matches, so an entity recognised NOWHERE could be force-picked for
-    # being written everywhere; `validated_docs` counts only the mentions
-    # something actually recognised, and is computed for every match already.
+    # being written everywhere; `recognised` says whether anything other
+    # than a blind match ever found it, and is read for every match already.
     # Ranking still goes by `docs` — strongest means most present — and the
     # id tie-break makes the cut the same every run rather than however the
     # resolver's rows happened to arrive.
@@ -471,11 +480,11 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
     # entities have no validated mention, most of them in a handful of
     # documents where they do no harm. What harms is the combination this
     # sort selected for — never recognised, yet apparently everywhere.
-    # `validated_docs` is computed for every match already; nothing here is
-    # new except reading it.
+    # `recognised` is a mark the maintenance pass keeps on the entity, read
+    # for every match already; nothing here is new except reading it.
     strongest = sorted(
         (m for m in matches.values()
-         if not m.get("generic") and m.get("validated_docs", 0) > 0),
+         if not m.get("generic") and m.get("recognised")),
         key=lambda x: (-x["docs"], x["id"]))
     for m in strongest[:6]:
         if m["id"] not in anchors:
@@ -501,6 +510,16 @@ async def _resolve_names(names: list[str]) -> list[dict]:
     `retrieve_and_rank` learned this one stage later and says so in its own
     comment — equal scores kept the order rows arrived in, and the cut made
     that arbitrary order decide membership. Same bug, earlier, costlier.
+
+    The document count the cut is ordered by is READ, not counted. It was a
+    count over the mention table for every entity the pattern matched —
+    before the cut, so for all of them — and a seed written as "Kestrel
+    Holdings v Northmoor Authority (T-123/45 P)" is split on its punctuation
+    into fragments like `45 P)` that match thousands of entities. Measured
+    on 22.7 million mentions: nine to twelve minutes of planning between two
+    model calls of 18 seconds. `entity_stats` holds the count, refreshed by
+    the maintenance pass; an entity with no row yet reads as zero and sorts
+    last until the next pass.
     """
     from app.db import AsyncSessionLocal
 
@@ -515,16 +534,26 @@ async def _resolve_names(names: list[str]) -> list[dict]:
         for n in dict.fromkeys(x.strip() for x in parts):
             if len(n) < 4:
                 continue
+            # Two branches unioned, not one WHERE with an OR: a trigram
+            # index serves `ILIKE '%…%'` on a column, and Postgres cannot
+            # use it across `name ILIKE … OR id IN (alias subquery)` — that
+            # form scans the whole entity table. Measured with the index in
+            # place, one name: 20 s as an OR, 0.26 s as a union.
             rows = (await s.execute(text("""
-                SELECT e.id, e.canonical_form, t.name,
-                       (SELECT count(DISTINCT document_id)
-                        FROM entity_mention WHERE entity_id = e.id)
+                SELECT e.id AS id, e.canonical_form AS value, t.name AS type,
+                       coalesce(st.documents, 0) AS docs
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
-                WHERE e.merged_into_id IS NULL
-                  AND (e.canonical_form ILIKE :pat OR e.id IN
-                       (SELECT entity_id FROM entity_alias
-                        WHERE alias ILIKE :pat))
-                ORDER BY 4 DESC, e.id
+                LEFT JOIN entity_stats st ON st.entity_id = e.id
+                WHERE e.merged_into_id IS NULL AND e.canonical_form ILIKE :pat
+                UNION
+                SELECT e.id, e.canonical_form, t.name,
+                       coalesce(st.documents, 0)
+                FROM entity_alias a
+                JOIN entity e ON e.id = a.entity_id
+                JOIN entity_type t ON t.id = e.entity_type_id
+                LEFT JOIN entity_stats st ON st.entity_id = e.id
+                WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
+                ORDER BY docs DESC, id
                 LIMIT 6"""), {"pat": f"%{n}%"})).all()
             for eid, cf, tn, docs in rows:
                 seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,
@@ -621,11 +650,14 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
         # inverse document frequency so aboutness beats boilerplate.
         total_docs = (await s.execute(
             text("SELECT count(*) FROM document"))).scalar() or 1
+        # Read off `entity_stats`, not counted here: a plan carries a dozen
+        # anchors and the ubiquitous ones among them cost a scan of the
+        # mention table each. An anchor with no row yet is treated as rare,
+        # which errs towards weighting it — the safe side for a new entity.
         df_rows = (await s.execute(text("""
-            SELECT entity_id, count(DISTINCT document_id)
-            FROM entity_mention
-            WHERE entity_id = ANY(CAST(:eids AS uuid[])) AND status = 'active'
-            GROUP BY 1"""), {"eids": list(plan["anchors"])})).all()
+            SELECT entity_id, documents FROM entity_stats
+            WHERE entity_id = ANY(CAST(:eids AS uuid[]))"""),
+            {"eids": list(plan["anchors"])})).all()
         import math
         _ln_n = math.log(total_docs + 1)
         idf = {str(eid): max(0.05, math.log((total_docs + 1) / (df + 1)) / _ln_n)

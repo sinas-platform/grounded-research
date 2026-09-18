@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import datetime
 
 from sqlalchemy import text
 
@@ -450,3 +451,67 @@ async def mark_generic_by_link_probability(
     return {"candidates": len(rows), "marked": marked, "already_marked": already,
             "below_floor_or_spared": skipped, "excluded_by_type": excluded,
             "dry_run": dry_run, "examples": examples}
+
+
+# ─────────────────────────────────────────────────────────────
+# Per-entity statistics — out of band, read on the hot path
+# ─────────────────────────────────────────────────────────────
+#
+# Two facts about an entity are read on the path of every question: in how
+# many documents it is mentioned, and whether anything other than a blind
+# string match ever recognised it. The first orders the matches the planner
+# is shown and weights every anchor in retrieval; the second keeps an
+# entity nothing ever recognised from being force-picked as an anchor.
+#
+# Both were computed per question, per entity, out of the mention table, in
+# four places. On 22.7 million mentions the recognised count alone ran 169
+# seconds for "European Commission"; the document count ran for every
+# entity a resolver's pattern matched BEFORE its cut to six, and a seed the
+# planner writes as "Kestrel Holdings v Northmoor Authority (T-123/45 P)" is
+# split on its punctuation into fragments like `45 P)` that match thousands
+# of entities. Planning spent nine to twelve minutes between two model calls
+# of 18 seconds each, and grew with every document ingested.
+#
+# `entity_stats` is those two facts per entity, refreshed here in one
+# statement over the mention table and read as a lookup — the per-entity
+# sibling of `corpus_profile`, which does the same per type for the same
+# reason. A full recomputation each pass, deliberately: the document count
+# is not monotonic (a merge, a status change, a removed version all move
+# it), and an incremental pass measured no cheaper — without an index on
+# the mention's creation time the delta bounds the writes, not the read.
+#
+# An entity created since the last refresh has no row, reads as zero
+# documents and unrecognised, and sorts last until the next pass. That is
+# the corpus profile's staleness, accepted for the same reason.
+
+_REFRESH_ENTITY_STATS = text("""
+    INSERT INTO entity_stats (entity_id, documents, recognised, refreshed_at)
+    SELECT entity_id,
+           count(DISTINCT document_id),
+           bool_or(link_method IS NOT NULL
+                   AND NOT (link_method = ANY(:blind))),
+           CAST(:when AS timestamptz)
+    FROM entity_mention
+    WHERE status = 'active' AND entity_id IS NOT NULL
+    GROUP BY entity_id
+    ON CONFLICT (entity_id) DO UPDATE
+      SET documents = EXCLUDED.documents,
+          recognised = EXCLUDED.recognised,
+          refreshed_at = EXCLUDED.refreshed_at
+""")
+
+
+async def refresh_entity_stats(
+    session, when: datetime,
+    blind_methods: tuple[str, ...] = BLIND_LINK_METHODS,
+) -> dict:
+    """Recompute `entity_stats` from the mention table. One statement.
+
+    Not dry by default, unlike the generic marks: those are a judgement
+    applied at scale, this is a fact copied from one table to another, and
+    every row is checkable against the mentions it counts.
+    """
+    res = await session.execute(_REFRESH_ENTITY_STATS, {
+        "blind": list(blind_methods), "when": when})
+    await session.commit()
+    return {"entities": int(res.rowcount or 0)}

@@ -26,9 +26,9 @@ anything already extracted, so a retry costs only the failed docs).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import select, text
@@ -179,8 +179,16 @@ async def run_maintenance() -> dict[str, Any]:
     from app.services.key_replay import (backfill_full_text_entities,
                                          rematerialize, replay_unresolved)
 
+    from app.services.generic_entities import refresh_entity_stats
+
     stats: dict[str, Any] = {}
     async with AsyncSessionLocal() as session:
+        # First: the planner and the retriever read these per-entity figures
+        # on every question, and used to compute them instead — counts over
+        # the whole mention table per matched entity, nine to twelve minutes
+        # of planning per question. See `generic_entities.refresh_entity_stats`.
+        stats["entity_stats"] = await refresh_entity_stats(
+            session, when=datetime.now(timezone.utc))
         ki = await shared_index(session)
         stats["replay"] = await replay_unresolved(session, key_index=ki)
         stats["full_text_backfill"] = await backfill_full_text_entities(
@@ -249,16 +257,41 @@ async def ensure_corpus_profile() -> None:
                       "planner runs without entity sizes until the next pass")
 
 
+async def ensure_entity_stats() -> None:
+    """Compute the per-entity statistics once, at boot, if the table is
+    empty — the same reasoning as `ensure_corpus_profile`: figures only the
+    timer computes are figures a restart prevents, and until they exist
+    every entity reads as unmentioned and unrecognised, so the planner ranks
+    its matches by nothing and force-picks no anchor at all."""
+    from app.services.generic_entities import refresh_entity_stats
+
+    try:
+        async with AsyncSessionLocal() as session:
+            have = (await session.execute(text(
+                "SELECT 1 FROM entity_stats LIMIT 1"))).first()
+            if have:
+                return
+            log.info("entity_stats is empty; computing it once before the "
+                     "first maintenance pass")
+            stats = await refresh_entity_stats(
+                session, when=datetime.now(timezone.utc))
+        log.info("entity_stats built: %s", stats)
+    except Exception:  # noqa: BLE001 — grounding is better, not required
+        log.exception("could not build entity_stats at boot; the planner "
+                      "ranks matches by nothing until the next pass")
+
+
 async def maintenance_loop(interval_seconds: int) -> None:
     """Backend-resident timer. First pass after one full interval — boot is
     not the moment to rescan the corpus. A failing pass logs and waits for
     the next tick; maintenance must never take the API down.
 
-    The one thing that does happen at boot is `ensure_corpus_profile`, and
-    only when there is no profile at all: see its own note for why waiting an
-    interval for THAT meant waiting forever.
+    Two things do happen at boot, each only when there is nothing at all:
+    `ensure_corpus_profile` and `ensure_entity_stats`. See their notes for
+    why waiting an interval for THOSE meant waiting forever.
     """
     await ensure_corpus_profile()
+    await ensure_entity_stats()
     while True:
         await asyncio.sleep(interval_seconds)
         try:

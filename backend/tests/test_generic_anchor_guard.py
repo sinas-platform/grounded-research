@@ -15,9 +15,51 @@ import inspect
 from app import retrieval_first as rf
 
 
-def _match(i, docs, generic=False):
+def _match(i, docs, generic=False, recognised=True):
     return {"id": f"e{i}", "value": f"name{i}", "type": "Company / Undertaking",
-            "docs": docs, "generic": generic, "validated_docs": 2}
+            "docs": docs, "generic": generic, "recognised": recognised}
+
+
+def test_an_entity_nothing_ever_recognised_is_never_force_picked():
+    """Written everywhere, recognised nowhere: the top-up must not read the
+    word's ubiquity as the name's strength. The model may still pick it."""
+    matches = {m["id"]: m for m in [
+        _match(1, 9000, recognised=False), _match(2, 120), _match(3, 80)]}
+    assert rf._pick_anchors([], matches) == ["e2", "e3"]
+    assert rf._pick_anchors(["e1"], matches) == ["e1", "e2", "e3"]
+
+
+def test_recognition_is_read_off_entity_stats_not_counted():
+    """The fact used to be computed per match, per question, over the whole
+    mention table — 169 s for one ubiquitous entity on 22.7M mentions. It is
+    now refreshed out of band into `entity_stats` and read here."""
+    src = inspect.getsource(rf._annotate_matches)
+    assert "entity_stats" in src
+    assert "entity_mention" not in src, (
+        "the per-match count over the mention table has come back")
+
+
+def test_the_name_lookup_is_two_indexed_branches_not_an_or():
+    """`name ILIKE … OR id IN (alias subquery)` cannot use the trigram index
+    and scans the entity table: 20 s per name, measured. Two branches
+    unioned take 0.26 s. Pinned so the OR does not come back for tidiness."""
+    src = inspect.getsource(rf._resolve_names)
+    assert "UNION" in src
+    assert "OR e.id IN" not in src
+    assert "a.alias ILIKE :pat" in src
+
+
+def test_no_resolver_and_no_scorer_counts_mentions_per_question():
+    """Four readers of the same two facts, none of them a count over the
+    mention table any more: both resolvers order their cut by a stored
+    document count, the anchor annotation reads a stored flag, and the
+    retriever's inverse document frequency reads the stored count."""
+    for fn in (rf._resolve_names, rf._resolve_value_probes,
+               rf._annotate_matches, rf.retrieve_and_rank):
+        src = inspect.getsource(fn)
+        head = src[:src.index("frontier")] if fn is rf.retrieve_and_rank else src
+        assert "count(DISTINCT document_id)" not in head, fn.__name__
+        assert "entity_stats" in head, fn.__name__
 
 
 # -- the anchor pick ----------------------------------------------------------

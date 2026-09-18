@@ -7496,22 +7496,6 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     await _check_cancel(run_id)
     ranked = await rf.retrieve_and_rank(plan)
     await _check_cancel(run_id)
-    # A second pass, with something read. Both planning rounds are blind —
-    # one reads a map of the collection, the other entity matches — so the
-    # queries are written in the words of the question, and a question cannot
-    # contain the name of the thing that answers it. Measured: a question
-    # about the privacy of employees not under investigation retrieved
-    # neither of the two judgments that decide it; the mechanism they turn on
-    # is called a virtual data room, and searching that phrase returns 11
-    # documents out of 126,000 with both judgments among them.
-    terms = await rf.second_pass_terms(
-        _Sinas(run_id=run_id), question, plan, ranked, run_id=run_id)
-    if terms:
-        extra = await rf.retrieve_by_terms(terms)
-        ranked = rf.merge_ranked(ranked, extra)
-        await _tele(run_id, "retrieval", second_pass_terms=terms,
-                    second_pass_added=[e["filename"] for e in extra.values()][:20])
-    await _check_cancel(run_id)
     briefing = await rf.build_briefing(ranked, effort)
     await _check_cancel(run_id)
     rid = await rf.store_result(question, ranked, briefing, plan,

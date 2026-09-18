@@ -30,15 +30,15 @@ and it is visibly round, so nobody downstream mistakes it for a measurement.
 It is also STABLE: a load of ten thousand new entities usually leaves every
 stored figure untouched, so the planner's view of the corpus does not churn.
 
-AN ESTIMATE, NOT AN AGGREGATE. The refresh reads a bounded sample of pages
-from each table (`TABLESAMPLE SYSTEM`, a page budget rather than a row budget,
-because pages are what that sampler picks and what the read actually costs)
-and scales the result up. Sampling the MENTIONS to find the most-mentioned
-entities is not a compromise but the natural method: an entity mentioned ten
-thousand times is overwhelmingly likely to appear in any sample, and one
-mentioned twice is not, which is precisely the ranking wanted. A table smaller
-than the page budget is read whole, so a small deployment gets exact figures
-and no sampling error at all.
+NEVER THE MENTION TABLE. The counts are one grouped count over the entity
+table — a million rows, a second, exact. The examples are read off
+`entity_stats`, which the maintenance pass computes from the mention table
+before this runs (see `generic_entities.refresh_entity_stats`), ranked by
+the documents in which something other than a blind string match found the
+entity. Ranked by mentions, as this once was from a sample of them, the
+examples were the gazetteer's blind hits — words that became entities and
+match in every document — and the planner was told the collection's
+companies were "Case, Parties, Only, Lang, This".
 
 IT MUST NEVER HOLD THE DATABASE. Every statement runs in its own transaction
 with `statement_timeout` and `lock_timeout` set LOCAL to it, so no snapshot is
@@ -71,23 +71,15 @@ from app.config import get_settings
 
 log = logging.getLogger("sgr.corpus_profile")
 
-#: Heap pages read from each sampled table. 2,000 pages is ~16 MB, which is
-#: some tens of milliseconds of buffered read and small enough that a
-#: concurrent bulk load does not notice the cache pressure. A table smaller
-#: than this is read whole.
-SAMPLE_PAGE_BUDGET = 2_000
-#: A fixed seed makes `TABLESAMPLE` pick the same pages from one refresh to
-#: the next, so the example names change when the corpus changes and not
-#: because the sampler rolled differently. The page set widens on its own as
-#: the table grows.
-_SAMPLE_SEED = 0.42
 #: Example canonical forms kept per entity type.
 EXAMPLES_PER_TYPE = 5
-#: Per-statement ceilings, LOCAL to each statement's own transaction.
-_STATEMENT_TIMEOUT_MS = 30_000
+#: Per-statement ceilings, LOCAL to each statement's own transaction. Was
+#: 30 s when the reads were samples; the examples read is now a window over
+#: every recognised entity, measured at 23 s beside a bulk load on 919,000
+#: rows (a per-type LATERAL top-5 was tried and took 117 s), so the ceiling
+#: leaves room for the load to be worse without losing the refresh.
+_STATEMENT_TIMEOUT_MS = 120_000
 _LOCK_TIMEOUT_MS = 5_000
-
-_PAGE_BYTES = 8192
 
 
 # ─────────────────────────────────────────────────────────────
@@ -238,18 +230,6 @@ def _age_s(when: datetime) -> float:
 # ─────────────────────────────────────────────────────────────
 # Refreshing — out of band, bounded, gentle
 # ─────────────────────────────────────────────────────────────
-def sample_percent(pages: int, budget: int = SAMPLE_PAGE_BUDGET) -> float:
-    """The `TABLESAMPLE SYSTEM` fraction that reads about `budget` pages.
-
-    Pure. A table at or under the budget is read whole (100), so a small
-    corpus is counted exactly and carries no sampling error. Floored at 0.01
-    because that is the smallest fraction the sampler accepts.
-    """
-    if pages <= 0 or pages <= budget:
-        return 100.0
-    return max(0.01, min(100.0, round(budget / pages * 100.0, 4)))
-
-
 async def _guarded(session, sql: str, params: dict | None = None) -> list:
     """One statement, in its own transaction, under a timeout.
 
@@ -269,45 +249,40 @@ async def _guarded(session, sql: str, params: dict | None = None) -> list:
     return rows
 
 
-async def _pages(session, table: str) -> int:
-    """Current heap size of `table` in pages.
-
-    From the file size, not from `reltuples`: the file size is exact and free
-    and owes nothing to when ANALYZE last ran, which on a table being bulk
-    loaded is a question with no good answer.
-    """
-    rows = await _guarded(
-        session, "SELECT pg_relation_size(to_regclass(:t))", {"t": table})
-    size = rows[0][0] if rows and rows[0][0] is not None else 0
-    return int(size) // _PAGE_BYTES
-
-
+# Exact, not sampled. The entity table is a million rows and a grouped count
+# over it is a second; the sampling this replaced existed to keep the
+# mention table — twenty times larger — off this path, and nothing here
+# reads the mention table any more.
 _COUNTS_SQL = """
 SELECT entity_type_id, count(*)::bigint
-FROM entity TABLESAMPLE SYSTEM (CAST(:pct AS float8))
-     REPEATABLE (CAST(:seed AS float8))
+FROM entity
 WHERE merged_into_id IS NULL
 GROUP BY entity_type_id
 """
 
-# The most-mentioned entities of each type, from a sample of the mentions.
-# `sampled` collapses the sampled mentions to one row per entity before
-# anything is joined or sorted, so the window below orders tens of thousands
-# of rows rather than tens of millions. Ties break on the name so that two
-# equally-mentioned entities do not swap places between refreshes.
+# The most WRITTEN-ABOUT entities of each type: ranked by the documents in
+# which something other than a blind string match found them, read off
+# `entity_stats`, and never a marked generic term.
+#
+# The most-MENTIONED entities, which this used to show, are the gazetteer's
+# blind hits: measured on 18 September 2026 the planner was told the
+# collection's companies were "Case, Parties, Only, Lang, This" and its
+# decisions "DATE, Decision, Been, Competition, Order" — words that became
+# entities, matched in every document, recognised in none. A planner
+# grounded in that has nothing real to hold on to and names sources from
+# its own memory instead, which is where the run-to-run variance comes from.
+# Ties break on the name so that two equally-cited entities do not swap
+# places between refreshes.
 _EXAMPLES_SQL = """
-WITH sampled AS (
-  SELECT entity_id, count(*) AS n
-  FROM entity_mention TABLESAMPLE SYSTEM (CAST(:pct AS float8))
-       REPEATABLE (CAST(:seed AS float8))
-  WHERE entity_id IS NOT NULL AND status = 'active'
-  GROUP BY entity_id
-), ranked AS (
+WITH ranked AS (
   SELECT e.entity_type_id AS tid, e.canonical_form AS form,
          row_number() OVER (PARTITION BY e.entity_type_id
-                            ORDER BY s.n DESC, e.canonical_form) AS rn
-  FROM sampled s JOIN entity e ON e.id = s.entity_id
+                            ORDER BY st.recognised_documents DESC,
+                                     e.canonical_form) AS rn
+  FROM entity_stats st JOIN entity e ON e.id = st.entity_id
   WHERE e.merged_into_id IS NULL
+    AND st.recognised_documents > 0
+    AND NOT (coalesce(e.metadata, '{}'::jsonb) ? 'generic_term')
 )
 SELECT tid, form FROM ranked WHERE rn <= :k ORDER BY tid, rn
 """
@@ -374,22 +349,15 @@ async def refresh_corpus_profile(force: bool = False) -> dict[str, Any]:
         if not type_ids:
             return {"skipped": "no entity types"}
 
-        entity_pct = sample_percent(await _pages(session, "entity"))
-        mention_pct = sample_percent(await _pages(session, "entity_mention"))
-        stats["entity_sample_pct"] = entity_pct
-        stats["mention_sample_pct"] = mention_pct
-
-        counted = await _guarded(session, _COUNTS_SQL,
-                                 {"pct": entity_pct, "seed": _SAMPLE_SEED})
-        sampled_counts = {r[0]: int(r[1]) for r in counted}
+        counted = await _guarded(session, _COUNTS_SQL)
+        counts = {r[0]: int(r[1]) for r in counted}
         exampled = await _guarded(
-            session, _EXAMPLES_SQL,
-            {"pct": mention_pct, "seed": _SAMPLE_SEED, "k": EXAMPLES_PER_TYPE})
+            session, _EXAMPLES_SQL, {"k": EXAMPLES_PER_TYPE})
         examples: dict[uuid.UUID, list[str]] = {}
         for tid, form in exampled:
             examples.setdefault(tid, []).append(str(form))
 
-        rows = profile_rows(type_ids, sampled_counts, 100.0 / entity_pct,
+        rows = profile_rows(type_ids, counts, 1.0,
                             examples, datetime.now(timezone.utc))
         await _guarded_write(session, rows)
 

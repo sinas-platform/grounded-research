@@ -70,10 +70,19 @@ from app.services import (
 #: not asked about — which is also why they do not count as strikes.
 MAX_FEEDBACK_ITEMS = 10
 
-MAX_VALIDATE_ROUNDS = 4
+MAX_VALIDATE_ROUNDS = 3
 # A round that reduced the failed count earns extra rounds, up to this cap —
 # converging runs finish instead of dying at an arbitrary budget.
-HARD_VALIDATE_ROUNDS = 8
+#
+# Was 4 and 8. Measured on 18 September 2026, one question: six review
+# cycles and eight revision rounds, 42 minutes, roughly $13 — and the
+# cycles past the fourth dropped as many claims as they added, one of them
+# the source the expert review had asked for. A loop that is still arguing
+# after four cycles is not converging on a better answer; it is rewriting
+# the one it has. The bound is the whole lever on both cost and time, and
+# the cycle count is on every run's telemetry, so the effect of a change
+# here is measured, not guessed.
+HARD_VALIDATE_ROUNDS = 4
 # After drops, the surviving answer must still ANSWER THE QUESTION — judged
 # holistically by the answer-gate agent, with at most this many remediation
 # cycles before the run ends partial. One cycle meant a single attempt and

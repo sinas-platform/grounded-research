@@ -2272,13 +2272,30 @@ RETRY_MIN_CLAIMS = 4
 #: says so through the refusal path, not by writing a claim.
 _KIND_ALTERNATIVES = "|".join(
     k for k in answer_structure.CLAIM_KINDS if k != "abstention")
+#: The one confusion in that list the drafter can make that nothing
+#: downstream can see. `app.services.standing` judges `rule` claims and no
+#: others, so a requirement filed as a `procedure` is a requirement that no
+#: longer has to rest on the best source retrieved: the check does not fire
+#: and nothing reports that it did not. The two read alike from the drafter's
+#: side, and more alike since `procedure` stopped meaning only a process that
+#: had already run, so the line is drawn where the kind is chosen.
+#:
+#: This is guidance and not a guard. The guard would be `standing.RULE_KINDS`,
+#: and widening that is a decision with a measurement in front of it, in the
+#: module that owns it.
+_KIND_BOUNDARY = (
+    'What a source REQUIRES of someone, stated in the abstract, is "rule" '
+    'even where the requirement is a step to take: "procedure" is the '
+    'sequence and who takes it, never the obligation behind it.'
+)
 #: What each of those words means, once, in the brief. The names are the
 #: engine's and say nothing about any one corpus, so a drafter that has not
 #: been told what they mean will guess from its own domain — which is how
 #: `factual` collected everything the model was unsure of.
 _KIND_GLOSS_BLOCK = "\n".join(
-    f'- "{k}": {answer_structure.CLAIM_KIND_GLOSS[k]}'
-    for k in answer_structure.CLAIM_KINDS if k != "abstention")
+    [f'- "{k}": {answer_structure.CLAIM_KIND_GLOSS[k]}'
+     for k in answer_structure.CLAIM_KINDS if k != "abstention"]
+    + [_KIND_BOUNDARY])
 
 
 #: The shape the drafter replies in. Six fields it used to author are gone:

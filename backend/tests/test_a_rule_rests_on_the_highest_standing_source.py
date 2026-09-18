@@ -19,7 +19,9 @@ What these pin, in the order a run meets them:
 - AN UNRANKED CLASS IS INERT. It neither satisfies the rule nor breaches it,
   and it is never named as the source a claim should have used.
 - ONLY A GENERAL PROPOSITION IS JUDGED. A claim reporting what a source says,
-  what happened or how a process ran is untouched.
+  what happened or what steps a process takes is untouched. `procedure` is
+  the one worth restating: it covers a process still to be run, and the
+  exclusion is deliberate rather than an oversight.
 - THE DOCUMENTS ARE READ BEFORE THE OBJECTION IS PUT. The drafter sees
   passages extracted for its own planned claims, so it may never have been
   shown the higher-standing source at all; a refusal from a drafter with

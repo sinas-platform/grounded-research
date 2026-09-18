@@ -31,6 +31,31 @@ the app as a library, writes the DB directly); the API route
   `document_version.content_md`, restore content from source files and
   re-run extract; every stage treats empty content as failure.
 
+### An unreachable dependency pauses the run; it does not fail it
+
+A sleeping laptop or a dropped network takes both dependencies at once: the
+provider host stops resolving and the pooled database connections die. A
+round in flight now waits for them instead of spending its retry budget
+inside the outage and raising. The log says it once per outage — what is
+unreachable, that the round is PAUSED and not failed, and a matching line
+when it comes back. A real refusal is unaffected: a bad-request 400 fails on
+the first try and is never absorbed by the wait.
+
+- `BULK_OUTAGE_WAIT_SECONDS` (default `43200`, i.e. 12h): how long a round
+  waits for an unreachable dependency before giving up. Past it the process
+  exits and the job resumes from `batches.json` on the next start —
+  submitted batches are polled, never resubmitted.
+- `BULK_SUBMIT_CONCURRENCY` (default `1`) and
+  `BULK_SUBMIT_STAGGER_SECONDS` (default `5`): how fast one run may fire
+  submissions. The `[Errno -5] No address associated with hostname` bursts
+  also happen with every host resolving fine — several workers submitting
+  chunks back to back make the platform resolve the provider host many times
+  at once, and some of those lookups fail. One submission in flight with a
+  five-second gap after each one removes that burst. The pacing is
+  per-process, so N workers still submit N times as often — with three
+  workers that is roughly one submission every 1.7s instead of a burst of
+  ten; raise the stagger if the bursts persist, never the concurrency.
+
 ## Completeness gate (run before ANY question batch)
 
 `GET /api/v1/maintenance/completeness` returns this per document class,
@@ -56,22 +81,42 @@ completeness from data (this query), never from run/unit status.
 - Synthesis: `POST /api/v1/query-runs {question, mode: "synthesis",
   effort, parent_result_id}`. Resume a failed run:
   `POST /api/v1/query-runs/{id}/resume`.
-- Terminal states: `published`, `partial` (semantic dead-end — cause +
-  client-facing note in `telemetry.partial`; verified claims retained),
-  `failed` (infrastructure, retryable), `cancelled`.
+- Terminal states: `published`, `published_contested`, `partial` (semantic
+  dead-end — cause + client-facing note in `telemetry.partial`; verified
+  claims retained), `failed` (infrastructure, retryable), `cancelled`.
+- `published_contested` is an ANSWER, not a degraded one: every part of the
+  question is covered and the prose is written. It says the completeness
+  review and the drafter argued to a standstill over a source the review
+  called essential and justified, and the drafter would not use. The answer
+  carries a reservation naming that source and what it bears on, printed
+  under the part it affects; `answer.open_notes` and
+  `telemetry.validate.objections` carry the whole argument. A human should
+  read the reservation and decide. Anything asking "did this run produce an
+  answer" must accept both published states.
+- A source the review named and the answer did not cite never makes a run
+  `partial`. `partial` means a part of the question could not be answered.
 
 ### Settings (backend `.env`, read at process start)
 - `SGR_DRAFT_MODE` — `extract` is the only value. Drafting is a plan
-  (strong model) → verbatim passage extraction (cheap model, quotes
-  string-verified against document lines) → one drafting call, all
-  stateless. **Grounding is on raw source text only**: the document
-  manifest (summaries, classes, annotations) decides what to READ and
-  never reaches a drafting prompt, because it is interpretation produced
-  at ingestion and verified against nothing.
-- `SGR_RUN_COST_CAP_USD` is currently inert. It measured one Sinas chat
-  and drafting no longer opens one; llm_usage carries no run id, so spend
-  cannot be attributed to a run without over-counting concurrent ones. A
-  run is bounded by its validation rounds and gate cycles instead.
+  (strong model, one-shot) → verbatim passage extraction (cheap model,
+  quotes string-verified against document lines) → ONE CONVERSATION that
+  writes the answer and every revision of it. **Grounding is on raw source
+  text only**: the document manifest (summaries, classes, annotations)
+  decides what to READ and never reaches a drafting prompt, because it is
+  interpretation produced at ingestion and verified against nothing.
+- The drafting conversation is one Sinas chat per answer, its id on
+  `query_run.synthesis_chat_id` and its round bookkeeping under
+  `telemetry.draft_chat`. Turn one is the brief — the task, the structure
+  rules, the revision contract, the playbook, the question and the verified
+  passages — and is sent once; every later turn carries only what is new.
+  A resumed run rejoins it, and teardown deliberately leaves it alone. It is
+  also what `GET /query-runs/{id}/activity` now serves as `synthesis`.
+- `SGR_DRAFT_CHAT_EXCHANGES` (default 4) — how many revision rounds that
+  conversation carries whole. At the cap it restarts from the same brief,
+  byte for byte so the provider's prompt cache still hits, with a
+  one-line-per-round summary standing in for the rounds it drops.
+- `SGR_RUN_COST_CAP_USD` measures the chats a run recorded in
+  `run_llm_call`, the drafting conversation included.
 - `SGR_BENCH_DIR` — regression benchmark folder for retrieval_first.
 - Effort buys persistence as well as breadth: retrieval depth (low 1, medium
   2, high 3) and the number of times a run may act on the answer gate's

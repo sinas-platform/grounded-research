@@ -106,7 +106,7 @@ async def _fetch(session, question: str,
             SELECT id, question, status, answer_id, parent_result_id,
                    created_at, telemetry
             FROM query_run
-            WHERE status IN ('published', 'partial')
+            WHERE status IN ('published', 'published_contested', 'partial')
             ORDER BY created_at DESC"""))).mappings().all()
         best, score = None, 0.0
         for r in runs:

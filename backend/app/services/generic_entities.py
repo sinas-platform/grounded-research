@@ -10,9 +10,9 @@ every occurrence of that string in every document: "Thus" has exactly one
 surface form across all of its mentions, and that form is the adverb.
 
 They are not inert. They acquire relationships like any other entity, which is
-where this was found: one of the 149 targets of the `supersedes` relationship
-is "Decision", and reading that relationship without a filter reports twenty
-thousand mentions of superseded authority.
+where this was found: one of the 149 targets of a corpus's supersession
+relationship is "Decision", and reading that relationship without a filter
+reports twenty thousand mentions of superseded authority.
 
 NOTHING IS DELETED HERE. The evidence for calling an entity generic is its
 mentions and its relationships, and deleting it destroys the evidence for the

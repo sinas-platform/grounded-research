@@ -276,23 +276,39 @@ def test_a_sequence_that_is_not_a_number_is_dropped_from_the_list():
 # -- where it runs -------------------------------------------------------------
 
 
+def _publish_body() -> str:
+    """The whole of `_publish_answer`, to its next top-level definition.
+
+    Was a fixed 2,600-character slice, which is a window on a function
+    rather than the function: the day the publish path grew a step the
+    assertions fell off the end and reported the call as missing. The
+    boundary is the next line that starts in column zero, which is what
+    "the rest of this function" means in Python.
+    """
+    s = src()
+    i = s.index("async def _publish_answer")
+    rest = s[i:]
+    end = len(rest)
+    for marker in ("\ndef ", "\nasync def ", "\nclass "):
+        at = rest.find(marker, 1)
+        if at != -1:
+            end = min(end, at)
+    return rest[:end]
+
+
 def test_both_are_computed_at_publish_and_nowhere_else():
     """"Last" is a claim about the finished answer. During revision a document
     can lose its last citation and get another two cycles later, so the same
     comparison made at deletion time reports losses that did not happen and
     misses ones that had not happened yet."""
-    s = src()
-    i = s.index("async def _publish_answer")
-    body = s[i:i + 2600]
+    body = _publish_body()
     assert "lost_last_citation=_last_citation_losses(" in body
     assert "lost_last_mention=_last_mention_losses(" in body
-    assert s.count("_last_citation_losses(") == 2  # the definition and the one call
+    assert src().count("_last_citation_losses(") == 2  # the definition and the one call
 
 
 def test_the_read_happens_after_the_compaction_commits():
-    s = src()
-    i = s.index("async def _publish_answer")
-    body = s[i:i + 2600]
+    body = _publish_body()
     assert body.index("await session.commit()") < body.index("select(AnswerClaim.claim_text")
 
 
@@ -303,8 +319,6 @@ def test_nothing_lost_is_an_empty_list_and_is_still_written():
     an empty removal record, which writes no key at all."""
     assert _last_citation_losses([], set()) == []
     assert _last_mention_losses([], set()) == []
-    s = src()
-    i = s.index("async def _publish_answer")
-    body = s[i:i + 2600]
+    body = _publish_body()
     assert "lost_last_citation=_last_citation_losses(deleted, live_docs)," in body
     assert "lost_last_mention=_last_mention_losses(deleted, live_ids)," in body

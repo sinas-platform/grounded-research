@@ -1,11 +1,10 @@
 """Reference keys for entities: learning them, resolving by them.
 
-Extractors name an edge target by whatever the document calls it — a case
-number, a celex id, a registry slug. Resolution matched entity NAMES, so
-those proposals parked in the unresolved queue and stayed there: 3,744
-is_full_text_of edges at the time this module was written, which is why 81%
-of court decisions had no issuing body and no authority tier for the
-planner to see.
+Extractors name an edge target by whatever the document calls it — a serial
+number, a registry id, a slug. Resolution matched entity NAMES, so those
+proposals parked in the unresolved queue and stayed there: 3,744 identity
+edges at the time this module was written, which is why 81% of one class's
+documents had no issuing body and no tier for the planner to see.
 
 The design is learning, not declaration. Nothing here parses a key or knows
 a citation format. A key becomes an alias the moment it is PROVEN — the

@@ -2,11 +2,16 @@
 
 The choreography of a question — retrieve, synthesize, validate, publish —
 lives HERE, in code, with per-stage state checkpointed on the QueryRun row.
-Agents are consulted only for judgment, via stateless one-shot invokes:
+Agents are consulted for judgment only. Every consultation but one is a
+stateless one-shot invoke; the exception is drafting, which is a single
+conversation per answer (see `services/drafting_chat`), because a drafter
+that cannot remember what it wrote cannot defend it and cannot reuse a
+cached prefix.
 
   retrieve    the retrieval-first engine (app/retrieval_first): schema-aware
               plan + deterministic channels, in-process
-  synthesize  sgr/retrieval-planner-agent (argument plan, draft, revisions)
+  synthesize  sgr/retrieval-planner-agent — the argument plan as a one-shot,
+              then ONE chat carrying the draft and every revision of it —
               and sgr/passage-extractor-agent (verbatim grounding extracts)
   verdicts    the stateless evidence-check fan-out (services/faithfulness),
               then sgr/answer-gate-agent judging the surviving answer
@@ -18,6 +23,8 @@ completed stages short-circuit off the persisted state.
 from __future__ import annotations
 
 import asyncio
+import bisect
+import html
 import json
 import re
 import time
@@ -29,6 +36,7 @@ from typing import Any
 
 import httpx
 from sqlalchemy import func, select
+from sqlalchemy.orm.attributes import flag_modified
 
 from app.auth import CallerIdentity
 from app.config import get_settings
@@ -43,7 +51,24 @@ from app.models import (
     ResultDocument,
 )
 from app.models.query import QueryRun
-from app.services import claim_naming, supersession, obligations
+from app.services import (
+    answer_render,
+    answer_structure,
+    claim_naming,
+    declared_roles,
+    drafting_chat,
+    naming,
+    objections,
+    obligations,
+    standing,
+    strikes,
+    supersession,
+)
+
+#: How many findings one round puts to the drafter. A round that named
+#: thirty would be a redraft with extra steps, and the ones past the cap are
+#: not asked about — which is also why they do not count as strikes.
+MAX_FEEDBACK_ITEMS = 10
 
 MAX_VALIDATE_ROUNDS = 4
 # A round that reduced the failed count earns extra rounds, up to this cap —
@@ -66,6 +91,19 @@ MIN_CLAIMS = 6
 # one answer reached 29 claims. Additions stop here; the gate can still have
 # claims dropped or rewritten when it objects.
 MAX_CLAIMS = 14
+
+#: The agent that drafts and revises. Named once because the drafting
+#: conversation is one chat belonging to it, and a second name here would be a
+#: second chat.
+DRAFTER_AGENT = "sgr/retrieval-planner-agent"
+
+#: Where the drafting conversation's bookkeeping lives inside `telemetry`.
+#: The chat ID ALSO lives in its own column (`query_run.synthesis_chat_id`),
+#: which is the column the activity endpoint already reads; this carries what
+#: a column cannot, which is how many rounds the conversation has run and what
+#: each of them settled.
+DRAFT_CHAT_KEY = "draft_chat"
+
 # Hard per-run spend ceiling in USD, summed over the run's synthesis chat
 # (which also carries remediation traffic — empirically where runaway spend
 # lives; one observed run burned $23.81 there hunting unanchorable evidence).
@@ -85,6 +123,33 @@ class PartialOutcome(Exception):
     its chances)."""
 
     def __init__(self, cause: str, explanation: str):
+        self.cause = cause
+        self.explanation = explanation
+        super().__init__(f"{cause}: {explanation}")
+
+
+class DrafterSilent(Exception):
+    """The drafting call delivered no claims, and WHICH way it delivered none
+    is the whole point of the class.
+
+    A run whose drafter returned an empty reply used to end with "no passage
+    supported a claim well enough to draft" — a verdict about the corpus,
+    reported on behalf of a model that had never spoken. Two runs were lost
+    to that reading, with fifty documents read and twelve passage groups
+    verified behind it. `cause` says which of the three happened, and the
+    caller turns it into the run's own cause so the record names it.
+    """
+
+    #: The model returned nothing, twice. Not a judgment about anything.
+    SILENT = "drafter_returned_nothing"
+    #: The model replied, in shape, with an empty list of claims. That IS a
+    #: judgment, and a different one from "no passage was good enough".
+    NO_CLAIMS = "drafter_offered_no_claims"
+    #: Claims arrived and none survived normalisation — no text, or not
+    #: objects at all.
+    UNUSABLE = "drafter_claims_unusable"
+
+    def __init__(self, explanation: str, cause: str = SILENT):
         self.cause = cause
         self.explanation = explanation
         super().__init__(f"{cause}: {explanation}")
@@ -158,6 +223,13 @@ def _iso() -> str:
 # that survives twenty seconds is not going to yield to a third.
 INVOKE_RETRY_WAITS = (5.0, 15.0)
 
+#: Wall-clock ceiling for the uncovered-theme observation, which is
+#: best-effort and sits on the path to required work. Under the general invoke
+#: policy its two calls have a worst case near an hour; the median published
+#: run is 559s. A first cut: `uncovered_themes_seconds` records what it
+#: actually costs so this can be set from measurement.
+_OBSERVATION_BUDGET_S = 120.0
+
 
 def _is_transient(exc: Exception) -> bool:
     """Whether this invoke failure is worth waiting out.
@@ -222,6 +294,26 @@ class _Sinas:
 
         asyncio.create_task(_fire())
 
+    async def chat_send(self, chat_id: str, content: str,
+                        agent: str = "") -> str:
+        """One turn of an existing conversation, and the reply to it.
+
+        The counterpart of `invoke` for a chat that outlives the call. Sinas
+        replays the chat's stored history on every message, so the provider
+        underneath sees a growing message list whose prefix does not change —
+        which is the whole point: its rolling cache breakpoint sits on the
+        last message, so each turn reads back the prefix the previous turn
+        wrote instead of paying for it again.
+
+        `agent` is passed for the retry telemetry only; the chat already
+        knows which agent it belongs to.
+        """
+        return await self._retrying(
+            agent or "chat",
+            lambda c: c.post(f"{self.base}/chats/{chat_id}/messages",
+                             headers=self.headers, json={"content": content}),
+            reply_key="content")
+
     async def invoke(self, agent: str, message: str) -> str:
         """One agent call, retried past a transient upstream failure.
 
@@ -237,22 +329,31 @@ class _Sinas:
         `APIStatusError` carrying `overloaded_error`, which is why the attempt
         is recorded: the second cost an hour to recognise as the first.
         """
+        return await self._retrying(
+            agent,
+            lambda c: c.post(f"{self.base}/agents/{agent}/invoke",
+                             headers=self.headers, json={"message": message}),
+            reply_key="reply")
+
+    async def _retrying(self, agent: str, request, reply_key: str) -> str:
+        """One model-bearing POST, retried past a transient upstream failure.
+
+        Shared by `invoke` and `chat_send` so the two cannot drift: both start
+        model work, both cost money, and both have to behave the same way when
+        the provider is overloaded.
+        """
         last: Exception | None = None
         for attempt, wait in enumerate((*INVOKE_RETRY_WAITS, None)):
             try:
                 async with httpx.AsyncClient(timeout=600.0) as c:
-                    r = await c.post(
-                        f"{self.base}/agents/{agent}/invoke",
-                        headers=self.headers,
-                        json={"message": message},
-                    )
+                    r = await request(c)
                     r.raise_for_status()
                     data = r.json()
                 if attempt:
                     await _tele_invoke_retry(self.run_id, agent, attempt,
                                              last, recovered=True)
                 await record_llm_call(self.run_id, data.get("chat_id"), agent)
-                return data.get("reply", "") or ""
+                return data.get(reply_key, "") or ""
             except Exception as exc:  # noqa: BLE001
                 if wait is None or not _is_transient(exc):
                     if attempt:
@@ -411,7 +512,15 @@ def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list
     before the call returned.
     """
     ids: list[str] = []
-    for entry in (telemetry or {}).values():
+    for key, entry in (telemetry or {}).items():
+        # The drafting conversation is excluded by name, and deliberately.
+        # It is the one chat a run is meant to REJOIN: a failed run is
+        # resumable, and the conversation holding the brief, the passages and
+        # every argument the drafter has already made is the most expensive
+        # thing the run owns. Archiving stops no work (see `_teardown_chats`),
+        # so tearing it down could only cost a resume its memory.
+        if key == DRAFT_CHAT_KEY:
+            continue
         if isinstance(entry, dict) and isinstance(entry.get("chat_id"), str):
             ids.append(entry["chat_id"])
     for meta in (searches or {}).values():
@@ -513,6 +622,7 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
     annotations existed and reached only the planner."""
     from app.models import AnnotationDefinition
     from app.services.annotations import annotations_for_documents
+    from app.services.document_identity import document_title_subquery
 
     async with AsyncSessionLocal() as session:
         rows = (
@@ -524,6 +634,11 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
                     ResultDocument.reason,
                     Document.summary,
                     ResultDocument.rank,
+                    DocumentClass.identifier_property,
+                    document_title_subquery(),
+                    DocumentClass.authority_label,
+                    DocumentClass.standing,
+                    DocumentClass.naming_required,
                 )
                 .join(Document, Document.id == ResultDocument.document_id)
                 .outerjoin(DocumentClass, DocumentClass.id == Document.document_class_id)
@@ -535,6 +650,13 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         definitions = list(
             (await session.execute(select(AnnotationDefinition))).scalars()
         )
+        # What every field of this deployment means to the engine: which
+        # property of each class is its date, its jurisdiction, its status,
+        # what replaced it and its second identifier, and which annotations
+        # carry standing and the issuing body. Resolved once per manifest,
+        # never per document, and never again downstream — the readers of
+        # these rows are pure and could not resolve it if they wanted to.
+        roles = await declared_roles.resolve(session)
         per_doc: dict = {}
         if definitions and rows:
             per_doc = await annotations_for_documents(
@@ -580,7 +702,8 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         return str(value)
 
     out = []
-    for did, fn, cls, reason, summary, rank in rows:
+    for (did, fn, cls, reason, summary, rank, ident_prop, title,
+         class_label, class_standing, class_naming) in rows:
         values = (per_doc.get(did) or {}).get("values") or {}
         ann = "; ".join(
             f"{name}: {_fmt(v)}" for name, v in values.items() if v is not None
@@ -588,12 +711,37 @@ async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
         props = "; ".join(
             f"{n}: {_fmt(v)}"[:60] for n, v in (props_by_doc.get(did) or [])[:6]
         )
+        # The same values unformatted, for the code that reads them rather
+        # than the model: the currency rules, the source date, the tier.
+        raw_props = {n: answer_structure.unwrap(v)
+                     for n, v in (props_by_doc.get(did) or [])}
         out.append({
             "document_id": did, "filename": fn, "class": cls or "",
             "annotations": ann, "properties": props, "reason": (reason or ""),
             "summary": (summary or ""),
             "rank": rank,
             "briefing": briefing_by_doc.get(str(did)),
+            "title": title,
+            "props": raw_props,
+            "annotation_values": values,
+            # What this deployment declared, carried per row so the pure
+            # readers stay pure — nothing downstream touches a session to
+            # learn a name. The same object on every row: it is the
+            # deployment's configuration, not the document's.
+            "roles": roles,
+            "identifier": (raw_props.get(ident_prop) if ident_prop else None),
+            # What a claim citing this document says about the source, as
+            # the class declares it. None for a class that declares none,
+            # which is also what says the class carries rules on its own.
+            "class_authority_label": class_label,
+            # How high a source of this class stands, as the class declared
+            # it. None for a class that declared nothing, and None is inert:
+            # it neither satisfies the highest-standing rule nor breaches it.
+            "class_standing": class_standing,
+            # Whether a claim asserting a rule on this class must name it in
+            # the sentence, as the class declared. False for a class that
+            # declared nothing, which holds it to nothing.
+            "naming_required": class_naming,
         })
     return out
 
@@ -781,6 +929,14 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
     reproduce to within a few percent. Gemini used to fall through to the
     Sonnet branch — a 60x over-count on the agents that do most of the work.
 
+    THE RATES MUST TRACK THE CARD, and for a while they did not. Opus stood
+    at 5.0/25.0 and Sonnet at 2.0/10.0 — the previous generation's prices,
+    left behind when the models moved. Opus was therefore counted at exactly
+    a third of what it cost, and it is the model the publish gate runs on. A
+    night of benchmark runs spent about $25 a question against a $10 ceiling
+    without tripping it; the two runs that did trip it had spent near $30.
+    A ceiling that measures a third of the spend is not a ceiling.
+
     Fails open (0.0): the cap must never be the thing that kills an otherwise
     healthy run on a transient error.
     """
@@ -810,14 +966,14 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
                           + cache_write_tokens * 1.25 + cache_read_tokens * 0.10
                           + completion_tokens * 5.0
                         WHEN model ILIKE '%opus%' THEN
-                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 5.0
-                          + cache_write_tokens * 6.25 + cache_read_tokens * 0.50
-                          + completion_tokens * 25.0
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 15.0
+                          + cache_write_tokens * 18.75 + cache_read_tokens * 1.50
+                          + completion_tokens * 75.0
                         ELSE
-                          -- sonnet-5 tier (console price table, 24 Aug 2026)
-                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 2.0
-                          + cache_write_tokens * 2.50 + cache_read_tokens * 0.20
-                          + completion_tokens * 10.0
+                          -- sonnet-5 tier
+                          (prompt_tokens - cache_read_tokens - cache_write_tokens) * 3.0
+                          + cache_write_tokens * 3.75 + cache_read_tokens * 0.30
+                          + completion_tokens * 15.0
                       END) / 1e6, 0)
                     FROM llm_usage
                     WHERE chat_id = ANY(CAST(:cids AS uuid[]))
@@ -829,6 +985,53 @@ async def _chats_cost_usd(chat_ids: list[str]) -> float:
 
 
 DRAFT_MODE = get_settings().sgr_draft_mode
+
+
+async def _drafting_chat(run_id: uuid.UUID, sinas: _Sinas) -> drafting_chat.DraftingChat:
+    """The run's drafting conversation, as the run row left it.
+
+    Rebuilt rather than passed down the call stack, because the two stages
+    that talk to the drafter — synthesis and validation — are separate entry
+    points and a resumed run enters at the second one. The chat id lives on
+    the RUN, not the answer: a run is the resumable unit, `run_pipeline` is
+    handed a run id and nothing else, and the column that holds it is the one
+    the activity endpoint already serves a conversation from.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = dict(((run.telemetry or {}).get(DRAFT_CHAT_KEY)) or {}) if run else {}
+        chat_id = (run.synthesis_chat_id if run else None) or stored.get("chat_id")
+    chat = drafting_chat.DraftingChat(
+        client=sinas, agent=DRAFTER_AGENT,
+        max_exchanges=get_settings().sgr_draft_chat_exchanges)
+    chat.restore(stored)
+    chat.chat_id = chat_id
+    return chat
+
+
+async def _save_drafting_chat(run_id: uuid.UUID,
+                              chat: drafting_chat.DraftingChat) -> None:
+    """Write the conversation back, id and rounds together.
+
+    Best-effort in the same sense as the rest of the bookkeeping: a write that
+    fails costs the conversation its memory of how many rounds it has run,
+    which degrades to the behaviour this replaces rather than failing a run
+    that has an answer in it.
+    """
+    try:
+        async with AsyncSessionLocal() as session:
+            run = await session.get(QueryRun, run_id)
+            if run is None:
+                return
+            tel = dict(run.telemetry or {})
+            tel[DRAFT_CHAT_KEY] = chat.state()
+            run.telemetry = tel
+            flag_modified(run, "telemetry")
+            run.synthesis_chat_id = (chat.chat_id or "")[:64] or None
+            await session.commit()
+    except Exception:  # noqa: BLE001
+        _log.warning("could not record the drafting conversation for run %s",
+                     run_id, exc_info=True)
 
 
 # Upper bound, in characters, on one unit of numbered text handed to the
@@ -1120,7 +1323,58 @@ _DASHES = {c: "-" for c in (0x2010, 0x2011, 0x2012, 0x2013, 0x2014, 0x2015)}
 # The only character deleted rather than replaced: PDF extraction leaves it
 # inside a hyphenated word, nothing draws it, and no copy reproduces it.
 _SOFT_HYPHEN = {0x00AD: None}
-_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN}
+
+# Emphasis, as markdown writes it down. The collection is markdown, and a
+# paragraph stored as `**14.**&nbsp;The Court held` is read — and quoted, by a
+# person or by a model — as `14. The Court held`. The asterisks are how the
+# emphasis is spelled, not part of the sentence, so they fold away like the
+# soft hyphen: one character for none.
+#
+# Measured before this existed: the verifier rejected 1,043 of 3,933 proposed
+# passages, and on a sample of four rejections drawn from the stored runs
+# three were present in the source, verbatim, on exactly the line the
+# extractor named. They failed only because the stored text carries emphasis
+# markers and HTML entities that no faithful copy of the rendered text has.
+# The documents that carry the most of that markup are the judgments, which
+# is why answers came to rest on commentary: the primary source's passages
+# were extracted, then thrown away.
+_EMPHASIS = {ord("*"): None, ord("_"): None}
+
+_RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN, **_EMPHASIS}
+
+#: A character reference, numeric or named. Deliberately strict: it must end
+#: in a semicolon, so the ampersand in `AM & S Europe` is left alone.
+_ENTITY = re.compile(
+    r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+
+
+def _rendered_chars(text: str) -> list[tuple[str, int]]:
+    """The text's characters as they are drawn, each with the offset in `text`
+    it came from. Pure.
+
+    Only entities expand here. `&nbsp;` is a space to every reader and to
+    every copy; `&#8220;` is a quotation mark the variant table already folds,
+    but only once it is a character rather than six. Everything else is passed
+    through for the caller's own folding.
+
+    The first character of an expansion carries the entity's opening offset
+    and the last carries its closing one, so a span located through this map
+    still covers the whole of what was written.
+    """
+    out: list[tuple[str, int]] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] == "&":
+            m = _ENTITY.match(text, i)
+            if m and (rendered := html.unescape(m.group(0))) != m.group(0):
+                last = m.end() - 1
+                out.extend((c, i if k == 0 else last)
+                           for k, c in enumerate(rendered))
+                i = m.end()
+                continue
+        out.append((text[i], i))
+        i += 1
+    return out
 
 # What a passage should be, in characters rather than lines.
 #
@@ -1163,7 +1417,13 @@ def _canonical_offsets(text: str) -> tuple[str, list[int]]:
     out: list[str] = []
     src: list[int] = []
     pending = False
-    for i, ch in enumerate(text or ""):
+    text = text or ""
+    # The expansion pass costs a list the length of the document, and a
+    # document without a single entity has nothing to expand, so it is skipped
+    # where it would only allocate. This runs over full documents.
+    drawn = (_rendered_chars(text) if "&" in text
+             else [(ch, i) for i, ch in enumerate(text)])
+    for ch, i in drawn:
         rep = _RENDERING_VARIANTS.get(ord(ch), ch)
         if rep is None:            # soft hyphen: nothing draws it, no copy has it
             continue
@@ -1318,21 +1578,37 @@ def _locate_passage(numbered: str, line_from: int, line_to: int, quoted: str,
     rows = [(n, t) for n, t in _numbered_pairs(numbered)
             if line_from - back <= n <= line_to + fwd]
 
+    if not rows:
+        return None
+
+    # The window is canonicalised ONCE and the quote found in it once, and the
+    # lines it lands on are read back off the offset map. Narrowest still
+    # wins: the span of a single occurrence IS the narrowest window that
+    # contains it, so the answer is the same and the work is not.
+    #
+    # It used to scan every start line and, inside that, extend an accumulator
+    # one line at a time, re-joining and re-canonicalising it at each step —
+    # quadratic in lines and cubic in characters. That is harmless on the
+    # ten-line window a passage normally claims and ruinous on a wrong one:
+    # the extractor's claimed ranges run to 1,967 lines, the collection holds
+    # 347 documents over half a megabyte and one of 5.5MB, and this function
+    # is called on the event loop. A single passage with a wild line range
+    # therefore stopped the server — measured at 55 minutes of one core with
+    # every concurrent run frozen behind it, which is how it was found.
+    joined = "\n".join(t for _, t in rows)
+    canon, src = _canonical_offsets(joined)
+    starts, off = [], 0
+    for _, t in rows:
+        starts.append(off)
+        off += len(t) + 1
+
     def window(want: str) -> tuple[int, int] | None:
-        best: tuple[int, int] | None = None
-        for i in range(len(rows)):
-            acc: list[str] = []
-            for j in range(i, len(rows)):
-                acc.append(rows[j][1])
-                if want in _canonical(" ".join(acc)):
-                    # Narrowest wins, earliest breaking the tie. Taking the
-                    # first window that matches would return the earliest
-                    # start instead, and a quote sitting on one line would be
-                    # recorded as the several lines that happen to precede it.
-                    if best is None or (j - i) < (best[1] - best[0]):
-                        best = (i, j)
-                    break
-        return best
+        at = canon.find(want)
+        if at < 0:
+            return None
+        first = bisect.bisect_right(starts, src[at]) - 1
+        last = bisect.bisect_right(starts, src[at + len(want) - 1]) - 1
+        return first, last
 
     # The whole quote first. Verification matches on the first 200 characters
     # and up to 2,000 are stored, so locating on the prefix alone would end the
@@ -1705,7 +1981,21 @@ async def _extract_passages(
                         "Where a sentence needs the one before it to mean what "
                         "it says, take both: a fragment that cannot be read on "
                         "its own is worse than a long quote, and the length is "
-                        "the target rather than the rule.\n\n"
+                        "the target rather than the rule.\n"
+                        # The source's own label for the paragraph is the only
+                        # thing that lets a reader find the passage again, and
+                        # "quote the sentence, not the paragraph" was trimming
+                        # it off the front of every quote. Nothing downstream
+                        # can put it back: this system does not know how a
+                        # given source numbers itself, and a number it derived
+                        # would be a number the source never wrote.
+                        + "Where the passage shows the source's own label for "
+                        "the paragraph the sentence sits in — a bare number, "
+                        '"r.o. 4.2", "recital 14" — begin the quote with that '
+                        "label, exactly as printed. It is how a reader finds "
+                        "the passage again, and trimming it loses it for "
+                        "good. Where the passage shows none, do not invent "
+                        "one: begin at the sentence.\n\n"
                         + doc_blob,
                     )
                     cleaned = reply.strip().strip("`").removeprefix("json").strip()
@@ -1805,6 +2095,10 @@ async def _extract_passages(
                     "spans_prefix_only": prefix_only,
                     "truncated": truncated, "chunked": chunked}
         return {"n": c.get("n"), "establishes": c.get("establishes"),
+                # Which part of the question the plan filed this under, so
+                # the drafter sees each passage group beside the part it
+                # was read for.
+                "part": c.get("part"), "conclusion": bool(c.get("conclusion")),
                 "passages": good, "proposed": proposed_total,
                 "rejected": rejected, "recovered_by_symmetry": recovered,
                 "spans_corrected": corrected, "spans_moved": moved,
@@ -1952,8 +2246,206 @@ async def _synthesis_playbook(role: str = "drafting") -> str:
         return ""
     if not content:
         return ""
-    return (f"\n\nHOUSE RULES for {role} (how to write, not what is true — "
-            "only the passages decide that):\n" + content.strip() + "\n")
+    # Applied AFTER the structure rules and said to be beneath them. The
+    # deployment's playbook governs wording and emphasis; the section order,
+    # the per-part conclusions, the tests as conditions and the labelling of
+    # secondary sources are the engine's and a house rule cannot lower them.
+    return (f"\n\nHOUSE RULES for {role} (how to write — wording and emphasis. "
+            "They never change the STRUCTURE rules above: section order, "
+            "conclusion first per part, tests as ordered conditions, labelled "
+            "authorities. And they say nothing about what is true — only the "
+            "passages decide that):\n" + content.strip() + "\n")
+
+
+#: What the reduced ask allows itself, as a fraction of the normal cap. The
+#: retry exists because the first reply never arrived; asking for most of the
+#: answer again is asking for the same failure again.
+RETRY_CLAIM_FRACTION = 0.5
+#: And never fewer than this, or the retry cannot carry a conclusion per part.
+RETRY_MIN_CLAIMS = 4
+
+
+#: The kinds a drafter may choose, as the contract prints them, built from
+#: the taxonomy rather than spelled out beside it: the three schemas below
+#: listed the values by hand and drifted apart from `CLAIM_KINDS` twice.
+#: `abstention` is deliberately not offered — a drafter that cannot answer
+#: says so through the refusal path, not by writing a claim.
+_KIND_ALTERNATIVES = "|".join(
+    k for k in answer_structure.CLAIM_KINDS if k != "abstention")
+#: What each of those words means, once, in the brief. The names are the
+#: engine's and say nothing about any one corpus, so a drafter that has not
+#: been told what they mean will guess from its own domain — which is how
+#: `factual` collected everything the model was unsure of.
+_KIND_GLOSS_BLOCK = "\n".join(
+    f'- "{k}": {answer_structure.CLAIM_KIND_GLOSS[k]}'
+    for k in answer_structure.CLAIM_KINDS if k != "abstention")
+
+
+#: The shape the drafter replies in. Six fields it used to author are gone:
+#: `section`, which follows from `kind`; `authority_label`,
+#: `jurisdiction_note` and `currency_note`, which follow from the cited
+#: document; `position`, which follows from the reply's order; and the `test`
+#: wrapper, whose `conditions` are now flat on the claim. Each was a decision
+#: the engine could make from what it already had, and every one of them was
+#: output the model had to spend before it could emit a single claim.
+_DRAFT_SCHEMA = (
+    '{"claims": [{"n": <1, 2, ...>, "text": "<claim, one sentence>", '
+    '"part": <part number or null>, "kind": '
+    f'"{_KIND_ALTERNATIVES}", '
+    '"follows_from": [<n of each claim this one reasons from; required '
+    'for inference and conclusion claims>], '
+    '"rationale": "<why this claim rests on this source>", '
+    '"evidence": [{"filename": "...", "line_from": <int>, '
+    '"line_to": <int>, "locator": "<or null>"}], '
+    '"test_name": "<for kind test only: what the test is called>", '
+    '"conditions": [<for kind test only>{"text": "<condition, in the '
+    'source\'s order>", "cumulative": true|false, "evidence": '
+    '{"filename": "...", "line_from": <int>, "line_to": <int>, '
+    '"locator": "<or null>"}}]}]}'
+)
+
+
+#: The shape a correction comes back in.
+_PATCH_SCHEMA = (
+    '{"revise": [{"seq": <int>, "text": "<claim>", '
+    f'"part": <part number or null>, "kind": "{_KIND_ALTERNATIVES}", '
+    '"follows_from": [<seq>, ...], '
+    '"rationale": "<why this claim rests on this source>", '
+    '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>, '
+    '"locator": "<or null>"}]}], '
+    '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
+    'and why no passage available can carry it>", '
+    '"objection": "<the id of the request this answers, or omit>"}], '
+    '"keep": [{"seq": <int>, "rationale": "<why the current citation '
+    'stands despite the feedback>", '
+    '"objection": "<the id of the request this answers, or omit>"}], '
+    '"refuse": [{"objection": "<the id from a feedback line>", '
+    '"rationale": "<why this source cannot carry the point asked of it>"}], '
+    '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
+    'its passages, this OWED document does not carry any point this '
+    'answer needs>"}], '
+    f'"add": [{{"text": "<claim>", "type": "{_KIND_ALTERNATIVES}", '
+    '"part": <part number or null>, "follows_from": [<seq>, ...], '
+    '"test_name": "<for a test claim only>", '
+    '"conditions": [<for a test claim only>{"text", "cumulative", '
+    '"evidence": {"filename", "line_from", "line_to", "locator"}}], '
+    '"rationale": "<why this claim rests on this source>", '
+    '"evidence": [{"filename": "...", "line_from": <int>, '
+    '"line_to": <int>, "locator": "<or null>"}]}]}'
+)
+
+
+def _revision_contract() -> str:
+    """How every later round is answered — stated once, in the brief. Pure.
+
+    None of this changes between rounds, so none of it belongs on a round.
+    It used to be re-sent in full every time, in a call that could not
+    remember having been told it before; here it sits in the cached prefix and
+    a round carries only what that round found.
+    """
+    return (
+        "HOW THE ROUNDS AFTER THIS ONE WORK (read now; it will not be "
+        "repeated).\n"
+        "Once you have drafted, a review reads the answer and I send you what "
+        "it found — and nothing else. Your own claims are not read back to "
+        "you: they are above, in your own reply, and they are your position. "
+        "What each round carries is the review's findings, the requests "
+        "outstanding against the answer, and the engine's numbering of the "
+        "claims so you can address them.\n\n"
+        "You answer a round with a PATCH, never with the whole answer. Change "
+        "ONLY what the feedback identifies; a claim you do not mention is kept "
+        "exactly as it is. Do not restate, rephrase or return an untouched "
+        "claim.\n\n"
+        "For a claim the feedback does identify: NARROW it if it asserts more "
+        "than its passages establish, REWRITE it if it contradicts another "
+        "claim, and ABANDON it — drop it, with a reason — if no passage "
+        "available can carry it. Abandoning is a normal move and often the "
+        "right one. A claim you wrote in your first reply has no standing "
+        "just because you wrote it: rewording a claim the passages cannot "
+        "support leaves the same defect in different words, and the round "
+        "after this one will find it again. Add a claim only where the answer "
+        "fails to address the question. Every claim you write must be carried "
+        "entirely by passages in this brief, and you may cite only those.\n\n"
+        "Dropping a claim costs a reason, like every other change: say what "
+        "the claim asserted and why no passage available can carry it. A drop "
+        "with no reason is not applied and the claim stays.\n\n"
+        "The structure is part of what is corrected. Where the feedback says "
+        "a part lacks its conclusion, or a conclusion sits in the analysis, "
+        'RESTORE THE ORDER: add or revise a claim of kind "conclusion" for '
+        "that part, never append a conclusion to the end of the analysis. "
+        'Every claim you add or revise states its "part" and "kind", and an '
+        'inference or conclusion its "follows_from". Where the feedback names '
+        "two claims restating one proposition from one source, merge them: "
+        "revise one to carry the point and both citations, drop the other "
+        "with a reason.\n\n"
+        "THERE ARE THREE ANSWERS TO A REQUEST, NOT TWO. Obeying and ignoring "
+        "were the only two moves you used to have, so reasoning that should "
+        "have retired a request went into a dropped claim where nothing read "
+        "it and the same source came back twice more. A feedback line that "
+        "carries an objection id can be REFUSED with a reason, and a refusal "
+        "is a reply: the review must either accept it — the point is then "
+        "settled and never comes back — or press it with something it has not "
+        "said before. Refuse when the source cannot carry what is asked of "
+        "it, in terms of what the source IS and what the point NEEDS, never "
+        "in terms of effort. Where the feedback names a stronger source and "
+        "you judge the current citation to be the better one, say so rather "
+        'than changing nothing: put the claim in "keep" with a rationale '
+        "giving the reason, having actually read the named source's "
+        "passages.\n\n"
+        "A feedback line marked as an OWED source is an obligation, not a "
+        "suggestion: either cite that document in a revised or added claim, "
+        'or list it in "waive" with a rationale you could only give after '
+        "reading its passages, or refuse it. An obligation neither cited nor "
+        "waived nor refused comes back every round.\n\n"
+        "Give a RATIONALE with every claim you revise, add or keep, on the "
+        "same terms as a drafted one.\n\n"
+        "What a source IS — what kind of thing it is, how current it is, "
+        "which jurisdiction it belongs to — is never yours to write: it is "
+        "filled in from the document you cite.\n\n"
+        "A round is answered with JSON and nothing else — no preamble, no "
+        "reasoning outside the JSON. Begin with { and end with }:\n"
+        + _PATCH_SCHEMA + "\n\n"
+    )
+
+
+def _draft_ask() -> str:
+    """Turn two: the work. Pure.
+
+    Short by construction — everything it needs was in the brief. It is a
+    separate turn so that the brief can be replayed into a fresh chat without
+    a whole draft being produced and discarded; see `services/drafting_chat`.
+    """
+    return (
+        "Now draft the claims, following the brief above.\n\n"
+        "Reply ONLY JSON, and nothing else — no preamble, no explanation, no "
+        "reasoning outside the JSON. Begin with { and end with }:\n"
+        + _DRAFT_SCHEMA + "\n"
+        'Omit "test_name" and "conditions" on every claim that is not a test.')
+
+
+def _shorter_draft_ask(cap: int) -> str:
+    """The same ask, smaller, after a reply that never arrived. Pure.
+
+    What it drops is how much the model is asked to produce, which is what ran
+    out. What it does NOT drop is the passages — and it no longer has to carry
+    them, because they are the brief and the brief is still in the
+    conversation.
+    """
+    n = max(RETRY_MIN_CLAIMS, int(cap * RETRY_CLAIM_FRACTION))
+    return (
+        "Your previous reply was EMPTY — nothing came back at all. The most "
+        "likely reason is that you ran out of room before writing any of it. "
+        "Answer the same task again, smaller. The brief has not changed and "
+        "the passages are still above; do not ask for them again.\n"
+        f"- Write at most {n} claims, not {cap}. Cover the conclusions first "
+        "and stop; a short answer is wanted, an absent one is not.\n"
+        "- Keep each claim to one sentence and each rationale to one short "
+        "clause.\n"
+        "- Write NOTHING outside the JSON object: no plan, no commentary, no "
+        "working. Your first character is { and your last is }.\n"
+        "- Do not re-read every passage group. Take the groups that most "
+        "directly answer each part and leave the rest.\n\n"
+        "The reply shape is unchanged:\n" + _DRAFT_SCHEMA)
 
 
 def _claims_json(reply: str) -> dict:
@@ -1985,6 +2477,24 @@ def _verified_quote(verified: dict, filename: str, evidence: dict) -> str:
     overlapping = [t for (fn, a, b), t in verified.items()
                    if fn == filename and t and not (b < lf or lt < a)]
     return overlapping[0] if len(overlapping) == 1 else ""
+
+
+def _locator_of(evidence: dict) -> str | None:
+    """The paragraph label an evidence entry claims, or None.
+
+    A label, never a number this system worked out: it is whatever the
+    source prints — "42", "r.o. 4.2", "recital 14" — and it is stored
+    unchecked, because the check belongs where the span text is (the
+    faithfulness pass), not where the model's reply is read. Capped at the
+    column width; a "locator" that is a sentence is not a locator. Pure.
+    """
+    raw = evidence.get("locator")
+    if raw is None or isinstance(raw, bool) or isinstance(raw, (list, dict)):
+        return None
+    s = str(raw).strip()
+    if not s or s.lower() in ("null", "none", "n/a"):
+        return None
+    return s[:50]
 
 
 def _evidence_entries(claim: dict, limit: int = 4) -> list[dict]:
@@ -2041,13 +2551,26 @@ def _no_text_record(sequence: int, claim: dict) -> dict:
 
 
 async def _draft_from_extracts(
-    run_id: uuid.UUID, answer_id: uuid.UUID, sinas: _Sinas,
+    run_id: uuid.UUID, answer_id: uuid.UUID, chat: drafting_chat.DraftingChat,
     question: str, extracts: list[dict], append: bool = False,
-    cap: int | None = None,
+    cap: int | None = None, parts: list[dict] | None = None,
+    sources: dict[str, dict] | None = None,
 ) -> int:
-    """Inverted split, writing half: one tool-less Sonnet call drafts all
-    claims from the verified extracts; the runner persists claims and
-    evidence rows itself. No chat loop, no nudges, no wedge surface."""
+    """Inverted split, writing half: the drafter writes all claims from the
+    verified extracts; the runner persists claims and evidence rows itself.
+
+    This is turn one and turn two of the conversation that will carry the
+    whole answer. Turn one is the BRIEF — everything that stays true for the
+    life of the answer — and turn two asks for the draft. The split is what
+    makes the brief replayable: see `services/drafting_chat`.
+
+    The drafter writes to the structure: it files every claim under a part
+    of the question, leads each part with its conclusion, states a
+    multi-condition test as one claim of ordered conditions, and labels what
+    each source is. Above each passage group it is shown what the documents
+    ARE — title, class, tier, issuing body, date, jurisdiction, currency —
+    which is for labelling and never for asserting: a claim may still say
+    only what its passages show."""
     # Grounding is on raw source text only. The plan's "establishes" sentence
     # is written from the manifest — summaries, classes, annotations — which
     # are themselves interpretation produced at ingestion, unverified and
@@ -2060,6 +2583,9 @@ async def _draft_from_extracts(
     # is shown. The drafter echoes those coordinates back, so the quote behind
     # a citation is recoverable without asking it to copy the text again, and
     # what is recorded is what was checked rather than what came back.
+    parts = parts or []
+    sources = sources or {}
+    cap = cap or MAX_CLAIMS
     verified: dict[tuple[str, int, int], str] = {}
     for e in extracts:
         for p in e.get("passages") or []:
@@ -2070,62 +2596,147 @@ async def _draft_from_extracts(
     for i, e in enumerate(extracts, start=1):
         if not e.get("passages"):
             continue
+        # What the documents in this group ARE, once each, above the
+        # passages. The line carries no summary and no holding, and nothing
+        # the drafter has to copy back: it says which document this is, what
+        # kind of thing it is, and whether its class labels it — the one fact
+        # that changes what the drafter may rest on it.
+        seen_fn: list[str] = []
+        for p in e["passages"]:
+            if p["filename"] not in seen_fn:
+                seen_fn.append(p["filename"])
+        heads = "\n".join(
+            f"  SOURCE {fn}: {(sources.get(fn) or {}).get('line') or 'no record'}"
+            for fn in seen_fn)
         ps = "\n".join(
             f"  [{p['filename']} lines {p['line_from']}-{p['line_to']}]\n"
             f"  {p['text']}" for p in e["passages"])
-        blocks.append(f"PASSAGE GROUP {i}\n{ps}")
+        part = e.get("part")
+        where = (f" (for part {part + 1})" if isinstance(part, int) else
+                 " (for the overall conclusion)" if e.get("conclusion") else "")
+        blocks.append(f"PASSAGE GROUP {i}{where}\n{heads}\n{ps}")
     if not blocks:
         return 0
-    reply = await sinas.invoke(
-        "sgr/retrieval-planner-agent",
+    brief = (
+        f"You are drafting the claims of {_domain_article()}answer, and then "
+        "correcting them round by round as a review comes back. This message "
+        "is the BRIEF: everything in it stays true for the whole of our "
+        "conversation and is never repeated. What arrives later is only what "
+        "is new.\n\n"
         f"Draft the claims of {_domain_article()}answer from the VERIFIED "
         "PASSAGES below "
         "— these passages are the ONLY thing you know. Every claim must be "
-        "supported entirely by the passages you cite for it. Do not name a "
-        "court, an Advocate General, a case number or a date that no passage "
-        "shows. Skip a passage group that establishes nothing usable.\n"
+        "supported entirely by the passages you cite for it. Name no deciding "
+        "body, no case reference and no date that no passage shows. Skip a "
+        "passage group that establishes nothing usable.\n"
         # The instruction used to be that the FINAL claim states the
         # conclusion, and it was followed: across every answer produced, no
         # claim typed as a conclusion has ever been first and they sit on
         # average 84% of the way through. A reader who wants the answer has to
         # read to the end for it, which is the reviewer's first must-have and
         # the one the answer has never met. Claim 1 is the only position a
-        # renderer cannot lose and a reader cannot miss.
+        # renderer cannot lose and a reader cannot miss. With the question in
+        # parts the rule is the same one, per part: the overall conclusion is
+        # claim 1, each part's conclusion leads that part.
         "The FIRST claim states the answer to the question, in one sentence, "
         "before any reasoning or authority: a reader who stops there has the "
         "answer. The claims after it give the reasoning, then the detail. Do "
         "not repeat the conclusion at the end.\n\n"
-        "For each claim also give a RATIONALE: ONE short sentence, at most "
+        "Each group opens with SOURCE lines saying what its documents ARE: "
+        "title, class, and a `labelled:` note where the source is one that "
+        "cannot carry a rule alone. Never assert anything from a SOURCE line "
+        "in a claim, and never copy one into a field — everything the answer "
+        "prints about what a source IS is filled in for you.\n\n"
+        + _structure_rules(parts, cap)
+        + "\nFor each claim also give a RATIONALE: ONE short sentence, at most "
         "20 words — which part of the question this answers and why this "
         "source settles it. Never restate the claim; the reader has just "
-        "read it. Where two passage groups spoke to the same point, name "
-        "the one you relied on. It is reasoning, not evidence — nothing in "
-        "it may assert anything the passages do not show. Name a source the "
-        "way the claim names it — deciding body and case reference — never "
-        "by its filename.\n\n"
-        'Reply ONLY JSON: {"claims": [{"text": "<claim>", "type": '
-        '"legal_principle|factual|procedural|conclusion", '
-        '"rationale": "<why this claim rests on this source>", "evidence": '
-        '[{"filename": "...", "line_from": <int>, "line_to": <int>}]}]}\n\n'
+        "read it. It is reasoning, not evidence — nothing in it may assert "
+        "anything the passages do not show. Name a source the way the claim "
+        "names it, never by its filename. One claim per proposition per "
+        "source: do not restate a point a claim already makes from the same "
+        "document.\n\n"
+        # The locator is the drafter's, because the drafter is the only stage
+        # that has both the passage and the proposition in front of it. It is
+        # checked deterministically against the passage before anything is
+        # judged, so a label that is not there costs the citation — which is
+        # the whole reason it is safe to print one at all.
+        + 'The "locator" of an evidence entry is the source\'s OWN label for '
+        "the paragraph the passage sits in, copied from the passage exactly "
+        'as it prints it: "42", "r.o. 4.2", "recital 14". Where the passage '
+        "shows no such label, write null. Never derive one, never count "
+        "paragraphs, never carry one over from another passage: a locator "
+        "that does not appear in the passage it labels is checked and the "
+        "citation is thrown away with it.\n\n"
+        # The standing half of every revision round, moved off the round and
+        # into the brief. It never changes, so it belongs in the part of the
+        # conversation that is written to cache once and read back after; what
+        # a round then carries is only what that round found.
+        + _revision_contract()
         + await _synthesis_playbook()
-        + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks),
+        + "\nQUESTION:\n" + question + "\n\n" + "\n\n".join(blocks)
     )
-    # One retry on a malformed reply. Drafting is the last call in a run that
-    # has already paid for retrieval, planning and extraction, and a single
-    # unescaped quote inside a claim threw all of it away. The retry is the
-    # cheap half of the work, and a second failure still raises: a run that
-    # cannot draft must say so, not publish nothing.
+    await chat.start(brief)
+    reply = await chat.ask(_draft_ask())
+    # Two things can come back that are not claims, and they are different
+    # failures. An UNPARSEABLE reply has claims in it and broke on a quote;
+    # resending it to be repaired is the right and cheap move. An EMPTY reply
+    # has nothing to repair, and that is what a run lost a full answer to:
+    # the drafter returned no text at all, the repair prompt was handed an
+    # empty PREVIOUS REPLY, and the model — correctly, given what it was
+    # shown — answered `{"claims": []}`. The run then reported that no
+    # passage supported a claim, which was false: no reply had arrived.
+    #
+    # So the retry for an empty reply is the WORK again, not a repair of
+    # nothing, with the ask cut down to what a shorter reply can hold. That is
+    # also the shape of the cause. The reply was empty because the model spent
+    # its whole output budget before writing any of it (20,000 completion
+    # tokens, zero text blocks, twice), so a retry that asks for less output is
+    # a retry that can finish.
+    #
+    # In a conversation neither retry has to carry anything back: the passages
+    # are the brief, which is still there, and the previous reply is the
+    # previous message. The repair turn used to resend up to 60,000 characters
+    # of broken JSON for the model to read its own words off.
+    data: dict | None = None
     try:
         data = _claims_json(reply)
     except json.JSONDecodeError as exc:
-        await _tele(run_id, "draft", draft_reparse=str(exc)[:200])
-        reply = await sinas.invoke(
-            "sgr/retrieval-planner-agent",
-            "Your previous reply was not valid JSON: " + str(exc)[:200]
-            + ". Send the same claims again as strictly valid JSON. Escape "
-            'every quotation mark inside a string as \\", and use no line '
-            "breaks inside a string.\n\nPREVIOUS REPLY:\n" + reply[:60000])
-        data = _claims_json(reply)
+        empty = not (reply or "").strip()
+        await _tele(run_id, "draft",
+                    draft_reparse=str(exc)[:200],
+                    draft_reply_chars=len(reply or ""),
+                    draft_empty_reply=empty,
+                    draft_brief_chars=len(brief))
+        if empty:
+            _log.warning("run %s: the drafter returned an empty reply to a "
+                         "%d-character brief; retrying with a reduced ask",
+                         run_id, len(brief))
+            reply = await chat.ask(_shorter_draft_ask(cap))
+            await _tele(run_id, "draft",
+                        draft_retry="reduced_ask",
+                        draft_retry_reply_chars=len(reply or ""))
+        else:
+            reply = await chat.ask(
+                "Your previous reply was not valid JSON: " + str(exc)[:200]
+                + ". Send the same claims again as strictly valid JSON. Escape "
+                'every quotation mark inside a string as \\", and use no line '
+                "breaks inside a string. Do not redraft and do not change a "
+                "claim: repair the reply you have just written.")
+            await _tele(run_id, "draft", draft_retry="repair_json")
+        try:
+            data = _claims_json(reply)
+        except json.JSONDecodeError as exc2:
+            # Named for what happened. A drafter that said nothing twice is
+            # not a corpus that supports no claim, and the run must not
+            # report it as one.
+            await _tele(run_id, "draft",
+                        draft_retry_failed=str(exc2)[:200],
+                        draft_retry_empty=not (reply or "").strip())
+            raise DrafterSilent(
+                "the drafter returned no usable reply twice"
+                + (" (both replies were empty)" if not (reply or "").strip()
+                   else f" (second reply: {str(exc2)[:120]})")) from exc2
     # The drafter's reply is unvalidated at every level, and this guard is
     # placed once at the boundary rather than a level at a time. Three
     # findings arrived in three review rounds, each the same defect one level
@@ -2139,9 +2750,49 @@ async def _draft_from_extracts(
         "absent" if claims is None else type(claims).__name__)
     if not isinstance(claims, list):
         claims = []
-    written = 0
     no_text: list[dict] = []
     malformed: list[dict] = []
+    # Normalised, then ORDERED before numbering: conclusions lead, analysis
+    # follows part by part, authorities close. The drafter was told to write
+    # in that order; the row order does not depend on whether it did. The
+    # drafter's own number `n` travels with each claim: it is what
+    # `follows_from` refers to and what the no-text record is keyed by.
+    prepared: list[dict] = []
+    for i, c in enumerate(claims[:(cap or 14)], start=1):
+        if not isinstance(c, dict):
+            # The same rule as the evidence entry below, one level up, and
+            # the one this change first missed: the drafter's reply is
+            # unvalidated, so `claims` can carry a bare string or a null
+            # beside perfectly good claims. `c.get` on it raised
+            # AttributeError out of the transaction, which rolled back
+            # every valid claim written before it and failed the run over
+            # one malformed item. A malformed claim costs the claim.
+            malformed.append({"sequence": i, "repr": repr(c)[:200]})
+            continue
+        text_ = str(c.get("text") or "").strip()
+        cols = answer_structure.normalise_claim(c, parts) if text_ else None
+        if cols is None:
+            # A claim with no text is dropped and its number goes with it,
+            # which is why published answers jump from 9 to 11. Keep what
+            # the drafter actually sent, because the gap alone cannot say
+            # which of two things happened: an empty placeholder, where the
+            # numbering is the only casualty, or a claim whose text failed
+            # to arrive while its reasoning and its sources did, where the
+            # answer is short a proposition it meant to make. Once the
+            # reply is discarded the two are indistinguishable, and nothing
+            # else records that a claim was dropped at all.
+            no_text.append(_no_text_record(i, c))
+            continue
+        spans = _evidence_entries(c)
+        if cols["claim_kind"] == "test":
+            spans = spans + answer_structure.condition_spans(
+                answer_structure.raw_test(c))
+        cols["_n"] = c.get("n") if c.get("n") is not None else i
+        cols["_spans"] = spans
+        prepared.append(cols)
+    ordered = answer_structure.order_claims(prepared)
+    written = 0
+    drafted: list[tuple[int, set]] = []
     async with AsyncSessionLocal() as session:
         start_seq = 1
         if append:
@@ -2149,40 +2800,33 @@ async def _draft_from_extracts(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id)
             )).scalar() or 0) + 1
-        for i, c in enumerate(claims[:(cap or 14)], start=start_seq):
-            if not isinstance(c, dict):
-                # The same rule as the evidence entry below, one level up, and
-                # the one this change first missed: the drafter's reply is
-                # unvalidated, so `claims` can carry a bare string or a null
-                # beside perfectly good claims. `c.get` on it raised
-                # AttributeError out of the transaction, which rolled back
-                # every valid claim written before it and failed the run over
-                # one malformed item. A malformed claim costs the claim.
-                malformed.append({"sequence": i, "repr": repr(c)[:200]})
-                continue
-            text_ = str(c.get("text") or "").strip()
-            if not text_:
-                # A claim with no text is dropped and its number goes with it,
-                # which is why published answers jump from 9 to 11. Keep what
-                # the drafter actually sent, because the gap alone cannot say
-                # which of two things happened: an empty placeholder, where the
-                # numbering is the only casualty, or a claim whose text failed
-                # to arrive while its reasoning and its sources did, where the
-                # answer is short a proposition it meant to make. Once the
-                # reply is discarded the two are indistinguishable, and nothing
-                # else records that a claim was dropped at all.
-                no_text.append(_no_text_record(i, c))
-                continue
-            row = AnswerClaim(answer_id=answer_id, sequence=i,
-                              claim_text=text_,
-                              rationale=(str(c.get("rationale") or "").strip()
-                                         or None),
-                              claim_type=str(c.get("type") or "legal_principle")[:50])
+        id_by_n: dict[int, uuid.UUID] = {}
+        pending_refs: list[tuple[AnswerClaim, list[int]]] = []
+        for i, cols in enumerate(ordered, start=start_seq):
+            spans = cols.pop("_spans")
+            n = cols.pop("_n")
+            refs = cols.pop("follows_from_refs")
+            row = AnswerClaim(answer_id=answer_id, sequence=i, **cols)
             session.add(row)
             await session.flush()
-            # Same guard as the no-text record above: a malformed entry here
-            # crashed the transaction for a claim that was otherwise fine.
-            for ev_ in _evidence_entries(c):
+            try:
+                id_by_n[int(n)] = row.id
+            except (TypeError, ValueError):
+                pass
+            if refs:
+                pending_refs.append((row, refs))
+            # What actually became a citation, not what the drafter offered.
+            # Two things drop evidence between the two: the cap at four, and a
+            # filename that resolves to no document. `plan_outcome` reads this
+            # to decide whether a planned claim was used, and a claim counted
+            # as used on a citation that was never written is the one reading
+            # the record must not produce.
+            cited_here: set[str] = set()
+            # Four spans is enough for a claim; a test is one span per
+            # condition and needs room for each.
+            capped = spans[:4] if cols.get("claim_kind") != "test" else spans[:8]
+            first_doc_fn: str | None = None
+            for ev_ in capped:
                 fn_ = str(ev_.get("filename") or "")
                 doc = (await session.execute(
                     select(Document).where(Document.filename == fn_)
@@ -2191,7 +2835,13 @@ async def _draft_from_extracts(
                     continue
                 span = {"line_from": ev_.get("line_from"),
                         "line_to": ev_.get("line_to"),
-                        "char_from": None, "char_to": None, "note": None}
+                        "char_from": None, "char_to": None,
+                        "note": ev_.get("note"),
+                        # As the drafter read it off the passage, unchecked.
+                        # The faithfulness check finds it in the span text or
+                        # fails the span, and only then does it become the
+                        # row's `paragraph_ref`.
+                        "locator": _locator_of(ev_)}
                 quote = _verified_quote(verified, fn_, ev_)
                 if quote:
                     ver = await session.get(DocumentVersion,
@@ -2207,9 +2857,41 @@ async def _draft_from_extracts(
                     document_version_id=doc.current_version_id,
                     span=span, quote=(quote or None) and quote[:2000],
                     validated=False))
+                cited_here.add(fn_)
+                first_doc_fn = first_doc_fn or fn_
+            # What the code knows about the source, rather than what the
+            # model was asked to guess. All four of these used to be fields
+            # of the reply — the label out of an eight-word vocabulary in
+            # engine code, the tier, the jurisdiction note and the currency
+            # note — and the engine overrode two of them afterwards anyway,
+            # from exactly these rows. Asking for them bought nothing and
+            # cost the drafter output it turned out not to have.
+            #
+            # Keyed on the FIRST cited document, which is the one the claim
+            # rests on: a claim citing a labelled source alongside an
+            # unlabelled one is a claim resting on the unlabelled one, and
+            # that is the order the drafter is told to write them in.
+            src = sources.get(first_doc_fn or "") or {}
+            if src.get("label"):
+                row.authority_label = str(src["label"])[:40]
+            if src.get("tier") is not None:
+                row.authority_tier = int(src["tier"])
+            if src.get("jurisdiction"):
+                row.jurisdiction_note = str(src["jurisdiction"])[:300]
+            if src.get("currency"):
+                row.currency_note = str(src["currency"])[:500]
             written += 1
+            drafted.append((i, cited_here))
+        for row, refs in pending_refs:
+            ids = [str(id_by_n[r]) for r in refs if r in id_by_n and id_by_n[r] != row.id]
+            row.follows_from = ids or None
         await session.commit()
-    detail: dict[str, Any] = {"extract_mode": True, "claims": written}
+    detail: dict[str, Any] = {
+        "extract_mode": True, "claims": written,
+        "claims_by_part": answer_structure.part_counts(
+            ordered, len(parts), key="part_index")}
+    if not append:
+        detail["plan_outcome"] = _plan_outcome(extracts, drafted)
     if no_text:
         # Named for the cause, not reusing `dropped_claims`, which is a flat
         # count under `validate` meaning something else. One prefix per
@@ -2239,11 +2921,139 @@ async def _draft_from_extracts(
                      "answer", run_id, len(malformed),
                      [d["sequence"] for d in malformed])
     await _tele(run_id, "draft", **detail)
+    # An answer with no claims is not a corpus with no support. The drafter
+    # was shown passage groups — this function returns early when there are
+    # none — so a reply that yielded no row is the drafter's doing, and the
+    # run says which of its ways it was rather than blaming the passages.
+    if written == 0:
+        if not claims:
+            raise DrafterSilent(
+                "the drafter replied in shape with an empty list of claims "
+                f"over {len(blocks)} passage group(s)"
+                + (f"; `claims` arrived as {bad_container}" if bad_container
+                   else ""),
+                cause=DrafterSilent.NO_CLAIMS)
+        raise DrafterSilent(
+            f"the drafter sent {len(claims)} claim(s) and none could be "
+            f"stored ({len(no_text)} with no text, {len(malformed)} not "
+            "objects)",
+            cause=DrafterSilent.UNUSABLE)
     return written
 
 
+def _plan_outcome(extracts: list[dict], drafted: list[tuple[int, set]]) -> list[dict]:
+    """What became of each planned claim.
+
+    The plan numbers its claims and the answer numbers its claims, and nothing
+    joined the two. A planned claim could be extracted, shown to the drafter
+    and left out of the answer entirely, and the only way to find out was to
+    read the plan, the extraction record and the citations side by side --
+    which took nine queries to establish for one claim on one run.
+
+    Three outcomes, and only the middle one is a surprise:
+
+      no_passages       the extractor returned nothing for it, so its group
+                        was skipped and the drafter never saw it
+      extracted_unused  passages were extracted and shown, and no drafted
+                        claim cites any of their documents
+      used              at least one drafted claim cites a document it read
+
+    Attribution is by document, not by identity, because nothing carries an
+    identity across the drafting call: passage groups are renumbered after the
+    empty ones are skipped, and the drafter is not asked which group a claim
+    came from. Two planned claims anchored on the same document therefore both
+    read as used when one of them was. That asymmetry is deliberate and worth
+    stating: `used` can be wrong, `extracted_unused` cannot. A planned claim
+    reported unused had none of its documents cited by anything.
+
+    THE SECOND WAY `used` CAN BE WRONG, AND WHY IT IS NOT REPAIRED HERE. This
+    is written at drafting, under the `draft` stage, and drafting is not the
+    end of the run. Validation, coverage repair and the final sweep can remove
+    the claim that carried the citation, or rebind its evidence, after which a
+    planned claim recorded `used` has its document in no published claim.
+    Measured over the runs stored on 10 September 2026: of 240 published runs,
+    5 lost a document's last citation somewhere after drafting, so the record
+    overstates `used` in about 2% of them. It is not repaired here because the
+    plan is out of scope by the time the answer publishes, and because "did
+    the plan reach the draft" and "did the plan reach the published answer"
+    are two questions, not one bad answer to a single question.
+
+    `cited_by_draft_sequence` is named for the numbering it holds. Sequences
+    are compacted at publish, so a run that dropped any claim renumbers the
+    survivors and these numbers no longer address the published answer: 45 of
+    those 240 runs dropped at least one claim. The plain name `cited_by` read
+    as an index into the answer a reader was holding, which it is not.
+    """
+    out: list[dict] = []
+    for e in extracts:
+        files = {str(p.get("filename") or "") for p in (e.get("passages") or [])}
+        files.discard("")
+        cited = sorted(seq for seq, evf in drafted if files & evf)
+        out.append({
+            "n": e.get("n"),
+            "passages": len(e.get("passages") or []),
+            "documents": sorted(files),
+            "cited_by_draft_sequence": cited,
+            "state": ("no_passages" if not files
+                      else "used" if cited else "extracted_unused"),
+        })
+    return out
+
+
+def _structure_rules(parts: list[dict], cap: int) -> str:
+    """The order an answer is written in, as every drafting prompt states it.
+
+    Conclusion first is a DRAFTING rule, not a rendering nicety: the drafter
+    writes each part's answer before its reasoning, and the reasoning as a
+    chain — the governing rule, then its application, then the step that
+    follows — so a reader meets the answer and then sees why. These rules
+    sit ABOVE the deployment's playbook, which governs wording and emphasis
+    and cannot lower them. Pure.
+    """
+    n = len(parts)
+    per_part = (
+        f"The question has {n} part(s), listed below. Every claim names the "
+        'part it answers ("part": the part number, or null for the overall '
+        "conclusion). Each part gets at least "
+        f"{answer_structure.MIN_CLAIMS_PER_PART} claims; the whole answer at "
+        f"most {cap}.\n" if n else
+        f"The whole answer holds at most {cap} claims.\n")
+    return (
+        "STRUCTURE (binding, and above any house rules):\n" + per_part
+        + '1. Conclusion first. One claim of kind "conclusion" per part, '
+        "stating that part's answer, and one overall conclusion "
+        '("part": null) as the FIRST claim. Conclusions lead; nothing '
+        "precedes them, and no later claim restates them.\n"
+        "2. Then the reasoning per part, as a chain: the governing rule "
+        "(evidenced) before its application (evidenced), then the step that "
+        "follows from them. Each claim reads on from the previous one in its "
+        "part.\n"
+        "3. A test a source states as two or more conditions is ONE claim of "
+        'kind "test" listing the conditions in the order the source states '
+        "them, each condition pinned to its own passage, saying whether they "
+        "are cumulative.\n"
+        '4. A reasoning step that rests on earlier claims rather than on a '
+        'passage is a claim of kind "inference": it carries no evidence, names '
+        'the claims it follows from in "follows_from", and introduces no '
+        "authority those claims do not carry. A conclusion also names what it "
+        'follows from in "follows_from".\n'
+        '5. A claim of kind "label" states what a source is and holds; those '
+        "close the answer.\n"
+        "6. A source whose SOURCE line shows a `labelled:` note never carries "
+        "a rule on its own: a rule rests on a source with no such note, or is "
+        "stated as what the labelled source says. You never write the label "
+        "out — it is printed for you.\n"
+        "\nWHAT EACH KIND MEANS (the kind says how the claim stands to its "
+        "source, nothing about the subject matter):\n"
+        + _KIND_GLOSS_BLOCK + "\n"
+        + (("PARTS OF THE QUESTION:\n" + answer_structure.parts_block(parts) + "\n")
+           if parts else "")
+    )
+
+
 async def _argument_plan(
-    sinas: _Sinas, run_id: uuid.UUID, question: str, manifest: str
+    sinas: _Sinas, run_id: uuid.UUID, question: str, manifest: str,
+    parts: list[dict] | None = None, cap: int | None = None,
 ) -> tuple[str, list[dict]]:
     """Split drafting: a strong tool-less model designs the ARGUMENT (which
     claims, anchored where) from the briefing manifest alone; the drafter
@@ -2251,22 +3061,35 @@ async def _argument_plan(
     and writing are cheap and large — price each accordingly (17 Aug:
     memory-padding lived entirely in the deciding, never the writing).
     Fail-open: any planning failure returns "" and drafting proceeds
-    exactly as before."""
+    exactly as before.
+
+    Given the question's parts, the plan allocates claims per part — each
+    planned claim names the part it answers — and is capped by the parts'
+    budget rather than a flat number. Planned claims that answer no part
+    are dropped before anything is read for them."""
+    parts = parts or []
+    cap = cap or MAX_CLAIMS
     try:
         reply = await sinas.invoke(
             "sgr/retrieval-planner-agent",
             "Design the argument for answering the question below, using ONLY "
             "the documents listed. Reply ONLY JSON:\n"
-            '{"claims": [{"n": 1, "establishes": "<one sentence: what this '
+            '{"claims": [{"n": 1, "part": <part number, or null for the overall '
+            'conclusion>, "kind": "<' + _KIND_ALTERNATIVES +
+            '>", "establishes": "<one sentence: what this '
             'claim must establish>", "anchors": ["<filename>", ...], '
             '"hint": "<which part of the anchor documents to read, from their '
             'TOCs>"}]}\n'
-            "Rules: 6-12 claims; every claim anchored to at least one listed "
-            "document; never anchor to anything not listed; the FIRST claim "
+            f"Rules: at most {cap} claims; every claim anchored to at least one "
+            "listed document; never anchor to anything not listed; the FIRST claim "
             "must state the overall conclusion, and no later claim restates "
-            "it. If the documents cannot "
+            "it; every claim names the part of the question it answers, and a "
+            "claim that answers no part is not planned. Plan each part's "
+            "conclusion, then per part the governing rule before its "
+            "application. If the documents cannot "
             "support a part of the question, plan NO claim for it — the gap "
             "will be reported honestly downstream.\n"
+            + _structure_rules(parts, cap)
             # The planner designs claims the drafter has to execute, and the
             # drafter is told to skip a group that establishes nothing usable.
             # Planning against rules the drafter is not held to produces claims
@@ -2281,7 +3104,7 @@ async def _argument_plan(
         )
         cleaned = reply.strip().strip("`").removeprefix("json").strip()
         data = json.loads(cleaned[cleaned.find("{"): cleaned.rfind("}") + 1])
-        claims = data.get("claims") or []
+        claims = [c for c in (data.get("claims") or []) if isinstance(c, dict)]
         if not claims:
             # Both halves, like every other exit. Returning the bare string
             # here made the caller's `_plan_text, plan_claims = await ...`
@@ -2291,8 +3114,33 @@ async def _argument_plan(
             # the corpus rather than a crash; that branch was unreachable
             # through this path.
             return "", []
+        # Filter before reading: a planned claim that answers no part of the
+        # question is extraction spent on material the answer cannot use.
+        # Recorded, so a planner that keeps answering questions nobody asked
+        # is visible. With no decomposition nothing is dropped.
+        claims, dropped = answer_structure.filter_plan_to_parts(claims, parts)
+        if dropped:
+            await _tele(run_id, "draft", plan_dropped_no_part=[
+                {"n": c.get("n"), "establishes": str(c.get("establishes") or "")[:200]}
+                for c in dropped])
+        if not claims:
+            return "", []
+        thin = answer_structure.thin_parts(claims, parts)
+        if thin:
+            await _tele(run_id, "draft", plan_parts_thin=[
+                {"index": p["index"], "label": p["label"]} for p in thin])
+        # And the other end of the same fault. A minimum per part was enforced
+        # and a maximum was not, so a plan could satisfy every rule and still
+        # be lopsided — 3/4/11 and 5/4/10 across published runs, the last part
+        # taking half the answer while the others sat at the floor. Reported
+        # here, where the plan is still a plan and the drafter can spend the
+        # budget differently, rather than discovered in the rendered answer.
+        crowded = answer_structure.crowded_parts(claims, parts)
+        if crowded:
+            await _tele(run_id, "draft", plan_parts_crowded=[
+                {"index": p["index"], "label": p["label"]} for p in crowded])
         lines = []
-        for c in claims[:12]:
+        for c in claims[:cap]:
             anchors = ", ".join(str(a) for a in (c.get("anchors") or [])[:4])
             hint = str(c.get("hint") or "").strip()
             lines.append(
@@ -2300,13 +3148,14 @@ async def _argument_plan(
                 f"\n   anchors: {anchors}" + (f"\n   read: {hint}" if hint else "")
             )
         await _tele(run_id, "draft", argument_plan=[
-            {"n": c.get("n"), "establishes": c.get("establishes"),
-             "anchors": c.get("anchors")} for c in claims[:12]])
+            {"n": c.get("n"), "part": c.get("part"), "kind": c.get("kind"),
+             "establishes": c.get("establishes"),
+             "anchors": c.get("anchors")} for c in claims[:cap]])
         return (
             "ARGUMENT PLAN (realize these claims in order; read each claim's "
             "anchor documents, write the claim, bind its evidence; do not add "
             "claims beyond the plan):\n" + "\n".join(lines) + "\n\n"
-        ), claims[:12]
+        ), claims[:cap]
     except CancelledOutcome:
         # Not a planning failure. The catch below turns anything that is not a
         # JSON problem into RuntimeError("argument planning failed"), which
@@ -2326,6 +3175,87 @@ async def _argument_plan(
         # an empty plan turns it into "the corpus supports no claims" — a
         # semantic verdict the run then reports as its outcome.
         raise RuntimeError(f"argument planning failed: {str(exc)[:200]}") from exc
+
+
+def _source_context(rows: list[dict]) -> dict[str, dict]:
+    """Per filename: the line the drafter is shown above the document's
+    passages, and the four facts about the source the engine writes onto
+    every claim citing it. Pure over `_manifest_rows` rows.
+
+    The label is the document class's own, declared by the deployment; the
+    tier, the date behind a currency comparison, the status and the
+    jurisdiction all come from what the rows carry as `roles` — resolved in
+    `_manifest_rows` from the deployment's declarations, so no annotation or
+    property name appears here; the jurisdiction note and the
+    currency note are decided across the whole retrieved set, because both
+    are comparisons — one against what the other sources are, the other
+    against what else in the set is about the same instrument or case.
+
+    Rows that carry no declarations — a caller that built them by hand — get
+    the empty set, which is every rule that needs one switched off rather
+    than any of them guessed.
+
+    `standing` rides here too and is not one of the four: nothing is written
+    onto a claim from it. It is the class's declared rank, and it is in this
+    dict because this is already the one place that turns the retrieved set
+    into per-filename facts, and the standing gate needs exactly that shape.
+    """
+    roles = next((r["roles"] for r in rows if r.get("roles")),
+                 declared_roles.NONE)
+    currency = answer_structure.currency_notes(rows, roles)
+    jurisdiction = answer_structure.jurisdiction_notes(rows, roles)
+    out: dict[str, dict] = {}
+    for r in rows:
+        fn = r.get("filename")
+        if not fn:
+            continue
+        label = str(r.get("class_authority_label") or "").strip() or None
+        out[fn] = {
+            "line": answer_structure.source_context_line(r, label),
+            "label": label,
+            "tier": answer_structure.tier_of(
+                r.get("annotation_values"),
+                roles.tier_annotations if r.get("roles") else None),
+            "jurisdiction": jurisdiction.get(fn),
+            "currency": currency.get(fn),
+            # The class's declared rank, carried through unchanged so the
+            # standing gate compares two integers and never reads a class
+            # name. None where the class declared none, which is inert.
+            "standing": r.get("class_standing"),
+        }
+    return out
+
+
+async def _fix_question_parts(
+    run_id: uuid.UUID, answer_id: uuid.UUID, split: list[dict]
+) -> list[dict]:
+    """The run's decomposition as the structure uses it: [{index, label,
+    text}], written on the answer row and under `draft` in telemetry.
+
+    The split itself is `_question_parts`: one call on the question alone,
+    stable across cycles, and the gate judges the same list. The heading is
+    the splitter's; this only numbers the parts and records them where the
+    drafter, the renderer and the API read them. A resumed run reads what the
+    first one wrote.
+    """
+    from app.models import Answer
+
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = ((run.telemetry or {}).get("draft") or {}).get("question_parts")
+    if isinstance(stored, list) and stored:
+        return [p for p in stored if isinstance(p, dict)]
+    parts = answer_structure.parse_parts(
+        {"parts": [p for p in (_split_part(x) for x in split) if p]})
+    await _tele(run_id, "draft", question_parts=parts,
+                claim_cap=answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS)
+    if parts:
+        async with AsyncSessionLocal() as session:
+            row = await session.get(Answer, answer_id)
+            if row is not None:
+                row.question_parts = parts
+                await session.commit()
+    return parts
 
 
 async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
@@ -2371,7 +3301,54 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # annotations are interpretation produced at ingestion and verified
     # against nothing. Only extracted, verbatim-checked passages ground an
     # answer.
-    _plan_text, plan_claims = await _argument_plan(sinas, run_id, question, manifest)
+    # Observed here rather than at the gate, and for two reasons. The gate's
+    # verdict path is a split then a judgment, and inserting a third call into
+    # it makes the observation look like part of the verdict, which it is not.
+    # And this is the point the observation is actually about: the question
+    # and what retrieval returned, before anything is drafted. Failures are
+    # swallowed except a cancel, which is control flow and must reach the
+    # runner.
+    # Bounded, because it is optional and the general policy is not. Two
+    # invokes at three attempts each, a 600s client timeout and the 5s and 15s
+    # retry waits, is a worst case near an hour, against a median published
+    # run of 559s and a p90 of 1103s over the 200 stored on 10 September 2026.
+    # Optional work that can outlast the run it observes is not optional.
+    #
+    # The split is the first of the two calls and the gate needs it later
+    # anyway, so a timeout here costs the cache, not the split: the gate
+    # recomputes it at the point where it is required rather than best-effort.
+    #
+    # The budget is a first cut. `uncovered_themes_seconds` is written on
+    # every run so the next reading of it comes from measurement rather than
+    # from this comment.
+    observed_from = time.monotonic()
+    # The split is needed before planning now, not only by the observation:
+    # the planner allocates claims to the parts and the drafter files every
+    # claim under one. So it is made outside the observation's budget, and
+    # only the theme observation is bounded.
+    parts_now = await _question_parts(sinas, run_id, question)
+    try:
+        async with asyncio.timeout(_OBSERVATION_BUDGET_S):
+            await _uncovered_themes(sinas, run_id, question, parts_now, manifest)
+    except CancelledOutcome:
+        raise
+    except TimeoutError:
+        _log.warning("uncovered-theme observation exceeded %.0fs for run %s",
+                     _OBSERVATION_BUDGET_S, run_id)
+        await _tele(run_id, "validate", uncovered_themes_not_observed="over budget")
+    except Exception:  # noqa: BLE001
+        _log.warning("uncovered-theme observation failed for run %s", run_id)
+        await _tele(run_id, "validate", uncovered_themes_not_observed="failed")
+    await _tele(run_id, "validate",
+                uncovered_themes_seconds=round(time.monotonic() - observed_from, 1))
+
+    # The question's parts, decided before anything is planned: the planner
+    # allocates claims to them, the drafter files every claim under one, and
+    # the gate judges each. The budget follows from the count.
+    parts = await _fix_question_parts(run_id, answer_id, parts_now)
+    cap = answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS
+    _plan_text, plan_claims = await _argument_plan(
+        sinas, run_id, question, manifest, parts=parts, cap=cap)
     if not plan_claims:
         # the planner ran and produced nothing usable: that IS a judgment
         # about the sources, unlike a transport failure, which raises above
@@ -2382,7 +3359,8 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # matches it. The planner picks from summaries and tops out at the few it
     # names, so an authority that is retrieved but not summarised in those
     # terms is never opened.
-    corpus_rows = (await _manifest_rows(parent_id))[:60]
+    all_rows = await _manifest_rows(parent_id)
+    corpus_rows = all_rows[:60]
     for c in plan_claims:
         named = [str(a) for a in (c.get("anchors") or [])]
         extra = [d for d in _relevant_docs(str(c.get("establishes") or ""),
@@ -2392,7 +3370,32 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
 
     await _tele(run_id, "draft", started=_iso())
     extracts = await _extract_passages(sinas, plan_claims, run_id)
-    n = await _draft_from_extracts(run_id, answer_id, sinas, question, extracts)
+    # What each document IS, for the drafter to label sources by: never a
+    # summary, never a holding. The currency notes are decided here from the
+    # retrieved set — a superseded status, a later ruling in the same case —
+    # and set on the claims whether or not the drafter repeats them.
+    sources = _source_context(all_rows)
+    # One conversation for the whole answer, opened here and continued by
+    # validation. A resumed run finds its chat id on the run row and rejoins
+    # rather than starting a second conversation about the same answer.
+    chat = await _drafting_chat(run_id, sinas)
+    try:
+        n = await _draft_from_extracts(run_id, answer_id, chat, question,
+                                       extracts, cap=cap, parts=parts,
+                                       sources=sources)
+    except DrafterSilent as exc:
+        # The run's cause is the drafter's, not the corpus's. "no_progress"
+        # with "no passage supported a claim" is what this used to say about
+        # a model that had returned an empty reply, and reading the record
+        # afterwards it was indistinguishable from a genuinely thin corpus.
+        _log.warning("run %s: %s", run_id, exc)
+        raise PartialOutcome(exc.cause, exc.explanation) from exc
+    finally:
+        # In a `finally` because the chat exists the moment the brief is sent,
+        # and a run that dies after that has still spent money in it. An
+        # unrecorded chat id is a conversation nobody can resume, read or
+        # bill.
+        await _save_drafting_chat(run_id, chat)
     if not n:
         raise PartialOutcome(
             "no_progress", "no passage supported a claim well enough to draft")
@@ -2542,6 +3545,9 @@ async def _record_gate_cycle(
     coverage: dict | None = None,
     naming_mismatches: list[dict] | None = None,
     checks: dict | None = None,
+    reread: dict | None = None,
+    standing_counts: dict | None = None,
+    objection_ledger: list[dict] | None = None,
     no_claims: bool = False,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
@@ -2613,6 +3619,20 @@ async def _record_gate_cycle(
         # a check judging 200 and flagging 3 every run reads the same whether
         # those 3 are the right 3 or not.
         "checks": checks or {},
+        # Always written, even as zeros. A key a cycle does not set is
+        # read as belonging to the next one, which is the defect this
+        # function exists to stop.
+        "reread": reread or {"looked": 0, "found": 0},
+        # What the standing rule did this cycle: how many rule claims rested
+        # lower than the retrieved set allowed, how many of those gaps became
+        # a request, how many higher-standing documents were opened for a
+        # proposition and how many of those reads found one, and how many
+        # arguments the answer itself closed. Always written, zeros included,
+        # for the reason every other key here is: a cycle that sets no key
+        # inherits the last one's, and a rule that fired twenty cycles ago
+        # would read as firing now.
+        "standing": standing_counts or {"gaps": 0, "raised": 0, "looked": 0,
+                                        "found": 0, "resolved": 0},
         # Beside the parts it summarises, not only as a flat key. The parts in
         # this dict already carry the per-part audit, so leaving the summary
         # flat would put a last-write count next to a per-cycle history and
@@ -2622,6 +3642,13 @@ async def _record_gate_cycle(
         # answer-scoped readings of this cycle, and a flat key would be a
         # last-write sitting next to a history.
         "closing": closing or {},
+        # What was argued and how far each argument had got when this cycle
+        # ended: id, what was asked, how important the gate called it, the
+        # drafter's reason, every ruling. Per cycle rather than flat, because
+        # the whole value of the ledger is being able to see a point move —
+        # raised, refused, accepted — and a last-write would show only where
+        # it stopped.
+        "objections": objection_ledger or [],
         # The cycle that judged nothing because nothing was left to judge.
         # Written every time, false included: a missing key would say the run
         # predates the field, and an absent cycle would say the gate never
@@ -2689,8 +3716,44 @@ def _gate_json(reply: str) -> dict:
     if not isinstance(data, dict):
         raise ValueError("gate verdict was not an object")
     return data
-async def _split_question(sinas: _Sinas, question: str) -> list[str]:
+
+
+def _split_part(x: Any) -> dict | None:
+    """One element of the splitter's reply as `{label, text}`, or None when it
+    is not a part at all.
+
+    `text` is the thing the question asks, in full; `label` is the heading it
+    is printed under. A bare string is a part that came back without a
+    heading — the shape the splitter used to answer in, and the one a model
+    falls back to — and its heading is derived from its text. Pure.
+    """
+    if isinstance(x, str):
+        text, label = x.strip(), ""
+    elif isinstance(x, dict):
+        text = str(x.get("text") or "").strip()
+        label = str(x.get("label") or "").strip()
+    else:
+        return None
+    if not text:
+        return None
+    return {"label": answer_structure.part_heading(label, text), "text": text}
+
+
+def _part_text(part: Any) -> str:
+    """What a part asks, from either shape. A run stored before the splitter
+    wrote headings holds the text alone."""
+    return str((part or {}).get("text") if isinstance(part, dict) else part or "")
+
+
+async def _split_question(sinas: _Sinas, question: str) -> list[dict]:
     """The distinct things the question asks, or [] if that cannot be read.
+
+    Each part comes back as `{label, text}`: the full thing asked, and a
+    short heading for it. The heading is asked of the splitter rather than
+    derived here because only the splitter has read the question — the
+    engine's own attempt was the part's first ten words and an ellipsis,
+    which printed as a sentence cut off mid-phrase over every section of
+    every published answer.
 
     Its own call, on the question alone. The gate used to do this inside its
     verdict, where the question is a fraction of a percent of a prompt whose
@@ -2719,7 +3782,13 @@ async def _split_question(sinas: _Sinas, question: str) -> list[str]:
         "what is asked, not on how the sentence is punctuated: one sentence "
         "can ask two things, and two sentences can ask one. Do not answer "
         "any of them, and do not add anything the question does not ask."
-        '\n\nReply ONLY JSON: {"parts": ["<one thing the question asks>", ...]}'
+        "\n\nGive each part a heading as well as its text. The text is the "
+        "whole thing the question asks, in one sentence. The heading is what "
+        "a reader scans a section by: a phrase of three to seven words, no "
+        "trailing punctuation, and never the text cut short — write the "
+        "subject of the part, not its opening words."
+        '\n\nReply ONLY JSON: {"parts": [{"label": "<the heading>", '
+        '"text": "<one thing the question asks, in full>"}, ...]}'
     )
     reply = await sinas.invoke("sgr/answer-gate-agent", prompt)
     for attempt in (0, 1):
@@ -2731,15 +3800,14 @@ async def _split_question(sinas: _Sinas, question: str) -> list[str]:
             raw = json.loads(cleaned[start:end + 1]).get("parts")
             if not isinstance(raw, list) or not raw:
                 raise ValueError("no parts in reply")
-            # Only strings. str() on a dict is a non-empty string, so without
-            # this an object in the list becomes a question part that binds
-            # every later cycle. Dropping it silently would be worse: a lost
-            # part is the defect this whole change exists to stop, so an
-            # element that is not a part makes the reply unusable and the
-            # repair below runs.
-            got = [x.strip() for x in raw if isinstance(x, str) and x.strip()]
+            # An element that is not a part — an object with no text, a
+            # number, a null — makes the whole reply unusable rather than
+            # being dropped. Dropping it silently would be worse: a lost part
+            # is the defect this whole change exists to stop, so the repair
+            # below runs instead.
+            got = [p for p in (_split_part(x) for x in raw) if p]
             if len(got) != len(raw):
-                raise ValueError("a part was not a non-empty string")
+                raise ValueError("a part carried no text")
             return got[:8]
         except Exception as exc:  # noqa: BLE001
             if attempt:
@@ -2755,7 +3823,7 @@ async def _split_question(sinas: _Sinas, question: str) -> list[str]:
 
 async def _question_parts(
     sinas: _Sinas, run_id: uuid.UUID, question: str
-) -> list[str]:
+) -> list[dict]:
     """The run's decomposition, split once and reused by every later cycle.
 
     Computed on the first gate cycle rather than as a pipeline stage: all
@@ -2763,16 +3831,110 @@ async def _question_parts(
     resumed run reads what the first one wrote. State lives in telemetry,
     the obligation ledger's precedent: no migration, survives a restart,
     one writer per run.
+
+    A run recorded before the splitter wrote headings stored its parts as
+    plain strings; they are read back as parts with a derived heading, so a
+    resumed run is not held to a shape its record predates.
     """
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         stored = ((run.telemetry or {}).get("validate") or {}).get("question_parts")
     if isinstance(stored, list) and stored:
-        return [str(x) for x in stored]
+        return [p for p in (_split_part(x) for x in stored) if p]
     parts = await _split_question(sinas, question)
     if parts:
         await _tele(run_id, "validate", question_parts=parts)
     return parts
+
+
+def _themes_from_reply(reply: str) -> list[str]:
+    """Themes out of the observer's reply. Strings only, at most five.
+
+    Separate and pure so the parsing can be tested without a model, and so a
+    malformed reply produces nothing rather than a theme that is really an
+    error message. Nothing here can return a question part: the caller keeps
+    the two lists apart and only one of them is ever checked.
+    """
+    try:
+        cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
+        start, end = cleaned.find("{"), cleaned.rfind("}")
+        if start < 0 or end <= start:
+            return []
+        raw = json.loads(cleaned[start:end + 1]).get("themes")
+        if not isinstance(raw, list):
+            return []
+        return [x.strip() for x in raw if isinstance(x, str) and x.strip()][:5]
+    except Exception:  # noqa: BLE001
+        return []
+
+
+async def _uncovered_themes(
+    sinas: _Sinas, run_id: uuid.UUID, question: str,
+    parts: list[dict], working_set: str,
+) -> list[str]:
+    """Themes the retrieved material carries that no part of the question asks.
+
+    An observation, never a part. It is not checked, cannot be marked covered
+    and cannot hold an answer back, and the two lists are kept apart at every
+    point so that nothing downstream can mistake one for the other.
+
+    Why it is not simply a better split. The splitter reads the question alone,
+    which is what makes its output stable across the cycles of a run: before
+    #105 the split moved with the draft, a part stopped being listed and so
+    stopped being checked, and once a fifth part appeared that the question
+    never asked and the draft happened to contain. Reading the working set
+    would recover the limbs a lawyer supplies from knowing the area, on the
+    questions whose wording does not name them, and would put the other
+    questions' correct splits at the mercy of what retrieval returned. On the
+    measured set that is one question helped against thirty-one put at risk,
+    and inventing a part from the material is the exact defect #105 removed.
+
+    So the material is read and the split is not touched. Where a theme is
+    present and unasked, that is worth knowing, for a planner deciding what to
+    cover and for a reader asking what protects them on a question whose limbs
+    are not in its wording. What it does not do is make the answer accountable
+    for it: a limb the system notices is not a limb it is held to.
+
+    Computed once and cached beside the parts, for the same reason: the
+    working set is rebuilt each cycle, and an observation that changed between
+    cycles would be as unreadable as a split that did.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        stored = ((run.telemetry or {}).get("validate") or {}).get("uncovered_themes")
+    if isinstance(stored, list):
+        return [str(x) for x in stored]
+    if not parts or not working_set:
+        # Recorded, not just returned. This runs once, before drafting, and
+        # is not retried at the gate: the observation is about the question
+        # and what retrieval returned, and after drafting it would be a
+        # different observation. So when the split was unavailable here, the
+        # key never appears at all, and absent reads the same as "this run
+        # predates the field" and as "the observation ran and found nothing".
+        # Three different facts. The reason says which.
+        await _tele(run_id, "validate", uncovered_themes_not_observed=(
+            "no question parts" if not parts else "no working set"))
+        return []
+    reply = await sinas.invoke(
+        "sgr/answer-gate-agent",
+        "QUESTION:\n" + question
+        + "\n\nTHE THINGS IT ASKS, as already read:\n"
+        + "\n".join(f"- {_part_text(p)}" for p in parts)
+        + "\n\nRETRIEVED MATERIAL:\n" + working_set[:40000]
+        + "\n\nName any subject the retrieved material covers substantially "
+        "that none of the things above asks about. A lawyer reading this "
+        "question would expect certain routes or doctrines to be in scope "
+        "even where the wording does not name them; if the material shows "
+        "one and the list above does not reach it, name it. Do not restate "
+        "anything already listed, do not name a subject the material only "
+        "mentions in passing, and return an empty list if there is none, "
+        "which is the ordinary case.\n\n"
+        'Reply ONLY JSON: {"themes": ["<subject the material covers and the '
+        'question does not ask>", ...]}'
+    )
+    themes = _themes_from_reply(reply)
+    await _tele(run_id, "validate", uncovered_themes=themes)
+    return themes
 
 
 def _seq_list(raw) -> list[int]:
@@ -2846,6 +4008,411 @@ def _audit_coverage(named: list[int], claim_seqs: set, with_evidence: set,
     }
 
 
+
+async def _ask_document(sinas: _Sinas, prompt: str, filename: str) -> dict | None:
+    """One whole-document look, as a hit or nothing.
+
+    The half of a re-read that is not policy: make the call, read the reply,
+    and refuse to call a hit anything that did not come back with a verbatim
+    quote. Shared by the two callers of `services.reread` so that the
+    condition for "found" is written once — a second copy of this is a second
+    place for `found: true` with an empty quote to become evidence.
+
+    It asks the PASSAGE EXTRACTOR, not the gate. This looks for a passage; it
+    does not judge one, and what comes back is checked against the document
+    below and dropped unless the quote is verbatim — so the tier decides
+    recall and cost, never whether a fabrication gets through. Extraction is
+    already that agent's whole job, and its instruction is the one this needs:
+    quote exactly, never paraphrase.
+
+    It reached for the gate agent originally because the gate's reply shape
+    suited it, and the whole document rides in the prompt. Measured over one
+    night: 19 of these calls averaged 173,000 tokens and cost $62, against $35
+    for the 75 calls that actually asked the gate to judge an answer. The
+    collection holds documents up to 5.5MB; asking the deployment's dearest
+    model to read one end to end was not a judgement anyone made.
+    """
+    reply = await sinas.invoke("sgr/passage-extractor-agent", prompt)
+    try:
+        cleaned = (reply or "").strip().strip("`")
+        cleaned = cleaned.removeprefix("json").strip()
+        a, b = cleaned.find("{"), cleaned.rfind("}")
+        data = json.loads(cleaned[a:b + 1]) if a >= 0 < b else {}
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if not (data.get("found") and str(data.get("quote") or "").strip()):
+        return None
+    return {"filename": filename, "line_from": data.get("line_from"),
+            "line_to": data.get("line_to"), "quote": data.get("quote")}
+
+
+async def _reread_cited_for_parts(
+    sinas: _Sinas, answer_id: uuid.UUID, parts: list[dict]
+) -> tuple[list[dict], int, int]:
+    """Re-read every cited source, whole, for each part the gate called
+    uncovered. Returns the parts, how many were answered by the re-read, and
+    how many were looked for.
+
+    Best-effort in the same sense as the naming checks: this can only ever
+    turn an uncovered part into a covered one on verbatim evidence, so a
+    failure costs a finding rather than inventing one, and the run must not
+    fail because a second look could not be taken.
+    """
+    from app.services.reread import (
+        Cited, apply_reread, needs_reread, reread_prompt)
+
+    want = [i for i, p in enumerate(parts) if not p.get("covered")]
+    if not want:
+        return parts, 0, 0
+    try:
+        async with AsyncSessionLocal() as session:
+            rows = (await session.execute(
+                select(Document.filename, DocumentVersion.content_md)
+                .join(ClaimEvidence, ClaimEvidence.document_id == Document.id)
+                .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+                .join(DocumentVersion,
+                      DocumentVersion.id == Document.current_version_id)
+                .where(AnswerClaim.answer_id == answer_id)
+                .distinct())).all()
+        sources = [Cited(filename=str(f), text=str(c or "")) for f, c in rows]
+        if not needs_reread(parts, sources):
+            return parts, 0, 0
+
+        found: dict[int, dict | None] = {}
+        for i in want:
+            hit = None
+            for src in sources:
+                if not src.text or len(src.text) < 40:
+                    continue
+                hit = await _ask_document(
+                    sinas, reread_prompt(parts[i], src), src.filename)
+                if hit:
+                    break
+            found[i] = hit
+        parts, hits = apply_reread(parts, found,
+                                   cited={s.filename for s in sources})
+        return parts, hits, len(want)
+    except CancelledOutcome:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.exception("re-read before unanswered failed for answer %s",
+                       answer_id)
+        return parts, 0, 0
+
+
+#: Standing gaps one cycle argues about. Each costs a whole-document read per
+#: higher-standing document named, and a round that hands the drafter eight
+#: arguments gets eight shallow answers. Three is what a revision round can
+#: actually act on, and a gap not argued this cycle is argued the next one:
+#: the gaps are recomputed from the claims as they then stand.
+MAX_STANDING_GAPS = 3
+#: Higher-standing documents opened for one gap before the look gives up.
+#: The list is best-standing first, so this cuts from the bottom.
+MAX_STANDING_LOOKS = 3
+
+
+async def _standing_objections(
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
+    mrows: list[dict], claims: list[dict], cycle_no: int,
+) -> tuple[list[str], list[str], dict[str, int]]:
+    """Argue with the drafter about claims resting lower than the set allows.
+
+    Returns `(issues, points, counts)`. Each issue is a request the drafter
+    must act on or refuse with a reason; each point is a proposition the
+    reviser is given passages for, anchored on the document that should carry
+    it. Deterministic in what it FINDS — two integers compared — and a model
+    call only where one is unavoidable: reading a document for a proposition.
+
+    THE ORDER MATTERS AND IS THE WHOLE DESIGN. The gap is found first, the
+    higher-standing documents are read SECOND, and only then is the objection
+    put. The drafter sees passages extracted for its own planned claims, so a
+    claim resting on a lower-standing source may rest there because the
+    higher-standing one was never opened for that proposition. Putting the
+    objection before the read would produce a refusal from a drafter that had
+    nothing to check it against, and a refusal made in ignorance settles a
+    point that was never argued.
+
+    Best-effort, like the naming checks around it: this can only ever add a
+    finding, so a failure costs the finding and never the run.
+    """
+    issues: list[str] = []
+    points: list[str] = []
+    counts = {"gaps": 0, "raised": 0, "looked": 0, "found": 0, "resolved": 0}
+    try:
+        facts = _source_context(mrows)
+        by_file = {fn: f.get("standing") for fn, f in facts.items()}
+        gaps = standing.gaps(claims, by_file)
+        counts["gaps"] = len(gaps)
+        # A point the answer has since fixed is settled by the answer. The
+        # gaps are recomputed every cycle from the claims as they now stand,
+        # so a claim re-cited, revised into another kind or dropped simply
+        # stops appearing — and its argument ends, rather than being asked
+        # about a claim that no longer says what was objected to.
+        ledger = [e for e in await objections.ledger(run_id)
+                  if e.get("kind") == standing.KIND]
+        # Only the arguments still running. An accepted refusal and a stall
+        # are settled by the review's ruling, and marking either resolved
+        # here would rewrite a point the drafter won as a point the answer
+        # fixed — which is precisely the count this rule exists to measure.
+        done = standing.closed(
+            {str(e.get("subject") or "") for e in ledger
+             if e.get("state") in (objections.OPEN, objections.ANSWERED)},
+            gaps)
+        if done:
+            await objections.resolve(run_id, done, kind=standing.KIND)
+            counts["resolved"] = len(done)
+        asked_before = {str(e.get("subject") or ""): e for e in ledger}
+        settled = await objections.settled_subjects(run_id)
+        fresh = [g for g in gaps if g.subject not in settled]
+        for gap in fresh[:MAX_STANDING_GAPS]:
+            prior = asked_before.get(gap.subject)
+            if prior is not None:
+                # Already argued this run and still open. The documents were
+                # read when it was first put; reading them again every cycle
+                # would spend a call per document per cycle to reach the same
+                # answer, and the drafter has not been shown anything new.
+                asked = str(prior.get("asked") or "")
+                hit = None
+            else:
+                hit = await _look_higher(sinas, gap, counts)
+                asked = standing.objection(gap, hit)
+            oid = await objections.raise_objection(
+                run_id, kind=standing.KIND, subject=gap.subject, asked=asked,
+                # Supporting, always. There is no hard fail here: a claim
+                # resting low is a claim a reader must be told about, not a
+                # part of the question that could not be answered, and only a
+                # justified `essential` may reach a run's verdict.
+                importance=objections.SUPPORTING, cycle=cycle_no)
+            if oid is None:
+                continue
+            counts["raised"] += 1
+            issues.append(
+                f"Standing: {asked} A general proposition rests on the "
+                "highest-standing source RETRIEVED FOR THIS ANSWER that "
+                "carries it. Revise the claim to cite the higher-standing "
+                "source for this proposition — the lower-standing one may "
+                "stay beside it where it adds something of its own — or "
+                f'REFUSE: reply with {{"objection": "{oid}", "rationale": '
+                '"<why no higher-standing retrieved source carries this '
+                'proposition>"}, which is an answer and will be ruled on '
+                "rather than ignored. A refusal commits you to one more "
+                "thing: the claim must then say, in its own sentence and in "
+                "your words, what the proposition rests on and what that "
+                "means for the weight a reader should give it. Nothing is "
+                "added to your sentence for you."
+            )
+            if hit:
+                points.append(standing.point(gap))
+    except CancelledOutcome:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.exception("standing check failed for answer %s", answer_id)
+    return issues, points, counts
+
+
+GATE_AGENT = "sgr/answer-gate-agent"
+
+
+async def _gate_turn(sinas: _Sinas, run_id: uuid.UUID,
+                     brief: str, turn: str) -> str:
+    """One cycle of judging, as a turn in the review's own conversation.
+
+    Judging used to be a fresh call per cycle, and each call carried the
+    question, its parts, the whole retrieved document set and every rule for
+    judging it. Measured over one night: 40,000 tokens a call, 39,266 of them
+    written to the prompt cache and 732 read back. Sinas' Anthropic provider
+    sets a rolling cache breakpoint on the last message precisely so a
+    sequence of calls reuses the previous one's prefix; a freshly assembled
+    body each time gives it nothing to roll onto. The drafting conversation
+    was built for this exact defect — this is the review's half of it.
+
+    Turn one is the brief and is sent once. Every later turn carries the draft
+    and nothing else. Two things follow, and the second is not about money:
+    the working set is read from cache rather than rewritten, and the gate can
+    SEE what it already ruled, where before its own rulings had to be read
+    back to it every cycle because it had no memory of making them.
+
+    A conversation that cannot be opened falls back to a single call carrying
+    both halves — the old behaviour exactly. Judging is the stage that decides
+    whether an answer may publish, and it does not get to fail because a chat
+    could not be created.
+    """
+    chat = drafting_chat.DraftingChat(
+        client=sinas, agent=GATE_AGENT, title="[query-run] gate")
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        chat_id = (run.gate_chat_id or None) if run else None
+    try:
+        await chat.start(brief, chat_id=chat_id)
+        if chat.chat_id and chat.chat_id != chat_id:
+            async with AsyncSessionLocal() as session:
+                run = await session.get(QueryRun, run_id)
+                if run is not None:
+                    run.gate_chat_id = (chat.chat_id or "")[:64] or None
+                    await session.commit()
+        return await chat.ask(turn)
+    except CancelledOutcome:
+        raise
+    except Exception:  # noqa: BLE001
+        _log.warning("gate conversation unavailable for run %s; "
+                     "judging this cycle in one call", run_id, exc_info=True)
+        return await sinas.invoke(GATE_AGENT, brief + "\n\n" + turn)
+
+
+#: How many whole-document reads one cycle spends looking deeper into sources
+#: the answer already cites. Bounded like the standing check beside it: the
+#: reads are cheap on the extraction tier and they are not free in wall clock,
+#: and a cycle that opened everything would be a second retrieval pass.
+MAX_DEEPER_LOOKS = 4
+
+
+async def _look_deeper(
+    sinas: _Sinas, cited: list[str], parts: list[dict]
+) -> list[dict]:
+    """Ask the highest-standing CITED documents what else they carry.
+
+    The expert review's findings are rarely that an answer is wrong. They are
+    that it is thin: a rule the cited judgment states and the answer does not.
+    Measured on one of them — T-125/03 is retrieved, cited three times by the
+    answer, and paragraph 123 of it states the rule the reviewer asked for.
+    No claim says it, and nothing in the run ever asked that document about
+    that part of the question.
+
+    Nothing was broken. Extraction reads per PLANNED claim from that claim's
+    own anchors, and the plan is written from the question before any document
+    has been read. A document opened for one point is never opened for
+    another, and the gate cannot help: it names sources the answer did NOT
+    use, and this document was used.
+
+    Bounded twice over. Only classes the deployment ranks highest are read —
+    that is where a holding lives, and a commentary chapter re-read for a
+    second point yields more commentary. And only `MAX_DEEPER_LOOKS` reads
+    happen per cycle, parts in order, so the cost is a handful of extraction
+    calls rather than a second pass over the corpus.
+    """
+    from app.services.reread import Cited, deeper_prompt
+
+    asks = [str(p.get("asks") or p.get("text") or "").strip() for p in parts]
+    asks = [a for a in asks if a]
+    if not cited or not asks:
+        return []
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename, DocumentVersion.content_md,
+                   DocumentClass.standing)
+            .join(DocumentVersion,
+                  DocumentVersion.id == Document.current_version_id)
+            .outerjoin(DocumentClass,
+                       DocumentClass.id == Document.document_class_id)
+            .where(Document.filename.in_(list(cited))))).all()
+
+    ranked = sorted(
+        ((str(f), str(c or ""), s) for f, c, s in rows if len(str(c or "")) >= 40),
+        key=lambda r: (r[2] if r[2] is not None else 10_000, r[0]))
+    if not ranked:
+        return []
+    # Only the top declared rank. A deployment that declares no standing gets
+    # nothing here rather than an arbitrary pick — the same silence the other
+    # declared checks keep.
+    best = ranked[0][2]
+    if best is None:
+        return []
+    top = [r for r in ranked if r[2] == best]
+
+    out: list[dict] = []
+    for ask in asks:
+        for filename, body, _ in top:
+            if len(out) >= MAX_DEEPER_LOOKS:
+                return out
+            hit = await _ask_document(
+                sinas, deeper_prompt(ask, Cited(filename=filename, text=body)),
+                filename)
+            if hit and str(hit.get("quote") or "").strip():
+                out.append({"doc": filename, "part": ask, "hit": hit})
+    return out
+
+
+async def _look_owed(
+    sinas: _Sinas, owed: list[dict]
+) -> dict[str, dict]:
+    """Open each document the review named as unused, for the point it owes.
+
+    The same whole-document read the standing check makes, pointed at the
+    third case that needs it. A source is put to the drafter as owed — cite
+    it, waive it after reading its passages, or refuse it — and until now
+    nothing opened it. Extraction reads per planned claim from that claim's
+    anchors, so a document the plan never pointed at has no passages, and a
+    drafter with nothing verbatim to quote can only refuse however apt the
+    document is.
+
+    That is the mechanical form of a finding the expert review made six times
+    over, naming the missing material by its rank in the retrieved set: 11,
+    26, 31, 33, 41, 51. Retrieved every time; read none of them.
+
+    Returns {filename: hit} for the documents that yielded a passage. A
+    document that yields nothing is not an error and not a hit — the drafter
+    is then refusing on an informed basis, which is the whole point.
+    """
+    from app.services.reread import Cited, owed_prompt
+
+    if not owed:
+        return {}
+    names = [u["doc"] for u in owed]
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename, DocumentVersion.content_md)
+            .join(DocumentVersion,
+                  DocumentVersion.id == Document.current_version_id)
+            .where(Document.filename.in_(names)))).all()
+    text_of = {str(f): str(c or "") for f, c in rows}
+    notes = {u["doc"]: str(u.get("note") or "") for u in owed}
+    found: dict[str, dict] = {}
+    for name in names:
+        body = text_of.get(name, "")
+        if len(body) < 40:
+            continue
+        hit = await _ask_document(
+            sinas, owed_prompt(notes.get(name, ""),
+                               Cited(filename=name, text=body)), name)
+        if hit:
+            found[name] = hit
+    return found
+
+
+async def _look_higher(sinas: _Sinas, gap, counts: dict[str, int]) -> dict | None:
+    """Read the higher-standing documents for this claim's proposition.
+
+    The same whole-document read the uncovered-part re-read makes, pointed at
+    the documents the answer did NOT cite — which is the one boundary that
+    differs, and differs for a reason: there, reaching outside the citations
+    would be the gate answering the question instead of checking it; here,
+    the documents are the retrieved set's own and the entire finding is that
+    the drafter was never shown them.
+    """
+    from app.services.reread import Cited, standing_prompt
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Document.filename, DocumentVersion.content_md)
+            .join(DocumentVersion,
+                  DocumentVersion.id == Document.current_version_id)
+            .where(Document.filename.in_(list(gap.better))))).all()
+    order = {fn: i for i, fn in enumerate(gap.better)}
+    sources = sorted((Cited(filename=str(f), text=str(c or ""))
+                      for f, c in rows), key=lambda s: order.get(s.filename, 99))
+    for src in sources[:MAX_STANDING_LOOKS]:
+        if len(src.text) < 40:
+            continue
+        counts["looked"] += 1
+        hit = await _ask_document(
+            sinas, standing_prompt(gap.text, src), src.filename)
+        if hit:
+            counts["found"] += 1
+            return hit
+    return None
+
+
 async def _gate_answer(
     sinas: _Sinas, run_question: str, answer_id: uuid.UUID, run_id: uuid.UUID
 ) -> tuple[bool, str, list[str], list[str], list[str]]:
@@ -2855,19 +4422,22 @@ async def _gate_answer(
     question.
 
     Returns (publishable, missing, issues, correctness, points, cause).
-    `cause` is "coverage", "accounting" or "" — what held the answer back, so a
-    partial is named by the thing that caused it.
+    `cause` is "coverage", "holistic" or "" — what held the answer back, so a
+    partial is named by the thing that caused it. There is no `accounting`
+    cause: material the answer did not incorporate never names a partial.
     `publishable` and `correctness` are the hard gate; `issues` are
     best-effort remediation targets that must never block publication on
     their own; `points` are the things revision must be given passages for —
     one entry per part of the question the claims do not answer, then each
     stronger source the gate named.
 
-    Two things clear `publishable`: every part of the question covered, and no
-    source the review itself named left neither cited nor waived. The second is
-    `obligations.actionable`, not `obligations.unaccounted` — the difference is
-    a system waiver, which retires an obligation without accounting for it and
-    so can never be discharged by another cycle.
+    One thing clears `publishable`: every part of the question covered, with
+    the judge's own verdict behind it. A source the review named and the
+    answer did not use holds `publishable` no longer — it buys revision
+    cycles through `issues`, and what survives the cycles is a note on the
+    answer, or, for an `essential` request pressed to a standstill, a
+    reservation the reader sees and a contested outcome. `partial` keeps
+    meaning a part could not be answered.
 
     Everything the gate finds is returned. It used to leave some of it in a
     module-level dict, which a later edit deleted the declaration of — so
@@ -2934,11 +4504,37 @@ async def _gate_answer(
             .join(ClaimEvidence, ClaimEvidence.claim_id == AnswerClaim.id)
             .where(AnswerClaim.answer_id == answer_id)
         )).scalars().all())
+        # Which documents each claim actually rests on. `cited` above is one
+        # flat set for the whole answer and cannot answer the question the
+        # standing rule asks — whether THIS claim rests lower than the set
+        # allows — for which the citations have to be read per claim.
+        cites_by_claim: dict[uuid.UUID, list[str]] = {}
+        for cid, fname in (await session.execute(
+            select(ClaimEvidence.claim_id, Document.filename)
+            .join(Document, Document.id == ClaimEvidence.document_id)
+            .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+            .where(AnswerClaim.answer_id == answer_id)
+        )).all():
+            if fname not in cites_by_claim.setdefault(cid, []):
+                cites_by_claim[cid].append(str(fname))
         parent_result_id = (
             await session.execute(
                 select(QueryRun.parent_result_id).where(QueryRun.answer_id == answer_id)
             )
         ).scalar_one_or_none()
+        # The rows with their structure, for the checks arithmetic can make:
+        # does every part have its conclusion, and does every inference rest
+        # on a supported claim. Read as objects so an older answer, whose
+        # rows carry no structure, is recognised and left to the judge.
+        from app.models import Answer
+
+        structured = (await session.execute(
+            select(AnswerClaim).where(AnswerClaim.answer_id == answer_id)
+            .order_by(AnswerClaim.sequence))).scalars().all()
+        answer_row = await session.get(Answer, answer_id)
+        question_parts = [
+            p for p in (getattr(answer_row, "question_parts", None) or [])
+            if isinstance(p, dict)]
     # The gate judges which sources the answer should have used, which is
     # planning-shaped work: it gets the planner's manifest line — class and
     # declared annotations included — not a bare filename and summary. It
@@ -2947,9 +4543,13 @@ async def _gate_answer(
     mrows = await _manifest_rows(parent_result_id) if parent_result_id else []
     claims = "\n".join(f"{seq}. {text}" for seq, text, _ in rows)
     claims_by_seq = {seq: cid for seq, _, cid in rows}
+    # WITHOUT the CITED marks. The marks change every cycle and the set does
+    # not, and this block is 90% of what is sent: marking it inline made the
+    # largest stable thing in the run look different on every call, so the
+    # prompt cache had nothing to match and rewrote all of it, every time.
+    # Which documents the draft cites travels with the draft instead.
     source_lines = "\n".join(
-        f"- [{'CITED' if r['filename'] in cited else 'uncited'}] "
-        f"{r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
+        f"- {r['filename']} | {r['class'] or '-'} | {r['annotations'] or '-'} | "
         f"{r.get('properties') or '-'} | "
         f"{r['summary'].replace(chr(10), ' ')[:200]}"
         for r in mrows
@@ -2958,18 +4558,41 @@ async def _gate_answer(
     # here. An empty list means the split could not be read twice, and the
     # prompt falls back to deriving it, which is the behaviour this replaces.
     fixed = await _question_parts(sinas, run_id, run_question)
-    reply = await sinas.invoke(
-        "sgr/answer-gate-agent",
+    # The other half of the conversation. Each of these is a request this
+    # review made and the drafter declined WITH A REASON, and the review has
+    # not yet said anything back. Showing them here is what makes the loop
+    # two-way: the drafter's reasoning can retire a request instead of only
+    # obeying it, and a request the review cannot answer is one it should not
+    # be making a third time.
+    open_refusals = await objections.outstanding(run_id)
+    refusals_block = ("\n\nREQUESTS YOU MADE THAT THE DRAFTER DECLINED, EACH "
+                      "WITH ITS REASON:\n" + "\n".join(
+                          f"  [{o['id']}] you asked: {o.get('asked') or ''}\n"
+                          f"       the drafter declined: "
+                          f"{(o.get('reply') or {}).get('reason') or ''}"
+                          for o in open_refusals)
+                      + "\nRule on each one in objection_rulings. ACCEPT means "
+                      "the reason settles it: you will not raise that point "
+                      "again and the answer is not the poorer for it. RESTATE "
+                      "means you press it, and pressing costs something you "
+                      "have NOT said before — a different document, evidence "
+                      "the drafter has not seen, or a narrower ask. A "
+                      "restatement that repeats what you already said is read "
+                      "as an acceptance, and so is saying nothing about a "
+                      "request listed here."
+                      ) if open_refusals else ""
+    # Turn one is the brief: the question, its parts, the whole retrieved set
+    # and every rule for judging. It is sent once per run and read back from
+    # cache on every later cycle. Turn two onward carries only the draft.
+    brief = (
         "QUESTION:\n" + run_question
-        + "\n\nCLAIMS OF THE DRAFT ANSWER (the number before each claim is "
-          "its identifier, not its position: revision drops claims, so gaps "
-          "in the numbering are expected and are not a defect — there is no "
-          "claim missing from this list):\n" + claims
-        + "\n\nWORKING DOCUMENT SET (each marked CITED if the answer uses it):\n" + source_lines
+        + "\n\nWORKING DOCUMENT SET (every document retrieved for this "
+          "question; which of them the draft cites comes with the draft):\n"
+        + source_lines
         + (('\n\nPARTS OF THE QUESTION (fixed for this run; judge'
             ' each against the claims, and do not add, merge or drop'
             ' one):\n'
-            + "\n".join(f'  {i}. {a}' for i, a in enumerate(fixed, 1)))
+            + "\n".join(f'  {i}. {_part_text(a)}' for i, a in enumerate(fixed, 1)))
            if fixed else
            '\n\nFirst split the QUESTION into the distinct things it asks: '
            'a question asking what the conditions are, whether a regulation '
@@ -2991,7 +4614,15 @@ async def _gate_answer(
         'holding the answer lacks. Name such documents in unused_sources — '
         'coverage alone does not make an unused, plainly better document '
         'acceptable to leave unread.'
-        '\n\nReply ONLY JSON: {"publishable": true|false,'
+        '\n\nSay how much each one matters, because the two cases are not the '
+        'same and the answer treats them differently. "essential" means a '
+        'part of the question is NOT PROPERLY ANSWERED without this source, '
+        'and you must say in one line which part and why — an essential mark '
+        'with no such line is read as supporting, so do not mark one you '
+        'cannot justify. "supporting" means relevant: the answer would be '
+        'better with it and is not wrong without it. Most named sources are '
+        'supporting.'
+        + '\n\nReply ONLY JSON: {"publishable": true|false,'
         + (' "parts": [{"n": <the number of the part above>, "covered": '
            'true|false, "covered_by": [<the sequence numbers of the claims '
            'that answer this part — name every one, and name none if the part '
@@ -3011,8 +4642,34 @@ async def _gate_answer(
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
         ' "concludes_at": <the sequence number of the claim that draws that overall conclusion, or null if no claim does. A claim that states the answer to the question, not one that reports what a single source says.>,'
-        ' "unused_sources": ["<filename>: <the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>", ...]}',
+        ' "unused_sources": [{"filename": "<name from the working set>",'
+        ' "point": "<the point it settles and why the answer is poorer without it — either plainly more direct or authoritative than the source cited for that point, or bearing squarely on a part of the question the claims treat thinly or not at all>",'
+        ' "importance": "essential|supporting",'
+        ' "essential_because": "<REQUIRED when essential: which part of the question is not properly answered without this source, in one line. Leave empty for supporting.>",'
+        ' "part": <the number of the part it bears on, or null>}, ...]'
+        + ', "objection_rulings": [{"id": "<one of the ids listed above>",'
+          ' "ruling": "accept|restate",'
+          ' "new": "<for a restatement only: what you are adding that you have'
+          ' not already said>"}] — include this key only in a cycle whose'
+          ' message lists requests to rule on'
+        + '}'
     )
+    # Every later cycle: the draft, what it cites, and what the drafter said
+    # back. Never the working set, never the rules — those are turn one and
+    # are read from cache.
+    turn = (
+        "CLAIMS OF THE DRAFT ANSWER (the number before each claim is its "
+        "identifier, not its position: revision drops claims, so gaps in the "
+        "numbering are expected and are not a defect — there is no claim "
+        "missing from this list):\n" + claims
+        + "\n\nCITED BY THIS DRAFT: "
+        + (", ".join(sorted(cited)) if cited else "(nothing yet)")
+        + "\nEvery other document in the working set is uncited."
+        + refusals_block
+        + "\n\nJudge this draft now and reply ONLY with the JSON object "
+          "described in the brief."
+    )
+    reply = await _gate_turn(sinas, run_id, brief, turn)
     # Only the parse is guarded. A wide try around the whole body turns a
     # fault in this function into "the gate had no objection" — which is what
     # happened here for three hours — so everything after the parse runs
@@ -3065,6 +4722,20 @@ async def _gate_answer(
                 "never established",
             ) from exc2
 
+    # Which cycle this is, read rather than counted: `_record_gate_cycle`
+    # derives the same number from the same telemetry at the end of this
+    # function, and neither call writes, so the argument's history is stamped
+    # with the cycle it actually happened in.
+    cycle_no = int((await _next_cycle_key(run_id, "validate", "gate"))
+                   .removeprefix("gate_"))
+    # The gate's half of the conversation, applied before anything is fed.
+    # A refusal it accepts is settled here, so the same document cannot be
+    # named again three lines further down; a restatement that carries
+    # nothing new is an acceptance; and a request it simply did not answer is
+    # an acceptance too, because reading silence as "still objecting" would
+    # let it press every point forever by answering none of them.
+    await objections.rule_all(run_id, data.get("objection_rulings") or [],
+                              cycle=cycle_no)
     # Coverage is judged per part. One holistic verdict let an answer
     # addressing two of a question's three parts publish, and named one
     # gap at a time when it failed — so revision fixed them one cycle
@@ -3093,7 +4764,8 @@ async def _gate_answer(
             if 1 <= n <= len(fixed):
                 seen.setdefault(n, x)
         parts = [
-            {"asks": a, "covered": bool((seen.get(n) or {}).get("covered")),
+            {"asks": _part_text(a),
+             "covered": bool((seen.get(n) or {}).get("covered")),
              "gap": str((seen.get(n) or {}).get("gap") or "").strip()
                     or ("" if n in seen else
                         "the review returned no verdict for this part"),
@@ -3109,6 +4781,15 @@ async def _gate_answer(
                                     with_evidence, unresponsive_seqs)}
             for x in (data.get("parts") or []) if isinstance(x, dict)
         ]
+    # Before a part is called unanswered, re-read what the answer already
+    # cites. Extraction reads per planned claim from that claim's anchors, so
+    # a document opened for one passage can hold the material for a part in a
+    # passage nobody read: on one measured question all four of the things a
+    # reviewer asked for sat in documents the answer cited. This runs only for
+    # parts about to be reported as gaps, so an answer that covers everything
+    # pays nothing.
+    parts, reread_found, reread_looked = await _reread_cited_for_parts(
+        sinas, answer_id, parts)
     uncovered = [
         str(x.get("gap") or x.get("asks") or "").strip()
         for x in parts if not x.get("covered")
@@ -3149,10 +4830,28 @@ async def _gate_answer(
         )
     if data.get("no_conclusion"):
         correctness.append(
-            "The answer never draws its overall conclusion. Add a final claim "
-            "that directly answers the question, supported by the evidence "
-            "already cited."
+            "The answer never draws its overall conclusion. Add a claim of "
+            'kind "conclusion" with "part": null that directly answers '
+            "the question, supported by the evidence already cited; it leads "
+            "the answer, so restore the order rather than append."
         )
+    # The structure, judged without the model. A part whose conclusion is
+    # missing, or written into the analysis so the reader meets it last, and
+    # an inference resting on nothing supported, are correctness defects:
+    # the answer is held back until the reviser restores the order. Judged
+    # only over an answer that carries structure; the rows of an older
+    # answer carry none and are left to the judge's `no_conclusion`.
+    claim_dicts = [
+        {"sequence": c.sequence, "id": c.id, "claim_kind": c.claim_kind,
+         "claim_type": c.claim_type, "section": c.section,
+         "part_index": c.part_index, "follows_from": c.follows_from,
+         "claim_text": c.claim_text, "supported": c.sequence in with_evidence}
+        for c in structured]
+    structure_gaps = (answer_structure.conclusion_gaps(claim_dicts, question_parts)
+                      + answer_structure.inference_gaps(claim_dicts))
+    correctness += structure_gaps
+    if structure_gaps:
+        await _tele(run_id, "validate", structure_gaps=structure_gaps)
     # Naming the document in prose is not enough. Revision may cite only
     # passages it is shown, and it is shown passages for the points passed to
     # it — so a run was told to use 32025M11936.md, given no line of it, and
@@ -3165,12 +4864,25 @@ async def _gate_answer(
     # run's obligation ledger; what is fed below comes from the ledger's
     # unmet entries — persisting across rounds, reopening if the citing
     # claim dies — not from this round's gate reply alone.
+    #
+    # And every request carries an importance the gate had to choose between,
+    # because "you should have used this" covers two different findings: a
+    # part that is not properly answered without the source, and a source that
+    # would make a sound answer better. Only the first may ever reach the
+    # run's verdict, and only when the gate could say in one line which part.
+    named = _unused_sources(data, len(fixed))
     fresh: dict[str, str] = {}
-    for src in (data.get("unused_sources") or []):
-        fn, _, why = str(src).partition(":")
-        if fn.strip():
-            fresh[fn.strip()] = (why.strip() or str(src))[:400]
-            await obligations.record(run_id, fn.strip(), why.strip() or str(src))
+    for src in named:
+        fresh[src["filename"]] = src["point"]
+        await obligations.record(run_id, src["filename"], src["point"])
+    # A request the drafter refused and this gate accepted is over. It is not
+    # re-raised and its document is not fed again — enforced here rather than
+    # left to the prompt, because a gate that forgets is exactly the failure
+    # the ledger exists to stop.
+    settled = await objections.settled_subjects(run_id)
+    # A source that reached the answer settles its own argument, whatever
+    # either side last said about it.
+    await objections.resolve(run_id, sorted(cited))
     # What is owed this round is the ledger's to decide, this round's findings
     # included. Asking what was owed and then appending whatever had not come
     # back read an absence as "no opinion", and an entry is withheld for three
@@ -3178,7 +4890,8 @@ async def _gate_answer(
     # no opinion; the other two are decisions, and adding over them put retired
     # and satisfied obligations back in front of the reviser at a count the cap
     # could not act on.
-    owed = await obligations.to_feed(run_id, answer_id, fresh)
+    owed = [u for u in await obligations.to_feed(run_id, answer_id, fresh)
+            if u["doc"] not in settled]
     capped = [u for u in owed if u["fed"] >= obligations.MAX_FEEDS]
     for u in capped:
         await obligations.waive(
@@ -3188,15 +4901,130 @@ async def _gate_answer(
         await _tele(run_id, "validate",
                     obligations_system_waived=[u["doc"] for u in capped])
     feed = [u for u in owed if u["fed"] < obligations.MAX_FEEDS][:5]
+    # Each fed source is an objection with an id, so the drafter can answer
+    # THIS request rather than write its reasoning into a dropped claim where
+    # nothing reads it. A source the ledger refuses to re-raise drops out of
+    # the feed here: `raise_objection` returns None for a settled point.
+    by_name = {s["filename"]: s for s in named}
+    ids: dict[str, str] = {}
+    for u in list(feed):
+        src = by_name.get(u["doc"]) or {}
+        oid = await objections.raise_objection(
+            run_id, kind="source", subject=u["doc"], asked=u["note"],
+            importance=src.get("importance"),
+            why_essential=src.get("essential_because"),
+            part=src.get("part"), cycle=cycle_no)
+        if oid is None:
+            feed.remove(u)
+            continue
+        ids[u["doc"]] = oid
+    # Open each owed document for the point it is said to carry, BEFORE the
+    # request goes out. The request has always told the drafter to waive "with
+    # a rationale you can only give after reading its passages" — and nothing
+    # opened it. Extraction reads per planned claim from that claim's anchors,
+    # so a document the plan never pointed at has no passages, and a drafter
+    # with nothing verbatim to quote can only refuse, whatever the document
+    # says. The expert review named that failure six times over, each time by
+    # the missing source's rank in the retrieved set.
+    looked = await _look_owed(sinas, feed)
+    if feed:
+        await _tele(run_id, "validate", **{f"owed_looks_{cycle_no}": {
+            "asked": [u["doc"] for u in feed],
+            "carried": sorted(looked),
+        }})
     stronger = [f"{u['note']} [obligated document: {u['doc']}]" for u in feed]
     for u in feed:
+        hit = looked.get(u["doc"]) or {}
+        quote = str(hit.get("quote") or "").strip()
+        carried = (
+            f"\nThe document was opened for this point and says, at lines "
+            f"{hit.get('line_from')}-{hit.get('line_to')}: \"{quote[:700]}\""
+            "\nCite THAT, verbatim, if it carries the point."
+            if quote else
+            "\nThe document was opened for this point and no passage stating "
+            "it came back. Refusing is then the right answer, and the "
+            "rationale is that — not a guess about what it might hold."
+        )
         issues.append(
             f"Owed source unused: {u['doc']} — {u['note']} Cite it for the "
             "point it carries, or waive it with a rationale you can only "
-            "give after reading its passages. An obligation neither cited "
-            "nor waived returns every round."
+            "give after reading its passages, or REFUSE it: reply with "
+            f'{{"objection": "{ids[u["doc"]]}", "rationale": "<why this '
+            'source cannot carry the point asked of it>"}, which is an '
+            "answer and will be ruled on rather than ignored."
+            + carried
         )
     await obligations.note_fed(run_id, [u["doc"] for u in feed])
+
+    # What the answer's own strongest sources say about each part, beyond the
+    # point they were read for. The gate cannot ask this — it names sources
+    # the answer did NOT use, and these are used — and the plan could not,
+    # because it was written from the question before any document was read.
+    # The reviewer's findings are mostly of this shape: a rule the cited
+    # judgment states and the answer does not.
+    deeper = await _look_deeper(sinas, sorted(cited), fixed)
+    if deeper:
+        await _tele(run_id, "validate", **{f"deeper_looks_{cycle_no}": [
+            {"doc": d["doc"], "part": d["part"][:80]} for d in deeper]})
+        for d in deeper:
+            q = str((d["hit"] or {}).get("quote") or "").strip()
+            issues.append(
+                f"A source this answer already cites carries more on one part "
+                f"of the question than the answer uses. {d['doc']}, on \""
+                f"{d['part']}\", at lines {(d['hit'] or {}).get('line_from')}-"
+                f"{(d['hit'] or {}).get('line_to')}: \"{q[:700]}\" — if the "
+                "answer does not already state this, add a claim that does, "
+                "citing that passage. If it already does, or the passage does "
+                "not bear on the part after all, leave the answer as it is."
+            )
+
+    # A claim that states a general proposition must rest on the
+    # highest-standing source the retrieval actually returned that carries
+    # it. Deterministic in what it finds — the class declared a rank and two
+    # of them are compared — and argued rather than enforced: the higher
+    # documents are read for the proposition first, and what the drafter gets
+    # is a request it may refuse with a reason. Run after the gate's rulings
+    # above, so a refusal this review has already accepted is not put again,
+    # and before the cycle is recorded, so the ledger written below holds
+    # what was argued this cycle rather than last.
+    standing_issues, standing_points, standing_counts = (
+        await _standing_objections(
+            sinas, run_id, answer_id, mrows,
+            [{"id": str(c.id), "sequence": c.sequence, "kind": c.claim_kind,
+              "text": c.claim_text,
+              "cites": cites_by_claim.get(c.id) or []} for c in structured],
+            cycle_no))
+    issues += standing_issues
+    stronger += standing_points
+
+    # A claim asserting a rule names the source it rests on. Deterministic —
+    # the document's own identifier, or the words that identify its name,
+    # looked for in the claim's text — so it costs no model call and behaves
+    # the same whatever language the source is written in. That last part is
+    # the point: the check this replaces looked for English attribution
+    # words, and a third of the collection is French, so a claim resting on a
+    # French source could not fail it.
+    named_docs = {
+        str(r.get("filename")): {
+            "identifier": r.get("identifier"),
+            "name": r.get("title"),
+            "naming_required": bool(r.get("naming_required")),
+        }
+        for r in mrows if r.get("filename")
+    }
+    unnamed = naming.unnamed_sources(
+        [{"claim_id": str(c.id), "sequence": c.sequence, "kind": c.claim_kind,
+          "text": c.claim_text, "cites": cites_by_claim.get(c.id) or []}
+         for c in structured],
+        named_docs,
+    )
+    for entry in unnamed:
+        issues.append(naming.objection(entry))
+    if unnamed:
+        await _tele(run_id, "validate", **{f"unnamed_sources_{cycle_no}": [
+            {"sequence": e.get("sequence"),
+             "sources": [u.get("filename") for u in e.get("unnamed") or []]}
+            for e in unnamed]})
 
     # What the answer has not accounted for, decided from the ledger rather
     # than asked of the model. The gate is given two jobs in one call and
@@ -3214,13 +5042,22 @@ async def _gate_answer(
     # uncovered part in an earlier cycle before converging — but it is the
     # verdict each run published on.
     #
-    # The tie is answer-scoped because it cannot honestly be finer: the gate
-    # names sources without saying which part each bears on.
+    # That tie no longer decides the run's verdict, and the reason is the
+    # measured failure this loop was built for: a run whose every part was
+    # covered, with nothing missing, unsupported or unresponsive, ended
+    # `partial` because one policy source it had reasoned its way out of
+    # citing was fed three times and never incorporated. "Partial" told the
+    # reader the question could not be answered. It could, and was.
+    #
+    # So an unincorporated source is a note, with one exception the gate has
+    # to earn: an `essential` request it justified, pressed, and could not
+    # settle. That is two readers disagreeing about completeness, and it
+    # surfaces as a reservation on the answer and a distinct outcome — never
+    # as `partial`, which keeps meaning a part could not be answered.
     unaccounted = await obligations.unaccounted(run_id, answer_id)
-    # What the gate blocks on is narrower than what it reports. See
-    # `obligations.actionable`: a system-waived source stays unaccounted
-    # by design, and gating on it would make the run unpublishable rather
-    # than late.
+    # Still read, still fed, still reported. What changed is that it drives
+    # cycles rather than verdicts: while a cycle is left and a source is owed,
+    # the run spends it; when the cycles run out, the answer publishes.
     blocking = await obligations.actionable(run_id, answer_id)
     if unaccounted:
         # Ahead of the per-source lines, because those read as "a better
@@ -3254,6 +5091,10 @@ async def _gate_answer(
         claim_naming.mismatch_message(m)
         for m in mismatched[:claim_naming.MAX_FINDINGS]
     ]
+    # Read once and used twice, for the reason the coverage read above is:
+    # the per-cycle record and the run-scoped counts must describe the same
+    # ledger, and two reads could disagree.
+    ledger_record = await objections.record(run_id)
     await _record_gate_cycle(
         run_id, reparse=reparse, unaccounted=unaccounted,
         fed=[{"doc": u["doc"], "feeds": int(u["fed"]) + 1} for u in feed],
@@ -3273,7 +5114,32 @@ async def _gate_answer(
             for m in mismatched
         ],
         checks=reach,
+        # Recorded whether or not it found anything. A re-read that found
+        # nothing and a re-read that never ran are the same silence
+        # otherwise, and telling an absent limb from an unchecked one is half
+        # of why this is worth having.
+        reread={"looked": reread_looked, "found": reread_found},
+        standing_counts=standing_counts,
+        # The argument as it stands at this cycle: every request, what it
+        # asked, the importance the gate had to justify, the drafter's reason,
+        # the gate's ruling and the cycle each happened in. Recorded per cycle
+        # rather than once at the end, because the interesting question about a
+        # two-way loop is when a point turned, and an end-state snapshot cannot
+        # answer it.
+        objection_ledger=ledger_record,
         closing=_closing_record(data, claims_by_seq, parts))
+    # The three numbers the standing rule has to be able to show, run-scoped
+    # and flat beside the per-cycle counts above: how many standing
+    # objections this run raised, how many the answer settled by citing the
+    # higher-standing source, and how many the drafter refused with a reason.
+    #
+    # The third is the one that was never observable. Across three live runs
+    # the drafter refused nothing, because evidence findings are usually
+    # correct and there was nothing to argue — so whether a reasoned refusal
+    # could happen at all was a question nobody could answer from a run's
+    # telemetry. A standing objection is precisely the case where refusing is
+    # the right move, and this is the count that says whether it is reached.
+    await _tele(run_id, "validate", standing=standing.summary(ledger_record))
     # A claim can attribute something to a source and never say which source.
     # The evidence checker cannot see that: it asks whether stated provenance
     # is correct, and unstated provenance is not wrong. So it is checked here,
@@ -3298,33 +5164,42 @@ async def _gate_answer(
     # every uncovered part is a gap the answer must close, not just one
     if uncovered:
         missing = "; ".join(uncovered)
-    elif blocking:
-        # Named in `missing` and not only in `issues`, because `missing` is what
-        # the remediation message leads with, what `_gate_key` dedupes on, and
-        # what the partial note explains the run by. An answer held for a debt
-        # whose `missing` was empty would be held for a reason it never stated.
-        missing = (
-            f"{len(blocking)} source(s) this review named as bearing on the "
-            "question are neither cited nor waived: " + ", ".join(blocking[:5])
-        )
     else:
-        missing = str(data.get("missing") or "")
-    publishable = (
-        bool(data.get("publishable")) and not uncovered and not blocking
-    )
-    # Which of the three held it, decided here because here is where all three
-    # are known. The caller would have to infer it from `missing`'s wording, and
-    # a partial labelled `coverage` for a run whose every part was covered is
-    # the mislabelling `consistency` was split out to stop.
+        # The judge's own words first, the debt after it — not instead of it.
+        # An owed source is still named here, because `missing` is what the
+        # remediation message leads with and what `_gate_key` dedupes on, and a
+        # cycle spent on an owed source has to say which one.
+        #
+        # What it may not do is speak FOR the judge. It used to replace the
+        # judge's `missing` outright, so a run the judge rejected as a whole
+        # reached the partial note with the debt as its only stated reason, and
+        # the note opened by telling the reader the analysis could not cover
+        # the material — on a run whose every part was covered. The debt never
+        # was the reason; it is a fact beside it.
+        missing = "; ".join(x for x in (
+            str(data.get("missing") or ""),
+            (f"{len(blocking)} source(s) this review named as bearing on the "
+             "question are neither cited nor waived: "
+             + ", ".join(blocking[:5])) if blocking else "",
+        ) if x)
+    # An owed source is not a reason to call the question unanswered. It buys
+    # revision cycles through `issues` — the caller publishes only once the
+    # cycles are spent — and what it cannot do any more is turn a fully
+    # covered answer into a `partial` whose note tells the reader the
+    # analysis could not cover the question. That note was false on every run
+    # it was written for.
+    publishable = bool(data.get("publishable")) and not uncovered
+    # Which of the two held it, decided here because here is where both are
+    # known. `accounting` is gone with the verdict it named: nothing that only
+    # concerns an unincorporated source reaches a partial any more.
     #
     # `holistic` is the judge rejecting the answer as a whole: it said
-    # publishable false while marking every part covered and naming no unmet
-    # source, so there is no part to point at. Falling through to `coverage`
-    # there would report a coverage failure for a run with no uncovered part,
-    # which is the same defect one case further along.
+    # publishable false while marking every part covered, so there is no part
+    # to point at. Falling through to `coverage` there would report a coverage
+    # failure for a run with no uncovered part, which is the same defect one
+    # case further along.
     cause = (
         "coverage" if uncovered
-        else "accounting" if blocking
         else "holistic" if not bool(data.get("publishable"))
         else ""
     )
@@ -3332,6 +5207,48 @@ async def _gate_answer(
     # is given passages for a bounded number of points.
     return (publishable, missing, issues + correctness, correctness,
             uncovered + stronger, cause)
+
+
+def _unused_sources(data: dict, part_count: int = 0) -> list[dict]:
+    """The sources the gate named, with how much each matters. Pure.
+
+    Two shapes are read. The object form is what the gate is asked for now —
+    filename, the point, an importance and the line that earns it. The old
+    `"<filename>: <why>"` string is still read, as `supporting`: a verdict
+    written before importance existed named no essential source, and quietly
+    promoting one would put a request on the run's verdict that no gate ever
+    marked.
+
+    `essential` survives only with a reason. The check is the whole of what
+    the word means here — an importance nobody had to justify is not a
+    judgment, and this one can hold a reservation against a published answer.
+    """
+    out: list[dict] = []
+    for src in (data.get("unused_sources") or []):
+        if isinstance(src, dict):
+            fn = str(src.get("filename") or "").strip()
+            point = str(src.get("point") or "").strip()
+            raw_imp, why = src.get("importance"), src.get("essential_because")
+            part = src.get("part")
+        else:
+            fn, _, point = str(src).partition(":")
+            fn, point = fn.strip(), (point.strip() or str(src))
+            raw_imp, why, part = objections.SUPPORTING, "", None
+        if not fn:
+            continue
+        importance, why = objections.importance_of(raw_imp, why)
+        # The parts the gate is shown are numbered from 1; a claim's
+        # `part_index` counts from 0, and a note that lands on the wrong part
+        # is worse than one that lands on none. A number outside the
+        # decomposition names no part and becomes one: a reservation attached
+        # to a part that is never rendered would not be printed at all, which
+        # is the one thing a reservation must not do.
+        idx = (part - 1 if isinstance(part, int) and not isinstance(part, bool)
+               and 1 <= part <= part_count else None)
+        out.append({"filename": fn, "point": (point or fn)[:400],
+                    "importance": importance, "essential_because": why,
+                    "part": idx})
+    return out
 
 
 def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
@@ -3510,19 +5427,17 @@ async def _pre_publish_sweep(
                 "after removing claims the final review could not support, the "
                 "review rejected the answer as a whole without naming a part it "
                 "fails to address" + (f" — {missing}" if missing else ""))
-        if sweep_cause == "accounting":
-            raise PartialOutcome(
-                "accounting",
-                "after removing claims the final review could not support, a "
-                "source this review named as bearing on the question is neither "
-                "cited nor waived — " + (missing or " ".join(fb))[:600])
+        # There is no `accounting` branch here any more, and its absence is
+        # the point: after the drop, a source the review named and the answer
+        # did not use cannot turn this into a partial either. The only two
+        # partials left on this path are the two that mean the answer is not
+        # there — a part gone uncovered, or the review rejecting the whole.
         raise PartialOutcome(
             "coverage",
             "after removing claims the final review could not support, the "
             "surviving claims no longer fully answer the question — "
             + (missing or " ".join(fb))[:600])
-    await _revise_answer(sinas, run_id, answer_id, question, fb,
-                         last_attempt=True)
+    await _revise_answer(sinas, run_id, answer_id, fb, last_attempt=True)
     return False
 
 
@@ -3682,15 +5597,126 @@ def _last_mention_losses(deleted: list[dict], live: set[str]) -> list[dict]:
     return [{"identifier": t, "sequences": _seqs(v)} for t, v in sorted(by.items())]
 
 
+async def _open_notes(raw: list[dict]) -> list[dict]:
+    """The objection ledger as notes an answer can carry.
+
+    One thing happens here that the ledger cannot do for itself: the source is
+    resolved from the filename it was argued about to the citation a reader is
+    given. A reservation printed in the answer must name the source the way
+    every other sentence in the answer names one — by what it is, never by a
+    storage name — and the renderer stays pure because the lookup happens
+    here, once, at publish.
+
+    A filename that resolves to nothing keeps the note and loses the name:
+    what was asked and why it was declined is the substance, and a note that
+    vanished because a document row moved would hide the disagreement rather
+    than the filename.
+    """
+    names = sorted({str(n.get("source")) for n in raw if n.get("source")})
+    if not names:
+        return list(raw)
+    docs: dict[str, str] = {}
+    async with AsyncSessionLocal() as session:
+        from app.models import DocumentClassProperty, PropertyValue
+        from app.services.document_identity import document_title_subquery
+
+        rows = (await session.execute(
+            select(Document.id, Document.filename, DocumentClass.name,
+                   DocumentClass.identifier_property,
+                   document_title_subquery())
+            .outerjoin(DocumentClass,
+                       DocumentClass.id == Document.document_class_id)
+            .where(Document.filename.in_(names))
+        )).all()
+        by_id = {did: {"title": title, "class": cls,
+                       "identifier_property": ident_prop, "properties": {}}
+                 for did, _fn, cls, ident_prop, title in rows}
+        if by_id:
+            for did, prop, value in (await session.execute(
+                select(PropertyValue.document_id, DocumentClassProperty.name,
+                       PropertyValue.value)
+                .join(DocumentClassProperty,
+                      DocumentClassProperty.id == PropertyValue.property_id)
+                .where(PropertyValue.document_id.in_(list(by_id)))
+            )).all():
+                entry = by_id.get(did)
+                if entry is not None and value is not None:
+                    entry["properties"][str(prop)] = value
+            # The renderer is pure and is handed the identity rather than the
+            # properties to find it in: the same three fields `assemble`
+            # writes, from the same declarations.
+            roles = await declared_roles.resolve(session)
+            for entry in by_id.values():
+                props = {str(k): answer_structure.unwrap(v)
+                         for k, v in (entry.get("properties") or {}).items()}
+                cls_name = str(entry.get("class") or "")
+                ident_prop = entry.pop("identifier_property", None)
+                entry["identifier"] = (props.get(ident_prop) if ident_prop
+                                       else None)
+                entry["alternate_identifier"] = roles.value(
+                    roles.alternate_identifier, props, cls_name)
+                entry["date"] = answer_structure.document_date(
+                    props, cls_name, roles.date)
+        for did, fn, _cls, _ident_prop, _title in rows:
+            docs[fn] = answer_render.citation(by_id.get(did))
+    return [{**n, "source_citation": docs.get(str(n.get("source")) or "")}
+            for n in raw]
+
+
+async def _final_status(run_id: uuid.UUID) -> str:
+    """`published`, or `published_contested` when a disagreement survived.
+
+    A run is contested when the review called a source essential, said in one
+    line which part is not properly answered without it, pressed the point,
+    and the drafter still would not use it. That is not a failure — the answer
+    is written and every part is covered — and it is not silence either: a
+    human should read the reservation and decide. So it gets a status of its
+    own, between `published` and `partial`, and `partial` keeps meaning what
+    it has always meant.
+    """
+    async with AsyncSessionLocal() as session:
+        run = await session.get(QueryRun, run_id)
+        v = ((run.telemetry if run is not None else None) or {}).get("validate") or {}
+    return "published_contested" if (v.get("contested") or []) else "published"
+
+
 async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) -> None:
     from app.models import Answer
 
+    # What was argued and did not settle, written onto the answer before the
+    # prose is assembled so the reservations are IN the published text rather
+    # than beside it. A reader who has only the answer must still learn that
+    # the review thought a part incomplete.
+    notes = await _open_notes(await objections.notes(run_id))
+    contested = [n for n in notes if n.get("caveat")]
     async with AsyncSessionLocal() as session:
         row = await session.get(Answer, answer_id)
         row.status = "published"
         row.published_at = _now()
+        row.open_notes = notes or None
         await _compact_claim_sequences(session, answer_id)
         await session.commit()
+        # The prose, written once the claim numbering is final. Stored rather
+        # than rendered on every read so the published text is a fact about
+        # the answer and not about whatever the renderer does next month; the
+        # endpoint re-assembles on demand for anything that changes after.
+        # A failure here must not unpublish an answer that is otherwise
+        # complete: the rows are the record and the text is regenerable.
+        try:
+            rendered = await answer_render.assemble(
+                session, answer_id, fallback_as_at=_now().date())
+            if rendered is not None:
+                row.rendered_markdown = rendered.markdown
+                if row.law_stated_as_at is None:
+                    row.law_stated_as_at = rendered.law_stated_as_at
+                await session.commit()
+                tele = {**tele, "rendered_chars": len(rendered.markdown),
+                        "rendered_citations": len(rendered.citations)}
+        except Exception as exc:  # noqa: BLE001
+            await session.rollback()
+            _log.warning("run %s: could not render the answer markdown: %s",
+                         run_id, exc)
+            tele = {**tele, "render_error": str(exc)[:200]}
         # Read after the commit, and only here. "Last" is a claim about the
         # finished answer: during revision a document can lose its last
         # citation and get another one two cycles later, so the same
@@ -3716,6 +5742,24 @@ async def _publish_answer(run_id: uuid.UUID, answer_id: uuid.UUID, **tele: Any) 
     await _tele(run_id, "validate", published=_iso(),
                 lost_last_citation=_last_citation_losses(deleted, live_docs),
                 lost_last_mention=_last_mention_losses(deleted, live_ids),
+                open_notes=notes,
+                # The whole argument in one place, flat, at the one moment it
+                # is final. The per-cycle copies show how it got here; a reader
+                # asking what was argued should not have to find the last gate
+                # cycle to learn how it ended.
+                objections=await objections.record(run_id),
+                # And the other argument the loop has: the review against one
+                # claim, round after round. Per claim, how many findings it
+                # attracted, how it ended, and whether a reword of it was
+                # refused — the three numbers that say whether the two-strike
+                # rule is doing anything.
+                claim_strikes=await strikes.record(run_id),
+                # The one thing in the ledger that changes the run's outcome.
+                # Written every publish, empty list included: an empty list
+                # says nothing was left contested, a missing key would say the
+                # run predates the loop, and `_final_status` reads it to decide
+                # between `published` and `published_contested`.
+                contested=contested,
                 **tele)
 
 
@@ -3723,7 +5767,8 @@ def _spans_of(obj: dict) -> list[dict]:
     """Citable spans only: a filename and a line number, or it is not one."""
     return [
         {"filename": str(e["filename"]), "line_from": int(e["line_from"]),
-         "line_to": int(e.get("line_to") or e["line_from"])}
+         "line_to": int(e.get("line_to") or e["line_from"]),
+         "locator": _locator_of(e)}
         for e in (obj.get("evidence") or [])
         if isinstance(e, dict) and e.get("filename")
         and str(e.get("line_from", "")).lstrip("-").isdigit()
@@ -3735,6 +5780,41 @@ def _spans_of(obj: dict) -> list[dict]:
 # cannot check — which is why it is allowed only on the last revision, capped,
 # and still judged by the gate.
 MAX_ABSTENTIONS = 2
+
+
+#: What a patch item may say about where a claim belongs. Four keys left
+#: this tuple with the drafting schema: `section`, which follows from
+#: `kind`, and the three notes about the source, which follow from the
+#: document the claim cites. `conditions` and `test_name` are the flat shape
+#: a test arrives in; `test` is the older nested one, still read.
+_STRUCTURE_KEYS = ("part", "kind", "follows_from", "test", "conditions",
+                   "test_name")
+
+
+def _structure_of(c: dict) -> dict:
+    """The structure fields a patch item carries, and only those it carries,
+    so an absent key means "leave it" rather than "clear it". Pure."""
+    return {k: c[k] for k in _STRUCTURE_KEYS if k in c and c[k] is not None}
+
+
+def _derived_patch_item(c: dict) -> bool:
+    """May this patch item stand without a span? Pure.
+
+    A claim that rests on other claims rather than on passages: an inference
+    always, and a conclusion that cites nothing and names what it follows
+    from. That rule is `answer_structure.is_derived` and is asked here rather
+    than restated, because a second copy of it is what this function was.
+
+    It admitted inferences only. The gate's own correctness finding is "the
+    answer has no overall conclusion: add one claim of kind conclusion with
+    part null" — a claim that by construction cites nothing and follows from
+    others. The drafter wrote it, this dropped it for having no span, the
+    gate asked again, and the run ended "could not be made internally
+    consistent" having been handed the thing it asked for every cycle.
+    """
+    kind = str(c.get("kind") or c.get("type") or "").strip().lower()
+    return answer_structure.is_derived(
+        kind, bool(_spans_of(c)), answer_structure.ref_list(c.get("follows_from")))
 
 
 def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
@@ -3757,15 +5837,21 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         return None
 
     drop_reasons: dict[int, str] = {}
+    drop_objections: dict[int, str] = {}
     revise = []
     for c in (data.get("revise") or []):
         if not isinstance(c, dict):
             continue
         text = str(c.get("text") or "").strip()
         spans = _spans_of(c)
-        if len(text) >= 30 and spans and str(c.get("seq", "")).lstrip("-").isdigit():
+        # An inference rests on the claims it follows from and needs no span
+        # of its own; everything else needs at least one.
+        derived = _derived_patch_item(c)
+        if len(text) >= 30 and (spans or derived) \
+                and str(c.get("seq", "")).lstrip("-").isdigit():
             revise.append({"seq": int(c["seq"]), "text": text, "evidence": spans,
-                           "rationale": str(c.get("rationale") or "").strip()})
+                           "rationale": str(c.get("rationale") or "").strip(),
+                           **_structure_of(c)})
 
     add = []
     abstentions = 0
@@ -3776,9 +5862,11 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
         spans = _spans_of(c)
         if len(text) < 30:
             continue
-        if spans:
-            add.append({"text": text, "type": c.get("type"), "evidence": spans,
-                        "rationale": str(c.get("rationale") or "").strip()})
+        if spans or _derived_patch_item(c):
+            add.append({"text": text, "type": c.get("type") or c.get("kind"),
+                        "evidence": spans,
+                        "rationale": str(c.get("rationale") or "").strip(),
+                        **_structure_of(c)})
         elif (allow_abstention
               and str(c.get("type") or "").lower() == "abstention"
               and abstentions < MAX_ABSTENTIONS):
@@ -3814,6 +5902,15 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             (drop if len(why) >= 20 else drop_unexplained).append(seq)
             if len(why) >= 20:
                 drop_reasons[seq] = why[:400]
+                # The measured case, given somewhere to go. A claim dropped
+                # BECAUSE the source the gate demanded cannot carry the point
+                # is a refusal of that request, and the reason for the drop is
+                # the reason for the refusal. Naming the request is what turns
+                # the two into one move instead of a deletion the gate reads
+                # as silence.
+                oid = str(x.get("objection") or "").strip()
+                if oid:
+                    drop_objections[seq] = oid
         elif str(x).lstrip("-").isdigit():
             # The old bare-integer shape. Read as a drop the reviser declined
             # to explain rather than rejected outright, so the refusal is
@@ -3832,7 +5929,27 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
             continue
         why = str(c.get("rationale") or "").strip()
         if len(why) >= 20 and str(c.get("seq", "")).lstrip("-").isdigit():
-            keep.append({"seq": int(c["seq"]), "rationale": why})
+            keep.append({"seq": int(c["seq"]), "rationale": why,
+                         # A keep can also be an answer to a request the gate
+                         # made. When it names one, the reason travels to the
+                         # objection ledger and the gate has to rule on it.
+                         "objection": str(c.get("objection") or "").strip()})
+
+    # A reasoned refusal: the gate asked for something and the drafter will
+    # not do it, and says why. Before this existed the reasoning had nowhere
+    # to go — one measured run wrote it into a dropped claim's rationale, from
+    # where nothing read it, and the gate fed the same document back twice.
+    # It is not a claim operation, so it carries no sequence and touches no
+    # row; it is a reply, and the only thing it needs is the id of what it
+    # answers and a reason worth ruling on.
+    refuse = []
+    for r in (data.get("refuse") or []):
+        if not isinstance(r, dict):
+            continue
+        oid = str(r.get("objection") or r.get("id") or "").strip()
+        why = str(r.get("rationale") or "").strip()
+        if oid and len(why) >= 20:
+            refuse.append({"objection": oid, "rationale": why[:400]})
 
     waives = []
     for w in (data.get("waive") or []):
@@ -3840,11 +5957,13 @@ def _parse_patch(reply: str, allow_abstention: bool = False) -> dict | None:
                 and len(str(w.get("rationale") or "").strip()) >= 20:
             waives.append({"doc": str(w["doc"]).strip(),
                            "rationale": str(w["rationale"]).strip()})
-    if not (revise or add or drop or keep or waives or drop_unexplained):
+    if not (revise or add or drop or keep or waives or refuse
+            or drop_unexplained):
         return None
     return {"revise": revise, "add": add, "drop": drop, "keep": keep,
-            "drop_reasons": drop_reasons, "drop_unexplained": drop_unexplained,
-            "waive": waives}
+            "drop_reasons": drop_reasons, "drop_objections": drop_objections,
+            "drop_unexplained": drop_unexplained,
+            "waive": waives, "refuse": refuse}
 
 
 def _cycle_key(existing: dict, prefix: str) -> str:
@@ -3876,7 +5995,8 @@ async def _next_cycle_key(run_id: uuid.UUID, stage: str, prefix: str) -> str:
     return _cycle_key(entry, prefix)
 
 
-def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
+def _claim_budget_line(live: int, refused_last_cycle: int = 0,
+                       cap: int = MAX_CLAIMS) -> str:
     """What the reviser may add, said before it writes rather than after.
 
     `_admit_adds` refuses an addition once the answer is at MAX_CLAIMS and
@@ -3895,8 +6015,8 @@ def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
 
     Pure: two counts in, the sentence out.
     """
-    room = max(0, MAX_CLAIMS - live)
-    out = f"The answer holds {live} claims and the hard maximum is {MAX_CLAIMS}. "
+    room = max(0, cap - live)
+    out = f"The answer holds {live} claims and the hard maximum is {cap}. "
     if room:
         out += (f"You may add up to {room}. An addition beyond that is "
                 "discarded, not queued. ")
@@ -3908,10 +6028,15 @@ def _claim_budget_line(live: int, refused_last_cycle: int = 0) -> str:
         out += (f"Your previous reply proposed {refused_last_cycle} addition(s) "
                 "that were discarded for exactly this reason; they were never "
                 "written. Free a slot if you still want them. ")
-    return out + "Aim for about 12 claims.\n\n"
+    # The target sits a little under the cap: a one-part question aims at 12
+    # under its cap of 14 as it always did, and a question with more parts
+    # aims correspondingly higher.
+    target = 12 if cap <= MAX_CLAIMS else cap - 2
+    return out + f"Aim for about {target} claims.\n\n"
 
 
-def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
+def _admit_adds(adds: list[dict], live: int,
+                cap: int = MAX_CLAIMS) -> tuple[list[dict], int]:
     """Split the reviser's additions into those the answer has room for and
     the count refused, given `live` claims already in it.
 
@@ -3921,7 +6046,7 @@ def _admit_adds(adds: list[dict], live: int) -> tuple[list[dict], int]:
     count is what lets the caller record a cap hit instead of recording an
     addition that never happened.
     """
-    room = max(0, MAX_CLAIMS - live)
+    room = max(0, cap - live)
     return adds[:room], len(adds) - min(len(adds), room)
 
 
@@ -3936,7 +6061,8 @@ async def _bind_spans(session, claim_id: uuid.UUID, spans: list[dict]) -> None:
             claim_id=claim_id, document_id=doc.id,
             document_version_id=doc.current_version_id,
             span={"line_from": sp["line_from"], "line_to": sp["line_to"],
-                  "char_from": None, "char_to": None, "note": None},
+                  "char_from": None, "char_to": None, "note": None,
+                  "locator": sp.get("locator")},
             validated=False))
 
 
@@ -4026,12 +6152,107 @@ async def _removal_record(session, claim_ids: list) -> list[dict]:
     return sorted(out.values(), key=lambda d: d["sequence"])
 
 
+def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
+                     id_by_seq: Mapping[int, uuid.UUID], added: bool = False,
+                     sources: Mapping[str, dict] | None = None) -> None:
+    """Write the structure fields a patch item carries onto a claim row.
+
+    A revised claim keeps whatever the patch does not mention; an added claim
+    is normalised whole, so it always lands in a section. `follows_from`
+    arrives as sequence numbers and is stored as claim ids; a number naming
+    no live claim, or the claim itself, is dropped.
+
+    What the claim says about its SOURCE is not the patch's to carry: the
+    label, the tier, the jurisdiction note and the currency note are set from
+    the document the item cites, exactly as the drafting path sets them. A
+    revision rebinds evidence, so a claim that moves to another document must
+    move to that document's labels with it — leaving the old ones on the row
+    is how an answer ends up calling a source something it is not.
+    """
+    carries = {k for k in ("part", "kind", "type", "test", "conditions",
+                           "test_name") if item.get(k) is not None}
+    if added or carries:
+        cols = answer_structure.normalise_claim(
+            {**item, "text": row.claim_text,
+             "kind": item.get("kind") or item.get("type") or row.claim_kind,
+             "part": item.get("part") if "part" in item else (
+                 None if added or row.part_index is None else row.part_index + 1)},
+            parts)
+        if cols is not None:
+            for k in ("section", "part_index", "part_label", "claim_kind",
+                      "claim_type", "test"):
+                if added or k in ("section", "part_index", "part_label") or \
+                        k in carries or (k == "claim_kind" and "kind" in carries):
+                    setattr(row, k, cols[k])
+    _apply_source_facts(row, item.get("evidence"), sources)
+    refs = answer_structure.ref_list(item.get("follows_from"))
+    if refs:
+        ids = [str(id_by_seq[r]) for r in refs
+               if r in id_by_seq and id_by_seq[r] != row.id]
+        row.follows_from = ids or None
+
+
+def _apply_source_facts(row: AnswerClaim, evidence: Any,
+                        sources: Mapping[str, dict] | None) -> None:
+    """Set the four source-derived columns from the first document cited.
+
+    Shared by drafting and revision so a claim carries the same labels
+    whichever path last touched it. Silent when the claim cites nothing the
+    retrieved set knows about: that is a claim whose evidence did not bind,
+    and it has bigger problems than its label.
+    """
+    if not sources:
+        return
+    fn = next((str(e.get("filename")) for e in (evidence or [])
+               if isinstance(e, dict) and e.get("filename")), None)
+    src = sources.get(fn or "") if fn else None
+    if not src:
+        return
+    row.authority_label = (str(src["label"])[:40] if src.get("label") else None)
+    row.authority_tier = (int(src["tier"]) if src.get("tier") is not None
+                          else None)
+    row.jurisdiction_note = (str(src["jurisdiction"])[:300]
+                             if src.get("jurisdiction") else None)
+    row.currency_note = (str(src["currency"])[:500] if src.get("currency")
+                         else None)
+
+
+async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
+    """The patch's replies to the gate's requests, into the objection ledger.
+
+    Three shapes, one meaning. An explicit `refuse` entry is a reply and
+    nothing else. A `drop` or a `keep` that names an objection is a reply
+    made by doing something to a claim — the claim citing the demanded source
+    is removed, or the claim the gate wanted re-sourced stays — and its
+    rationale is the reason. Recording all three here keeps the ledger's view
+    of "the drafter answered" from depending on which disposition the reviser
+    happened to reach for.
+
+    Returns how many replies were recorded, for the cycle's telemetry.
+    """
+    seen: set[str] = set()
+    cycle = int((await _next_cycle_key(run_id, "validate", "gate"))
+                .removeprefix("gate_")) - 1
+    for oid, why in (
+        [(r["objection"], r["rationale"]) for r in (patch.get("refuse") or [])]
+        + [(oid, (patch.get("drop_reasons") or {}).get(seq, ""))
+           for seq, oid in (patch.get("drop_objections") or {}).items()]
+        + [(k["objection"], k["rationale"]) for k in (patch.get("keep") or [])
+           if k.get("objection")]
+    ):
+        if oid and oid not in seen:
+            seen.add(oid)
+            await objections.refused(run_id, oid, why, cycle=cycle)
+    return len(seen)
+
+
 async def _revise_answer(
-    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID, question: str,
+    sinas: _Sinas, run_id: uuid.UUID, answer_id: uuid.UUID,
     feedback: list[str], extra_points: list[str] | None = None,
-    last_attempt: bool = False,
+    last_attempt: bool = False, removed: list[dict] | None = None,
 ) -> int:
-    """Rewrite the whole answer from its evidence and the round's feedback.
+    """One round of the drafting conversation: what the review found, and what
+    the drafter does about it.
 
     One operation replaces what used to be three — narrowing an overreaching
     claim, rebinding a failed one, and appending claims the gate asked for.
@@ -4039,14 +6260,21 @@ async def _revise_answer(
     to 29 claims, could never be made coherent by removing something, and a
     model's reply about the task could land in the answer as a claim.
 
-    Here the reviser is given every current claim with its passages, plus any
-    newly extracted passages for points the gate raised, and returns the
-    corrected claim set as JSON. The set REPLACES the old one, so revising,
-    dropping and adding are the same operation. A reply that is not a claim
-    object is not a claim: no text matching decides it.
+    What this round SENDS is the change. It used to be a fresh one-shot call
+    carrying the passages, the playbook, the structure rules, the standing
+    revision instructions and every current claim with the passages bound to
+    it. All of that now sits in the brief, at the head of a conversation the
+    drafter is still in, so a round carries only what this round found: the
+    feedback, the requests outstanding, the engine's numbering, and anything
+    the engine removed without being asked.
+
+    The drafter answers with a patch. The patch is applied to the rows; a
+    reply that is not a claim object is not a claim, and no text matching
+    decides it.
     """
     if not feedback:
         return 0
+    from app.models import Answer
 
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
@@ -4061,35 +6289,85 @@ async def _revise_answer(
             .where(AnswerClaim.answer_id == answer_id)
             .order_by(AnswerClaim.sequence)
         )).all()
-    corpus_rows = (await _manifest_rows(parent_id))[:60]
+        answer_row = await session.get(Answer, answer_id)
+        parts = [p for p in (getattr(answer_row, "question_parts", None) or [])
+                 if isinstance(p, dict)]
+    cap = answer_structure.claim_cap(len(parts)) if parts else MAX_CLAIMS
+    manifest_rows = await _manifest_rows(parent_id)
+    # The list SHOWN to the reviser is capped, because it is prompt and a
+    # prompt has a budget.
+    corpus_rows = manifest_rows[:60]
     corpus = [r["filename"] for r in corpus_rows if r.get("filename")]
+    # The facts are a LOOKUP, and are not capped. A revised claim can cite a
+    # document from anywhere in the retrieved set — the gate names owed
+    # sources by rank, and obligations reach past sixty — and a document with
+    # no entry here silently loses its authority label, its tier, and its
+    # jurisdiction and currency notes in the rendered answer. Capping a
+    # lookup to the size of a prompt was the whole mistake.
+    src_facts = _source_context(manifest_rows)
 
-    # Current claims — but full passages only for the ones the feedback
-    # names. The reviser is instructed to change only what the feedback
-    # identifies, so untouched claims are context, not work: sending their
-    # passages tripled the prompt and invited re-emitting them, and the
-    # reviser call is where 70% of a run's wall-clock goes. A claim the
-    # patch does not name keeps its row, its spans and its verdicts — it is
-    # never rebuilt, so it is never re-judged.
-    named = {int(m) for f in feedback for m in re.findall(r"[Cc]laims? (\d+)", f)}
-    named |= {int(m) for f in feedback
-              for m in re.findall(r"(?:^|[ ,])(\d+)(?=[ ,.:]|$)", f)}
+    # Two claims restating one proposition from one source are found here,
+    # by arithmetic, and handed to the reviser as a merge to judge. The
+    # finding names both claims, so both arrive with their passages below.
+    dup_input: dict[int, dict] = {}
+    for claim, _ev, fn, _content in rows:
+        d = dup_input.setdefault(claim.sequence, {"sequence": claim.sequence,
+                                                  "text": claim.claim_text,
+                                                  "docs": set()})
+        if fn:
+            d["docs"].add(fn)
+    dup_pairs = answer_structure.duplicate_pairs(list(dup_input.values()))
+    if dup_pairs:
+        feedback = list(feedback) + answer_structure.duplicate_feedback(dup_pairs)
+        await _tele(run_id, "validate", duplicate_pairs=[list(p) for p in dup_pairs])
+
+    # The answer as it stands, and nothing about it that the drafter can
+    # already see. Its claims are its own turns; its passages are the brief.
+    # What travels is the engine's NUMBERING, because that is the one thing
+    # about its own answer the drafter cannot know: claims are reordered on
+    # the way into the database and renumbered again as rounds drop and add
+    # them, and a patch keys on that number.
+    #
+    # This is what a round used to be made of. Every current claim, with the
+    # passages bound to it, re-sent in a call that had never seen any of it —
+    # the reviser call being where 70% of a run's wall clock went.
     by_claim: dict[int, dict] = {}
-    for claim, ev, fn, content in rows:
-        entry = by_claim.setdefault(claim.sequence, {"text": claim.claim_text,
-                                                     "passages": []})
-        if ev is None or not content or (ev.span or {}).get("line_from") is None:
-            continue
-        lf, lt = int(ev.span["line_from"]), int(ev.span.get("line_to") or ev.span["line_from"])
-        body = "\n".join(content.splitlines()[max(0, lf - 1):lt])[:1200]
-        entry["passages"].append(f"[{fn} lines {lf}-{lt}]\n{body}")
+    for claim, _ev, _fn, _content in rows:
+        by_claim.setdefault(claim.sequence, {"text": claim.claim_text})
+    numbering = drafting_chat.numbering_key(
+        [(seq, c["text"]) for seq, c in sorted(by_claim.items())])
 
-    current = "\n\n".join(
-        f"CLAIM {seq}: {c['text']}\n"
-        + (("\n".join(c["passages"]) or "(no passage)")
-           if (seq in named or not named) else "(passages withheld — this "
-           "claim is context; do not revise it)")
-        for seq, c in sorted(by_claim.items()))
+    # What each claim stands on RIGHT NOW, in the same grain a patch item
+    # names its spans in. This is what a revision of a struck claim is
+    # measured against: a defence has to reach a passage the claim does not
+    # already cite, and that question is only answerable against the rows as
+    # they are at the moment the patch arrives.
+    cited_now: dict[int, list[dict]] = {}
+    for claim, ev, fn, _content in rows:
+        if ev is None or not fn:
+            continue
+        span = ev.span or {}
+        cited_now.setdefault(claim.sequence, []).append(
+            {"filename": fn, "line_from": span.get("line_from"),
+             "line_to": span.get("line_to")})
+    # The claims the review has now failed more than once, by the sequence the
+    # patch will key on — resolved from the row id every round, so a claim
+    # that was renumbered between rounds is still the same claim here.
+    strike_ledger = await strikes.entries(run_id)
+    on_strike: dict[int, dict] = {}
+    for claim, *_rest in rows:
+        entry = strike_ledger.get(str(claim.id))
+        if entry is None or claim.sequence in on_strike:
+            continue
+        if int(entry.get("findings") or 0) < strikes.STRIKE_LIMIT:
+            continue
+        on_strike[claim.sequence] = {
+            "claim_id": str(claim.id),
+            "sequence": claim.sequence,
+            "findings": int(entry.get("findings") or 0),
+            "rejected_rewords": int(entry.get("rejected_rewords") or 0),
+            "evidence": strikes.fingerprint(cited_now.get(claim.sequence) or []),
+        }
 
     # passages for anything the gate said was missing
     async def _anchors_for(point: str) -> tuple[list[str], str]:
@@ -4161,42 +6439,45 @@ async def _revise_answer(
                 fresh += (f"\n[{pas['filename']} lines {pas['line_from']}-"
                           f"{pas['line_to']}]\n{pas['text'][:1200]}\n")
 
-    reply = await sinas.invoke(
-        "sgr/retrieval-planner-agent",
-        f"Correct {_domain_article()}answer. Every current claim is listed for "
-        "context, with the passages bound to it. Only some are wrong.\n\n"
-        "Change ONLY what the feedback identifies. Leave every other claim "
-        "alone — do not restate it, do not rephrase it, do not return it. "
-        "A claim you do not mention is kept exactly as it is.\n\n"
-        "Dropping a claim costs a reason, like every other change: say what "
-        "the claim asserted and why no passage available can carry it. A drop "
-        "with no reason is not applied and the claim stays.\n\n"
-        "For each claim you do change: narrow it if it asserts more than its "
-        "passages establish, rewrite it if it contradicts another claim, and "
-        "drop it if no passage can carry it. Add a claim only where the answer "
-        "fails to address the question. Every claim you write must be carried "
-        "entirely by the passages you cite for it, and you may cite only "
-        "passages shown below. "
-        + _claim_budget_line(len(by_claim),
-                             await _cap_refusals_last_cycle(run_id))
-        + "Where the feedback names a stronger source and you judge the current "
-        "citation to be the better one, say so instead of changing nothing: "
-        'put the claim in "keep" with a rationale giving the reason. A keep '
-        "changes neither the claim nor its evidence. Use it only when you "
-        "have read the passages from the named source and they do not carry "
-        "the point better — not to avoid the work.\n\n"
-        "A feedback line marked as an OWED source is an obligation, not a "
-        "suggestion: either cite that document in a revised or added claim, "
-        'or list it in "waive" with a rationale you could only give after '
-        "reading its passages. An obligation neither cited nor waived comes "
-        "back every round.\n\n"
-        "Give a RATIONALE with every claim you revise, add or keep: ONE "
-        "short sentence, at most 20 words — which part of the question it "
-        "answers and why this source settles it. Never restate the claim. "
-        "It is reasoning, not evidence — nothing in it may assert anything "
-        "the passages do not show. Name a source the way the claim names it "
-        "— deciding body and case reference — never by its filename.\n\n"
-        + ("This is the final revision. If the passages available genuinely "
+    chat = await _drafting_chat(run_id, sinas)
+    if not chat.chat_id:
+        # Drafting opened the conversation. Reaching a revision without one
+        # means the run is resuming across a code change or a lost write, and
+        # a round with no brief behind it would be a model asked to patch an
+        # answer it has never seen.
+        _log.warning("run %s: no drafting conversation to revise in", run_id)
+        return 0
+
+    # Room for this round is made BEFORE any of it is sent. The new passages
+    # below are part of the round, and compacting after them would open a
+    # chat they had never reached.
+    await chat.prepare()
+
+    # New passages arrive as their own turn, before the feedback that needs
+    # them. They are the one thing besides the brief that a round may add to
+    # what the drafter knows, and they are sent once: the brief is not
+    # rewritten and the passages are not repeated next round.
+    if fresh:
+        await chat.ask(
+            "NEW VERIFIED PASSAGES — extracted since the brief, for the "
+            "findings in the next message. They join the passages you already "
+            "have and may be cited on the same terms. Nothing else has "
+            f"changed.\n{fresh}\n\nReply with the single word "
+            f"{drafting_chat.ACK} and wait for the findings.")
+
+    turn = (
+        f"REVIEW FINDINGS — round {chat.rounds}. This is what the review "
+        "found; everything else stands.\n"
+        + numbering
+        + drafting_chat.removed_by_the_engine(removed or [])
+        + drafting_chat.strike_block(
+            [on_strike[s] for s in sorted(on_strike)])
+        + "\n"
+        + _claim_budget_line(len(by_claim), cap=cap,
+                             refused_last_cycle=await _cap_refusals_last_cycle(run_id))
+        + "\n\nFINDINGS:\n- " + "\n- ".join(feedback[:MAX_FEEDBACK_ITEMS]) + "\n"
+        + drafting_chat.objections_block(await objections.open_points(run_id))
+        + ("\nThis is the final revision. If the passages available genuinely "
            "cannot settle a point the question asks about, do not stretch a "
            "source to cover it and do not leave the point unmentioned: add a "
            'claim with "type": "abstention" and no evidence, stating plainly '
@@ -4204,34 +6485,41 @@ async def _revise_answer(
            "Say what is missing, not that you are unable — 'The documents "
            "before us do not address X' rather than 'I cannot determine X'. "
            f"At most {MAX_ABSTENTIONS} such claims, and never for the central "
-           "question if the sources do answer it.\n\n" if last_attempt else "")
-        + 'Reply ONLY JSON: {"revise": [{"seq": <int>, "text": "<claim>", '
-        '"rationale": "<why this claim rests on this source>", '
-        '"evidence": [{"filename": "...", "line_from": <int>, "line_to": <int>}]}], '
-        '"drop": [{"seq": <int>, "rationale": "<what the claim asserted '
-        'and why no passage available can carry it>"}], '
-        '"keep": [{"seq": <int>, "rationale": "<why the current citation '
-        'stands despite the feedback>"}], '
-        '"waive": [{"doc": "<filename>", "rationale": "<why, having read '
-        'its passages, this OWED document does not carry any point this '
-        'answer needs>"}], '
-        '"add": [{"text": "<claim>", "type": "legal_principle|factual|'
-        'procedural|conclusion", "rationale": "<why this claim rests on this '
-        'source>", "evidence": [{"filename": "...", '
-        '"line_from": <int>, "line_to": <int>}]}]}\n\n'
-        + await _synthesis_playbook()
-        + f"\nQUESTION:\n{question}\n\nCURRENT ANSWER:\n{current}\n\n"
-        f"FEEDBACK:\n- " + "\n- ".join(feedback[:10])
-        + (f"\n\nADDITIONAL VERIFIED PASSAGES:{fresh}" if fresh else ""),
+           "question if the sources do answer it.\n" if last_attempt else "")
+        + "\nReply with the patch, as JSON and nothing else."
     )
+    reply = await chat.turn(turn, label=f"round {chat.rounds}")
 
     patch = _parse_patch(reply, allow_abstention=last_attempt)
+    # The two-strike rule, applied to the reply rather than asked of it. A
+    # revision of a claim on its second finding is applied only if it rebinds
+    # the claim to evidence it does not already stand on; one that returns the
+    # same citation is removed from the patch here and recorded as refused, so
+    # a third round spent on the same wording cannot happen by being obeyed.
+    rejected_rewords: list[dict] = []
+    if patch and on_strike:
+        patch, rejected_rewords = strikes.screen_patch(patch, on_strike)
+        for r in rejected_rewords:
+            await strikes.rejected_reword(run_id, r["claim_id"], r["sequence"],
+                                          round_no=chat.rounds)
+        if rejected_rewords:
+            _log.info("run %s: refused %d reword(s) of struck claim(s) %s",
+                      run_id, len(rejected_rewords),
+                      [r["sequence"] for r in rejected_rewords])
+    refusals = 0
     if patch:
         # A waive is a discharge with a recorded reason, not a dropped
         # message: it is honored even when the rest of the patch is empty.
         for w in patch.get("waive") or []:
             await obligations.waive(run_id, w["doc"], w["rationale"])
-    if not patch or not (patch["revise"] or patch["add"] or patch["drop"]):
+        # A refusal is honored on the same terms and for the same reason: it
+        # is a REPLY, so it must survive a patch that changes no claim. The
+        # reply that mattered on the measured run was exactly that — a reason
+        # why a source could not carry the point — and the shape that lost it
+        # was "nothing was applied, so nothing is recorded".
+        refusals = await _record_refusals(run_id, patch)
+    if not patch or not (patch["revise"] or patch["add"] or patch["drop"]
+                         or patch["keep"]):
         # Numbered like any other cycle, though it changed nothing. The reviser
         # replied, so this IS a cycle, and `_cap_refusals_last_cycle` reads the
         # latest one as "your previous reply". Leaving it unnumbered left an
@@ -4240,8 +6528,13 @@ async def _revise_answer(
         # invitation to drop a sound claim to make room for nothing.
         #
         # Counts are all zero because nothing was applied. `kept_with_reason`
-        # is not recorded here even when the patch carried keeps: the early
-        # return above means they were not written either.
+        # is zero here for the same reason and now means it: a patch carrying
+        # keeps no longer reaches this branch. It used to — keeps were absent
+        # from the condition above, so a reply whose only content was "this
+        # citation stands, and here is why" was parsed, counted nowhere and
+        # discarded, which is why `kept_with_reason` read 0 on every round of
+        # every run. The one disposition built for the reviser to answer back
+        # with was the one the early return threw away.
         #
         # Refused drops are the exception, and they have to be. A reply whose
         # only content is drops with no reason lands here rather than below,
@@ -4256,12 +6549,27 @@ async def _revise_answer(
                 "dropped": 0, "kept_with_reason": 0, "abstentions": 0,
                 "add_dropped_at_cap": 0, "untouched": len(by_claim),
                 "feedback_items": len(feedback), "yielded_no_change": True,
+                "refusals": refusals,
                 "dropped_unexplained": (patch or {}).get("drop_unexplained")
-                or []}})
+                or [],
+                # A patch whose only content was a reword of a struck claim
+                # lands here, and this is the one line that says why nothing
+                # changed. Without it the cycle reads as a drafter that had
+                # nothing to say, when it made a move the rule does not allow.
+                "rewords_refused": rejected_rewords}})
+        chat.note(f"{refusals} refusal(s); no claim changed"
+                  + (f"; {len(rejected_rewords)} reword(s) of a twice-failed "
+                     "claim refused" if rejected_rewords else ""))
+        await _save_drafting_chat(run_id, chat)
         return 0
 
     by_seq = {c.sequence: c for c, *_ in rows}
     touched = 0
+    # Keeps APPLIED, not keeps proposed. A keep naming a sequence that is not
+    # in this answer changes nothing and is skipped below, and counting it
+    # would put the same defect back one layer down: a number that says the
+    # reviser answered when nothing recorded the answer.
+    kept = 0
     # Bound before the add block, which does not run when the patch adds
     # nothing; the telemetry below reads both either way.
     admitted: list[dict] = []
@@ -4289,6 +6597,7 @@ async def _revise_answer(
                                   .where(AnswerClaim.id == claim.id))
             touched += 1
 
+        id_by_seq = {seq: c.id for seq, c in by_seq.items()}
         for item in patch["revise"]:
             claim = by_seq.get(item["seq"])
             if claim is None:
@@ -4299,6 +6608,9 @@ async def _revise_answer(
             row.claim_text = item["text"][:4000]
             if item.get("rationale"):
                 row.rationale = item["rationale"][:2000]
+            # The structure moves with the text when the patch says so; a
+            # revision that says nothing about it leaves the row where it is.
+            _apply_structure(row, item, parts, id_by_seq, sources=src_facts)
             # its evidence is re-bound, so its verdicts no longer apply
             await session.execute(ClaimEvidence.__table__.delete()
                                   .where(ClaimEvidence.claim_id == row.id))
@@ -4312,16 +6624,32 @@ async def _revise_answer(
             nxt = ((await session.execute(
                 select(func.max(AnswerClaim.sequence))
                 .where(AnswerClaim.answer_id == answer_id))).scalar() or 0) + 1
-            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live)
+            admitted, add_dropped_at_cap = _admit_adds(patch["add"], live, cap)
             for item in admitted:
                 row = AnswerClaim(answer_id=answer_id, sequence=nxt,
                                   claim_text=item["text"][:4000],
                                   rationale=(item.get("rationale") or "")[:2000]
                                   or None,
-                                  claim_type=str(item.get("type")
-                                                 or "legal_principle")[:50])
+                                  claim_type=str(
+                                      item.get("type")
+                                      or answer_structure.DEFAULT_CLAIM_KIND
+                                  )[:50])
                 session.add(row)
                 await session.flush()
+                # An added claim lands in its section and part, positioned
+                # after what is there, so the order survives the addition.
+                _apply_structure(row, item, parts, id_by_seq, added=True,
+                                 sources=src_facts)
+                if row.section:
+                    same_part = (AnswerClaim.part_index.is_(None)
+                                 if row.part_index is None
+                                 else AnswerClaim.part_index == row.part_index)
+                    row.position = ((await session.execute(
+                        select(func.max(AnswerClaim.position))
+                        .where(AnswerClaim.answer_id == answer_id)
+                        .where(AnswerClaim.section == row.section)
+                        .where(same_part)
+                    )).scalar() or 0) + 1
                 await _bind_spans(session, row.id, item["evidence"])
                 nxt += 1
                 touched += 1
@@ -4334,7 +6662,31 @@ async def _revise_answer(
                 # text and spans untouched, so its verdicts still stand and
                 # it is not re-judged. Only the reasoning is recorded.
                 row.rationale = item["rationale"][:2000]
+                # Counted as work done, because it is. A keep is the reviser
+                # answering the feedback rather than obeying it, and a round
+                # that returns 0 is read by the caller as "revision produced
+                # nothing usable" — which would end the loop on the one reply
+                # that most needs the next cycle to read it.
+                touched += 1
+                kept += 1
         await session.commit()
+
+    # How each struck claim's argument ended, recorded against the claim's
+    # row id and only for the dispositions that were actually applied. Three
+    # moves were on the table and the ledger says which one was taken, so the
+    # rule can be read after the fact as an outcome rather than as a rule.
+    for seq in patch["drop"]:
+        if seq in on_strike and by_seq.get(seq) is not None:
+            await strikes.settle(run_id, on_strike[seq]["claim_id"],
+                                 strikes.DROPPED, round_no=chat.rounds)
+    for item in patch["revise"]:
+        if item["seq"] in on_strike and by_seq.get(item["seq"]) is not None:
+            await strikes.settle(run_id, on_strike[item["seq"]]["claim_id"],
+                                 strikes.DEFENDED, round_no=chat.rounds)
+    for item in patch["keep"]:
+        if item["seq"] in on_strike and by_seq.get(item["seq"]) is not None:
+            await strikes.settle(run_id, on_strike[item["seq"]]["claim_id"],
+                                 strikes.REFUSED, round_no=chat.rounds)
 
     # `added` counts rows written, not rows asked for. It used to be
     # len(patch["add"]), so a patch whose additions were all refused at the
@@ -4353,7 +6705,7 @@ async def _revise_answer(
     await _tele(run_id, "validate", **{
         cycle: {
             "claims": len(by_claim), "revised": len(patch["revise"]),
-            "kept_with_reason": len(patch.get("keep") or []),
+            "kept_with_reason": kept,
             "abstentions": sum(1 for a in admitted
                                if a.get("type") == "abstention"),
             "dropped": len(patch["drop"]), "dropped_detail": dropped_here,
@@ -4362,11 +6714,121 @@ async def _revise_answer(
             # is suppressing the disposition rather than documenting it, and
             # that is the thing to know first.
             "dropped_unexplained": patch.get("drop_unexplained") or [],
+            # Replies to the gate's requests: refusals, plus the drops and
+            # keeps that named one. Beside the claim counts because they are
+            # the same reply — what the reviser did AND what it said about
+            # what it was asked to do.
+            "refusals": refusals,
+            # Beside the refusals because it is the same kind of fact: what
+            # the drafter tried and the engine would not take. A cycle that
+            # revised two claims and had a third reword refused is a different
+            # cycle from one that revised two and was asked for nothing else.
+            "rewords_refused": rejected_rewords,
+            "struck_claims": sorted(on_strike),
             "added": len(admitted),
             "add_dropped_at_cap": add_dropped_at_cap,
             "untouched": len(by_claim) - touched,
             "feedback_items": len(feedback)}})
+    # What this round settled, in one line, for the summary that will stand in
+    # for it once the conversation reaches its cap. Written from the engine's
+    # own record rather than from the transcript: a patch that parsed is not a
+    # patch that applied, and the difference is exactly what a later round
+    # needs to know.
+    chat.note(
+        f"revised {len(patch['revise'])}, added {len(admitted)}, dropped "
+        f"{len(patch['drop'])}, kept {kept} with a reason, "
+        f"{refusals} refusal(s)")
+    await _save_drafting_chat(run_id, chat)
     return touched
+
+
+def _finding_subjects(verdict: dict) -> list[tuple[str, int | None]]:
+    """Whose claim each finding is about, in the order `_round_feedback`
+    writes them. Pure.
+
+    `(claim id, the sequence it is named by)`, one entry per finding line, so
+    the caller can slice this list by exactly the cap it slices the feedback
+    by and strike the claims the round actually asks about.
+
+    The id is what the strike ledger counts on. The sequence travels beside it
+    for the prompt, which addresses claims by number and knows nothing of row
+    ids — and for the record, so a reader can see which number a claim wore
+    when it was found.
+
+    Kept next to `_round_feedback` and iterating the same two lists in the
+    same order, because the two must stay in step: an entry here that is not
+    a line there would strike a claim nobody was asked about.
+    """
+    out: list[tuple[str, int | None]] = []
+    for group in ("failed", "overreaching"):
+        for f in (verdict.get(group) or []):
+            if not isinstance(f, dict):
+                continue
+            out.append((str(f.get("claim_id") or ""),
+                        _whole(f.get("claim_sequence"))))
+    return out
+
+
+def _whole(raw: Any) -> int | None:
+    """A claim sequence, or None if it is not one. Pure.
+
+    The same digit test the verdict readers below apply, and for the same
+    reason: int() reads 9.5 as claim 9 and True as claim 1.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        n = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return int(n) if n.is_integer() else None
+
+
+def _round_feedback(verdict: dict, struck: set[int] | None = None) -> list[str]:
+    """What this round found, in the words the drafter is asked to act on. Pure.
+
+    The wording carries a decision. "Narrow it to what the passages say" is an
+    instruction to adjust, and a model that has just written a claim will
+    adjust it — it will reword the same assertion and send it back, and the
+    next round will find the same defect. On the measured loop that is what
+    ten revision rounds looked like: most touched one or two claims, one
+    touched none.
+
+    So abandoning is named as an option in every finding, and named as the
+    LIKELY one for a claim that has already been raised once and survived.
+    A claim the review has now failed twice is not a wording problem.
+
+    `struck` is the sequences the strike ledger says are on their second
+    finding. It used to be assembled here from two lists of sequence numbers
+    held in the validation loop's locals, and both halves of that were wrong:
+    a sequence is not a claim's identity, and a local does not survive the
+    loop restarting itself once per gate cycle. What arrives now is a set of
+    CURRENT sequence numbers resolved from claim row ids, and the finding line
+    says what the engine will and will not accept rather than asking nicely.
+    """
+    struck = struck or set()
+
+    def _again(seq: Any) -> str:
+        return (" This is the second round that has failed this claim, and "
+                "rewording is no longer one of your moves on it: "
+                + drafting_chat.PERMITTED_MOVES
+                + " Do not reword it again — a revision that comes back with "
+                "the citation it already has is not applied."
+                if _whole(seq) in struck else "")
+
+    out = [f"Claim {f['claim_sequence']}: {f['reason']} Rebind it to a passage "
+           "that carries it, or — if no passage available does — ABANDON the "
+           "claim: drop it with a reason. Do not reword it and keep the same "
+           "citation." + _again(f.get("claim_sequence"))
+           for f in verdict.get("failed") or []]
+    out += [f"Claim {o.get('claim_sequence')} asserts more than its "
+            f"passages establish: {o.get('uncovered')}. Narrow it to what "
+            "the passages say, or bind evidence that carries the rest — and "
+            "where what is left after narrowing would say nothing worth "
+            "claiming, ABANDON it instead of shrinking it to a truism."
+            + _again(o.get("claim_sequence"))
+            for o in verdict.get("overreaching") or []]
+    return out
 
 
 def _overreach_seqs(verdict: dict) -> set[int]:
@@ -4509,7 +6971,6 @@ async def _stage_validate_publish(
         run = await session.get(QueryRun, run_id)
         answer_id = run.answer_id
         caller = _runner_caller(run)
-        question_text = run.question
         if gate_cycles is None:
             gate_cycles = EFFORT_GATE_CYCLES.get(
                 run.effort or "medium", ANSWER_GATE_CYCLES)
@@ -4629,22 +7090,20 @@ async def _stage_validate_publish(
                         await _amend_gate_cycle(run_id, bonus_cycle=True)
                         await _record_fed(run_id, key, bonus=True)
                         await _revise_answer(
-                            sinas, run_id, answer_id, question,
+                            sinas, run_id, answer_id,
                             correctness + issues,
                             points or ([missing] if missing else []),
                             last_attempt=True)
                         return await _stage_validate_publish(run_id, sinas, 0)
                     if not ok:
-                        # Named by what held it. `accounting` is not a coverage
-                        # gap: every part was covered and a named source was
-                        # left neither cited nor waived, and calling that
-                        # "coverage" tells the reader the sources were silent
-                        # on something they were not silent on.
-                        if gate_cause == "accounting":
-                            raise PartialOutcome(
-                                "accounting",
-                                "the answer does not account for every source this "
-                                "review named as bearing on the question — " + missing)
+                        # `accounting` was a cause here and is gone. A named
+                        # source the answer did not incorporate cannot make a
+                        # run partial any more: `partial` says a part could not
+                        # be answered, and that was false on every run this
+                        # branch fired for. Unincorporated material is a note
+                        # on the answer and a line in the objection ledger; an
+                        # essential request that the review pressed and could
+                        # not settle is a reservation the reader sees.
                         if gate_cause == "holistic":
                             raise PartialOutcome(
                                 "holistic",
@@ -4672,20 +7131,34 @@ async def _stage_validate_publish(
                 repeated = not await _gate_point_is_new(run_id, key)
                 await _record_fed(run_id, key)
                 await _revise_answer(
-                    sinas, run_id, answer_id, question,
+                    sinas, run_id, answer_id,
                     correctness + issues,
                     points or ([missing] if missing else []),
                     last_attempt=gate_cycles <= 1 or repeated)
                 return await _stage_validate_publish(
                     run_id, sinas, gate_cycles - 1)
-        # One revision per round, over everything this round found.
-        fb = [f"Claim {f['claim_sequence']}: {f['reason']}"
-              for f in verdict["failed"]]
-        fb += [f"Claim {o.get('claim_sequence')} asserts more than its "
-               f"passages establish: {o.get('uncovered')}. Narrow it to what "
-               f"the passages say, or bind evidence that carries the rest."
-               for o in over]
-        if fb and await _revise_answer(sinas, run_id, answer_id, question_text, fb):
+        # One revision per round, over everything this round found. A claim
+        # this round names for the second time is struck: rewording stops
+        # being a move it may make, here in the sentence it reads and in the
+        # patch screen that applies the reply — see `services/strikes`.
+        #
+        # Only the findings this round will actually SEND are counted. The
+        # ones past the cap are not put to the drafter, and a claim cannot be
+        # said to have failed to act on a request it never saw.
+        subjects = _finding_subjects(verdict)[:MAX_FEEDBACK_ITEMS]
+        tally = await strikes.record_findings(run_id, subjects,
+                                              round_no=round_no)
+        struck_seqs = {seq for cid, seq in subjects if seq is not None
+                       and tally.get(cid, 0) >= strikes.STRIKE_LIMIT}
+        if struck_seqs:
+            # `struck_N`, not `round_N_struck`. `answer_regress` reads every
+            # key under `validate` that starts with `round_` as a round's
+            # counts and takes the last one by name, so a sibling key sharing
+            # that prefix would be read as the final round of the run.
+            await _tele(run_id, "validate", **{
+                f"struck_{round_no}": sorted(struck_seqs)})
+        fb = _round_feedback(verdict, struck_seqs)
+        if fb and await _revise_answer(sinas, run_id, answer_id, fb):
             continue
         break  # revision produced nothing usable; drop below
 
@@ -4733,6 +7206,12 @@ async def _stage_validate_publish(
         # and both describe the latest state. The numbered record is the history.
         await _tele(run_id, "validate", dropped_detail=dropped)
         await _record_removal(run_id, "rounds_exhausted", dropped)
+    # A claim the rounds ran out on did not end by a disposition, and the
+    # strike record must not read as though the drafter chose anything. It is
+    # the outcome the rule exists to make rarer, so it is named.
+    for cid in failing_ids:
+        await strikes.settle(run_id, str(cid), strikes.EXHAUSTED,
+                             round_no=round_no)
     async with AsyncSessionLocal() as session:
         question = (await session.get(QueryRun, run_id)).question
     ok, missing, issues, correctness, points, gate_cause = await _gate_answer(
@@ -4758,16 +7237,11 @@ async def _stage_validate_publish(
                         gate_issues=issues, bonus_cycle=True)
             await _amend_gate_cycle(run_id, bonus_cycle=True)
             await _record_fed(run_id, key, bonus=True)
-            await _revise_answer(sinas, run_id, answer_id, question,
+            await _revise_answer(sinas, run_id, answer_id,
                                  correctness + issues,
                                  points or ([missing] if missing else []),
-                                 last_attempt=True)
+                                 last_attempt=True, removed=dropped)
             return await _stage_validate_publish(run_id, sinas, 0)
-        if not ok and gate_cause == "accounting":
-            raise PartialOutcome(
-                "accounting",
-                "validation exhausted with a source this review named as bearing "
-                "on the question neither cited nor waived — " + missing)
         if not ok and gate_cause == "holistic":
             raise PartialOutcome(
                 "holistic",
@@ -4786,10 +7260,10 @@ async def _stage_validate_publish(
     )
     await _amend_gate_cycle(run_id, dropped_claims=len(failing_ids))
     await _record_fed(run_id, key)
-    await _revise_answer(sinas, run_id, answer_id, question,
+    await _revise_answer(sinas, run_id, answer_id,
                          correctness + issues,
                          points or ([missing] if missing else []),
-                         last_attempt=gate_cycles <= 1)
+                         last_attempt=gate_cycles <= 1, removed=dropped)
     return await _stage_validate_publish(run_id, sinas, gate_cycles - 1)
 
 
@@ -5054,8 +7528,13 @@ async def run_pipeline(run_id: uuid.UUID) -> None:
         await _stage_synthesize(run_id, sinas)
         await _check_cancel(run_id)
         await _stage_validate_publish(run_id, sinas)
-        await _mark(run_id, status="published", completed_at=_now())
-        _log.info("query run %s published", run_id)
+        # Not always `published`. A run whose review pressed an essential
+        # source the drafter refused ends `published_contested`: the answer is
+        # there, complete and readable, with a reservation naming what two
+        # readers disagreed about. See `_final_status`.
+        status = await _final_status(run_id)
+        await _mark(run_id, status=status, completed_at=_now())
+        _log.info("query run %s %s", run_id, status)
     except CancelledOutcome as c:
         _log.info("query run %s cancelled", run_id)
         await _mark_cancelled(run_id, c)

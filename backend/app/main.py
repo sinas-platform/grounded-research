@@ -37,6 +37,9 @@ async def lifespan(app: FastAPI):  # noqa: ARG001
     maintenance_task = None
     if settings.sgr_maintenance_interval_seconds > 0:
         from app.services.maintenance import maintenance_loop
+        # The loop builds the planner's grounding once before its first sleep;
+        # see `ensure_corpus_profile` for why waiting an interval for that
+        # meant waiting for ever on a service that restarts.
 
         maintenance_task = asyncio.create_task(
             maintenance_loop(settings.sgr_maintenance_interval_seconds))

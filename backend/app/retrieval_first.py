@@ -20,14 +20,19 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import sys
 import time
 import uuid
 from collections import defaultdict
 from pathlib import Path
 
-from sqlalchemy import String, bindparam, text
+from sqlalchemy import String, bindparam, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
+
+from collections.abc import Sequence
+
+_log = logging.getLogger("sgr.retrieval")
 
 from app.config import get_settings
 
@@ -44,11 +49,78 @@ def _domain_prefix() -> str:
     return f"{d} " if d else ""
 
 
+def _playbook_block(
+    entries: "Sequence[tuple[str, str, bool]]",
+) -> tuple[str, list[str]]:
+    """Deployment retrieval guidance as a prompt block, and what was left out.
+
+    Pure. `entries` are (name, content, applies_everywhere).
+
+    Playbooks of kind `synthesis` and `validation` each have a reader; kind
+    `retrieval` had none, so a deployment's retrieval guidance was stored,
+    validated, imported, exported and read by nothing. This is the reader.
+
+    Scope is why the second return value exists. A playbook scoped to a
+    document class is applied by matching that class against the documents in
+    play, and at planning time there are none yet: nothing has been retrieved,
+    so nothing can be matched. Such a playbook cannot be applied here. It is
+    named back to the caller rather than dropped, because a thing that is
+    installed and silently ignored is indistinguishable from a thing that is
+    working, and this codebase has met that shape often enough.
+    """
+    used, skipped = [], []
+    for name, content, everywhere in entries:
+        if not everywhere:
+            skipped.append(name)
+            continue
+        if (content or "").strip():
+            used.append(content.strip())
+    if not used:
+        return "", skipped
+    return ("DEPLOYMENT RETRIEVAL GUIDANCE (how this corpus and this index "
+            "answer a search):\n" + "\n\n".join(used) + "\n", skipped)
+
+
+async def _retrieval_guidance() -> tuple[str, list[str]]:
+    """`_playbook_block` over the installed playbooks of kind `retrieval`."""
+    from app.db import AsyncSessionLocal
+    from app.models import Playbook, PlaybookScope
+
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(
+            select(Playbook.id, Playbook.name, Playbook.content)
+            .where(Playbook.kind == "retrieval")
+            .order_by(Playbook.name))).all()
+        if not rows:
+            return "", []
+        scoped = (await session.execute(
+            select(PlaybookScope.playbook_id,
+                   PlaybookScope.document_class_id,
+                   PlaybookScope.dossier_class_id)
+            .where(PlaybookScope.playbook_id.in_([r[0] for r in rows]))
+        )).all()
+    # A scope row is the everywhere-sentinel only when BOTH class refs are
+    # null; the importer writes that row to own an everywhere-scoped playbook.
+    # Reading document_class_id alone would make a dossier-only scope look
+    # like the sentinel, and a playbook restricted to one dossier class would
+    # then be injected into every plan -- the opposite of what its scope says.
+    # A scope this cannot evaluate is a restriction, so it is not applied.
+    restricted: dict = {}
+    for pb_id, cls_id, dossier_id in scoped:
+        restricted.setdefault(pb_id, False)
+        if cls_id is not None or dossier_id is not None:
+            restricted[pb_id] = True
+    return _playbook_block([
+        (name, content, not restricted.get(pb_id, False))
+        for pb_id, name, content in rows
+    ])
+
+
 _ROUND1_PROMPT = """You are planning document retrieval for a {domain}research
 question against a corpus with this schema:
 
 {corpus_map}
-
+{guidance}
 Propose retrieval probes grounded in the schema. Reply ONLY JSON:
 {{"named_entities": ["<entities NAMED in the question>"],
   "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'air transp'>"}}],
@@ -61,7 +133,7 @@ _ROUND2_PROMPT = """Your probes were resolved against the real corpus. Matched
 values (with document counts):
 
 {matches}
-
+{guidance}
 Finalize the retrieval plan. Keep only anchors that serve the question;
 drop noise; add websearch queries for gaps the matches revealed.
 Reply ONLY JSON:
@@ -213,8 +285,15 @@ async def _invoke_json(
 
 # The corpus map describes the shape of the corpus — entity types with a few
 # example values, document classes, properties. It changes only when documents
-# are ingested, but plan_question() rebuilds it for every question, and the
-# entity half is a full-corpus aggregation. Cache it.
+# are ingested, but plan_question() rebuilds it for every question. Cache it.
+#
+# TWO CACHES, ONE BEHIND THE OTHER, AND THEY ARE NOT THE SAME KIND. This one
+# is the assembled prompt block held in this process for a quarter of an hour,
+# and it saves the small reads the map still makes. The entity half is no
+# longer one of them: it is a stored profile (services/corpus_profile),
+# refreshed out of band, because that half was a full-corpus aggregation and
+# no in-process TTL could make its first miss affordable — six concurrent
+# runs meant six misses and sixteen minutes each.
 _CORPUS_MAP_TTL_S = 900
 _corpus_map_cache: tuple[float, str] | None = None
 _corpus_map_lock = asyncio.Lock()
@@ -235,8 +314,9 @@ def invalidate_corpus_map() -> None:
 
 
 async def build_corpus_map() -> str:
-    """Schema snapshot: entity types (frequency-ranked examples), document
-    classes with counts, and per-class properties with example values.
+    """Schema snapshot: entity types (approximate sizes and most-mentioned
+    examples, read from the stored corpus profile), document classes with
+    counts, and per-class properties with example values.
 
     Cached for _CORPUS_MAP_TTL_S; see invalidate_corpus_map().
     """
@@ -256,32 +336,27 @@ async def build_corpus_map() -> str:
 
 async def _build_corpus_map_uncached() -> str:
     from app.db import AsyncSessionLocal
+    from app.services.corpus_profile import entity_type_block
 
     async with AsyncSessionLocal() as s:
-        # Aggregate entity_mention on its own first (5.2M rows -> ~485k
-        # groups), then join. The previous form joined entity to
-        # entity_mention and grouped the 5.2M-row result, which sorts far
-        # more than it needs to for an answer that is 5 examples per type:
-        # on a real corpus it spilled >1GB of temp files and died on
-        # `temp_file_limit`. Needs ix_entity_mention_entity_id — without it
-        # this is ~100s rather than ~14s, and the old form fails either way.
-        et = (await s.execute(text("""
-            WITH uses AS (
-              SELECT entity_id, count(*) AS n
-              FROM entity_mention GROUP BY entity_id
-            ), ranked AS (
-              SELECT e.entity_type_id, e.canonical_form,
-                     row_number() OVER (PARTITION BY e.entity_type_id
-                                        ORDER BY COALESCE(u.n, 0) DESC) AS rn
-              FROM entity e LEFT JOIN uses u ON u.entity_id = e.id
-              WHERE e.merged_into_id IS NULL
-            )
-            SELECT t.name,
-                   (SELECT count(*) FROM entity e
-                    WHERE e.entity_type_id = t.id AND e.merged_into_id IS NULL),
-                   (SELECT array_agg(canonical_form)
-                    FROM ranked WHERE entity_type_id = t.id AND rn <= 5)
-            FROM entity_type t ORDER BY 2 DESC"""))).all()
+        # A LOOKUP, NOT A COMPUTATION. The entity half of this map used to be
+        # computed here: count every mention of every entity, rank all of them
+        # within their type, keep five names and an exact count per type. Six
+        # concurrent runs each spent over sixteen minutes on it before
+        # planning, and the bulk load writing to the same database lost two
+        # thirds of its throughput to them. It is not per-question work — the
+        # answer is the same for every run until the next document lands — and
+        # it grows with the corpus, so it got worse every hour.
+        #
+        # services/corpus_profile computes it out of band from a bounded
+        # sample and stores it; this reads it. An unbuilt or stale profile
+        # costs the planner the sizes and examples and is logged, and is never
+        # a reason to run the old query again.
+        et_block = await entity_type_block(s)
+        # Left exact: one grouped scan of `document`, three orders of
+        # magnitude smaller than the mention table and already behind this
+        # map's own TTL. Sampling it would buy nothing and cost accuracy where
+        # the classes are few enough to be named individually.
         dc = (await s.execute(text("""
             SELECT c.name, count(d.id) FROM document_class c
             LEFT JOIN document d ON d.document_class_id = c.id
@@ -293,9 +368,7 @@ async def _build_corpus_map_uncached() -> str:
             FROM document_class_property p
             JOIN document_class c ON c.id = p.document_class_id
             LIMIT 40"""))).all()
-    lines = ["ENTITY TYPES (name, count, most-mentioned examples):"]
-    for name, cnt, ex in et:
-        lines.append(f"- {name} ({cnt}): {', '.join((ex or [])[:5])}")
+    lines = [et_block]
     lines.append("DOCUMENT CLASSES (name, count):")
     for name, cnt in dc:
         lines.append(f"- {name} ({cnt})")
@@ -325,7 +398,7 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
                 WHERE e.merged_into_id IS NULL
                   AND (:tname = '' OR t.name ILIKE :tname)
                   AND e.canonical_form ILIKE :pat
-                ORDER BY docs DESC LIMIT 12"""),
+                ORDER BY docs DESC, e.id LIMIT 12"""),
                 {"tname": tname, "pat": f"%{m}%"})).all()
             for eid, cf, tn, docs in rows:
                 out.append({"id": str(eid), "value": cf, "type": tn,
@@ -377,9 +450,31 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
     genuinely about that entity is the one case the mark must not foreclose.
     """
     anchors = [a for a in model_picks if a in matches]
+    # Never force-picked on no recognition at all, and ties broken on id.
+    # `docs` counts every mention including the gazetteer's blind string
+    # matches, so an entity recognised NOWHERE could be force-picked for
+    # being written everywhere; `validated_docs` counts only the mentions
+    # something actually recognised, and is computed for every match already.
+    # Ranking still goes by `docs` — strongest means most present — and the
+    # id tie-break makes the cut the same every run rather than however the
+    # resolver's rows happened to arrive.
+    #
+    # Measured: an article's headline was registered as an entity of a
+    # substantive type, carried 470 documents and not one validated mention. Two runs of one
+    # question shared four anchors out of ten and twelve, and their retrieved
+    # sets overlapped by half, with the divergence starting at rank 10 —
+    # which is the band the expert review's findings live in.
+    #
+    # Being blind-only is not itself disqualifying: half the collection's
+    # entities have no validated mention, most of them in a handful of
+    # documents where they do no harm. What harms is the combination this
+    # sort selected for — never recognised, yet apparently everywhere.
+    # `validated_docs` is computed for every match already; nothing here is
+    # new except reading it.
     strongest = sorted(
-        (m for m in matches.values() if not m.get("generic")),
-        key=lambda x: -x["docs"])
+        (m for m in matches.values()
+         if not m.get("generic") and m.get("validated_docs", 0) > 0),
+        key=lambda x: (-x["docs"], x["id"]))
     for m in strongest[:6]:
         if m["id"] not in anchors:
             anchors.append(m["id"])
@@ -387,7 +482,24 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
 
 
 async def _resolve_names(names: list[str]) -> list[dict]:
-    """Named entities / seed cases -> entity matches (alias-tolerant)."""
+    """Named entities / seed cases -> entity matches (alias-tolerant).
+
+    The cut is ordered, and that is not tidiness. This took SIX rows with no
+    ORDER BY, so which six a name resolved to was whatever order the rows
+    came back in — and those matches are the list the planner picks its
+    anchors from, which decide what the graph channel traverses, which is 94
+    to 98% of everything retrieved. An unordered cut here moves half the
+    answer.
+
+    Measured on two runs of one question at temperature zero: four shared
+    anchors out of ten and twelve, retrieved sets overlapping by half, the
+    divergence starting at rank 10. The band the expert review's findings
+    live in is ranks 11 to 51.
+
+    `retrieve_and_rank` learned this one stage later and says so in its own
+    comment — equal scores kept the order rows arrived in, and the cut made
+    that arbitrary order decide membership. Same bug, earlier, costlier.
+    """
     from app.db import AsyncSessionLocal
 
     seen: dict[str, dict] = {}
@@ -410,6 +522,7 @@ async def _resolve_names(names: list[str]) -> list[dict]:
                   AND (e.canonical_form ILIKE :pat OR e.id IN
                        (SELECT entity_id FROM entity_alias
                         WHERE alias ILIKE :pat))
+                ORDER BY 4 DESC, e.id
                 LIMIT 6"""), {"pat": f"%{n}%"})).all()
             for eid, cf, tn, docs in rows:
                 seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,
@@ -427,8 +540,10 @@ async def plan_question(
     # both `_run_cost_usd` and the cost cap that reads it.
     sinas = _Sinas(run_id=run_id)
     corpus_map = await build_corpus_map()
+    guidance, guidance_skipped = await _retrieval_guidance()
     r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question, domain=_domain_prefix()),
+        corpus_map=corpus_map, question=question, domain=_domain_prefix(),
+        guidance=guidance),
         _ROUND1_GROUPS, run_id, "round 1")
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
@@ -440,10 +555,11 @@ async def plan_question(
         + (" — GENERIC TERM: matches the word, almost never the thing;"
            " anchor only if the question is really about this entity"
            if m.get("generic") else "")
-        for m in sorted(all_matches.values(), key=lambda x: -x["docs"])[:40]
+        for m in sorted(all_matches.values(),
+                        key=lambda x: (-x["docs"], x["id"]))[:40]
     ) or "(no matches — rely on websearch queries)"
     r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question),
+        matches=match_lines, question=question, guidance=guidance),
         _ROUND2_GROUPS, run_id, "round 2")
     # determinism: model's picks unioned with the strongest matches, and
     # both rounds' queries kept — reduces run-to-run swing
@@ -472,6 +588,8 @@ async def plan_question(
             "anchor_names": {a: all_matches[a]["value"] for a in anchors},
             "queries": queries,
             "class_boost": [str(c) for c in (r2.get("class_boost") or [])],
+            # Named, not dropped: see `_playbook_block`.
+            "guidance_skipped": guidance_skipped,
             "effort": effort}
 
 

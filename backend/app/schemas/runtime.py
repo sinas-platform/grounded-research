@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from app.schemas.common import ORMModel, OwnedOut, Span, TimestampedOut
 
@@ -26,6 +26,15 @@ class DocumentOut(OwnedOut):
     classification_confidence: float | None = None
     collection_file_id: str | None = None
     staged: bool = False
+    # What the document's class says about it — the declared properties as
+    # {name: scalar} (case_number, celex, ecli, decision_date, status,
+    # superseded_by, jurisdiction, …), and the derived graph fields for the
+    # entity it is the full text of. Both are what a reader needs to CITE
+    # the document rather than name it, so a single read returns them
+    # instead of a property-values call per document. Null on a list read,
+    # which serves identity only.
+    properties: dict[str, Any] | None = None
+    annotations: dict | None = None
 
 
 class DocumentPatch(BaseModel):
@@ -222,6 +231,12 @@ class ResultDocumentOut(TimestampedOut):
     # numeric filename.
     title: str | None = None
     external_ref: str | None = None
+    # The class's declared property values, {name: scalar} — case_number,
+    # celex, ecli, decision_date, status, superseded_by, jurisdiction, and
+    # whatever else the deployment declared. A reader assembling a citation
+    # needs all of them at once; without them the only identity on the row
+    # is a filename, which is how answers came to cite filename stems.
+    properties: dict[str, Any] | None = None
     # Present only when the read asked for it (?annotate=): derived graph
     # fields for the case entity this document is the full text of —
     # {"subject_entity_id": ..., "values": {name: value | None}}.
@@ -245,6 +260,19 @@ class AnswerOut(OwnedOut):
     question: str
     status: str
     published_at: datetime | None = None
+    # The date the answer states the law as at (latest cited source date,
+    # else the run date), and the decomposition the drafter worked from:
+    # [{index, label, text}]. Both null on answers from before they existed.
+    law_stated_as_at: date | None = None
+    question_parts: list[dict[str, Any]] | None = None
+    # What the completeness review and the drafter argued about and did not
+    # settle. The ones carrying `caveat` are already printed in the prose as
+    # reservations; the rest are here to be read by a consumer asking what was
+    # contested. Null on answers from before the loop existed.
+    open_notes: list[dict[str, Any]] | None = None
+    # The assembled prose, set at publish; GET /answers/{id}/markdown
+    # regenerates it from the rows on demand.
+    rendered_markdown: str | None = None
 
 
 class ClaimOut(TimestampedOut):
@@ -259,6 +287,22 @@ class ClaimOut(TimestampedOut):
     # the evidence rows answers the opposite question — whether the passage
     # carries the sentence — so a reader needs both to follow the argument.
     rationale: str | None = None
+    # Where the claim belongs and what it is — see AnswerClaim. A renderer
+    # orders by (section, part_index, position); rows from before the
+    # structure existed carry null everywhere and render as a flat list.
+    section: str | None = None
+    part_index: int | None = None
+    part_label: str | None = None
+    position: int | None = None
+    claim_kind: str | None = None
+    test: dict[str, Any] | None = None
+    authority_label: str | None = None
+    authority_tier: int | None = None
+    jurisdiction_note: str | None = None
+    currency_note: str | None = None
+    # Claim ids this claim reasons from; set on inference and conclusion
+    # claims, null on claims that rest on passages alone.
+    follows_from: list[uuid.UUID] | None = None
 
 
 class ClaimEvidenceIn(BaseModel):
@@ -278,10 +322,32 @@ class ClaimEvidenceOut(TimestampedOut):
     relevance: float | None = None
     validated: bool
     validation_reasoning: str | None = None
+    # The source's own LABEL for the paragraph the span sits in — "42",
+    # "r.o. 4.2", "recital 14" — as the drafter read it off the passage and
+    # the faithfulness check found it in the span text. Null when the
+    # drafter offered none, when the one it offered was not there, and on
+    # rows written before it existed. Never invented, and never a number
+    # this system derived: a renderer prints it verbatim.
+    paragraph_ref: str | None = None
     # Present only when the read asked for it (?annotate=): derived graph
     # fields for the case entity the evidence document is the full text of
     # — same shape as on result-documents reads.
     annotations: dict | None = None
+
+    @model_validator(mode="after")
+    def _span_carries_paragraph_ref(self) -> ClaimEvidenceOut:
+        """The locator travels inside `span`, beside the coordinates it
+        labels.
+
+        A consumer reads a citation's position out of one object. Leaving
+        the label a sibling of the span means every renderer has to
+        reassemble the pair itself, and one that forgets prints a paragraph
+        number against the wrong span. Always set, null included: a reader
+        can then tell "this row has no locator" from "this API is older
+        than locators", which a missing key cannot say.
+        """
+        self.span = {**(self.span or {}), "paragraph_ref": self.paragraph_ref}
+        return self
 
 
 class ClaimWithEvidenceOut(ClaimOut):

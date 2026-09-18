@@ -6,6 +6,7 @@ import uuid
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -13,13 +14,14 @@ from app.api.v1.annotations import _load_definitions
 from app.auth import CallerIdentity, get_caller
 from app.db import get_session
 from app.models import Answer, AnswerClaim, ClaimEvidence
-from app.services.annotations import annotations_for_documents
 from app.schemas.runtime import (
     AnswerOut,
     ClaimEvidenceOut,
     ClaimOut,
     ClaimWithEvidenceOut,
 )
+from app.services import answer_render
+from app.services.annotations import annotations_for_documents
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/answers", tags=["answers"])
@@ -65,6 +67,75 @@ async def get_answer(
     caller: CallerIdentity = Depends(get_caller),
 ):
     return await _visible_answer_or_404(answer_id, session, caller)
+
+
+class CitationOut(BaseModel):
+    """One `[n]` marker in the assembled text, and what it points at."""
+
+    n: int
+    document_id: str
+
+
+class AnswerMarkdownOut(BaseModel):
+    markdown: str
+    citations: list[CitationOut] = []
+
+
+@router.get("/{answer_id}/markdown", response_model=AnswerMarkdownOut)
+async def get_answer_markdown(
+    answer_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    caller: CallerIdentity = Depends(get_caller),
+):
+    """The answer as prose, with the marker → document mapping beside it.
+
+    Assembled from the claim, evidence and document rows on every call, so
+    an answer whose claims changed after publication reads as it now is. The
+    text stored on the row at publish is what the answer said then; this is
+    what it says. A consumer uses this text and adds only its own
+    bibliography style — the `[n]` markers are in first-appearance order and
+    match the Authorities list.
+
+    404 when there is no answer to render: an answer with no claims and no
+    stored text has no markdown, and an empty document would read as one.
+    """
+    row = await _visible_answer_or_404(answer_id, session, caller)
+    has_claims = (await session.execute(
+        select(AnswerClaim.id).where(AnswerClaim.answer_id == answer_id).limit(1)
+    )).scalar_one_or_none() is not None
+    if not has_claims and not row.rendered_markdown:
+        raise HTTPException(status.HTTP_404_NOT_FOUND,
+                            "answer has no rendered markdown")
+    # A published answer is still writable: changing a claim resets its
+    # evidence to unvalidated, and binding new evidence adds another
+    # unvalidated row, neither of which clears `published`. This endpoint
+    # reassembles from the claims as they NOW stand, so an answer edited after
+    # publication would be served as published prose that nothing has checked
+    # — the one thing a published answer is supposed to guarantee.
+    #
+    # Refused rather than served. The alternative, serving the text stored at
+    # publication, would be a different answer from the claims and evidence
+    # every other endpoint returns for this id, and two answers under one id
+    # is the worse failure. A caller that sees this needs the run re-validated,
+    # which is a thing it can ask for.
+    if row.status == "published":
+        unvalidated = (await session.execute(
+            select(ClaimEvidence.id)
+            .join(AnswerClaim, AnswerClaim.id == ClaimEvidence.claim_id)
+            .where(AnswerClaim.answer_id == answer_id,
+                   ClaimEvidence.validated.is_(False))
+            .limit(1))).scalar_one_or_none()
+        if unvalidated is not None:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "this answer was edited after publication and carries evidence "
+                "no validation has passed; it must be re-validated before its "
+                "markdown can be served")
+    rendered = await answer_render.assemble(session, answer_id)
+    if rendered is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "answer not found")
+    return AnswerMarkdownOut(markdown=rendered.markdown,
+                             citations=rendered.citations)
 
 
 @router.get("/{answer_id}/claims", response_model=list[ClaimOut])

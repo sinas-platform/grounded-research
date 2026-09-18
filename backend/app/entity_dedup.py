@@ -62,8 +62,8 @@ async def find_pairs(want_fuzzy: bool = True, only_types: set | None = None):
     """Exact-duplicate pairs always; fuzzy candidates only when asked for.
 
     The fuzzy half is a token-overlap comparison inside each entity type, and
-    on the big types it is quadratic: Competition Decision / Case alone is
-    260k entities. Exact merging needs none of it — grouping by normalized
+    on the big types it is quadratic: the largest type in one corpus is
+    260k entities on its own. Exact merging needs none of it — grouping by normalized
     form is a fraction of a second over the whole corpus — and an --apply-llm
     scoped to two small types should pay for those two types only. Computing
     it unconditionally is what turned a 25-minute job into an overnight one.

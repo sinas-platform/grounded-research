@@ -20,8 +20,12 @@ Every link records link_method / link_confidence / link_evidence.
 Idempotent: only rows with entity_id IS NULL are touched; re-running
 relinks nothing and costs nothing.
 
-Natural-key patterns are code for now (same pragmatic precedent as
-CLASS_RULES in ingestion_oneshot) — flagged to move to package config.
+Natural-key patterns are still code here, and are the last of this shape:
+the filename rules they cited as precedent now live on the document class
+(`document_class.filename_rules`), written from the package. These belong
+beside `identifier_pattern` on the entity type for the same reason — what a
+key looks like is knowledge about a collection — and are the open item this
+module carries. Until then they are one deployment's shapes in engine code.
 """
 
 from __future__ import annotations

@@ -41,7 +41,7 @@ def _data(n_claims: int = 3, n_docs: int = 5) -> dict:
                 "created_at": datetime(2026, 8, 20, 15, 34), "telemetry": {}},
         "claims": [{"id": ids[i], "sequence": i + 1,
                     "claim_text": f"Claim number {i + 1} says a thing.",
-                    "claim_type": "legal_principle",
+                    "claim_type": "rule",
                     "rationale": f"Why claim {i + 1} rests on this source."}
                    for i in range(n_claims)],
         "evidence": [{"claim_id": ids[i], "filename": f"doc{i}.md",

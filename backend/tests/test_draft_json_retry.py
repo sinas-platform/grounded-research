@@ -49,15 +49,27 @@ def test_a_reply_with_no_object_at_all_raises_the_same_error():
 
 
 def test_the_drafter_retries_once_and_then_gives_up():
+    """One retry, and a second failure still ends the run — but by name.
+
+    It used to end by letting the second JSONDecodeError out. That was
+    correct about stopping and wrong about saying why: the run surfaced as
+    `failed` with a parser's message, or (when the reply was empty rather
+    than malformed) as a partial run reporting that no passage supported a
+    claim. `DrafterSilent` carries which of the three happened.
+    """
     import inspect
 
     from app.services import query_runner as qr
 
     src = inspect.getsource(qr._draft_from_extracts)
     body = src[src.index("    try:\n        data = _claims_json(reply)"):]
-    # the retry hands the model the error it made
+    # the repair retry hands the model the error it made — and nothing else:
+    # the broken reply is the previous message of the conversation, so up to
+    # 60,000 characters of it no longer travel back up the wire
     assert "was not valid JSON" in body
-    # and the second parse is unguarded, so a second failure ends the run
-    second = body[body.index("PREVIOUS REPLY"):]
+    assert "PREVIOUS REPLY" not in body
+    # and a second failure raises the named exception rather than escaping as
+    # whatever the parser happened to throw
+    second = body[body.index('draft_retry="repair_json"'):]
     assert "data = _claims_json(reply)" in second
-    assert "except" not in second.split("claims = data.get")[0]
+    assert "raise DrafterSilent(" in second

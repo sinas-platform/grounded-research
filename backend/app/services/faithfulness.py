@@ -54,8 +54,8 @@ given the other spans.
 A span may carry a `section:` label — the heading of the part of the
 document it sits in, computed from the document's own table of contents.
 Use it: the same sentence carries different weight inside a section that
-recites positions or background than inside the author's own findings or
-operative conclusions.
+recites background or positions the document did not author than inside
+the part where the document states its own findings or its outcome.
 
 A span FAILS if it is only tangentially related, contradicts the claim, or
 covers no part of it (e.g. the claim's precise figure appears in no span).
@@ -65,37 +65,48 @@ parts are grounded by the other spans.
 Then judge the claim AS A WHOLE. Per-span verdicts say whether each span
 carries the part it covers; they cannot say whether anything is left over.
 Take every proposition the claim asserts — each figure, date, attribution,
-causal reason, and any generalisation across jurisdictions or authorities —
-and check it against the union of the passing spans. A case caption or party
-list establishes only that the case exists and which court decided it; it
-carries no holding.
+causal reason, and any generalisation across the things the document treats
+separately — and check it against the union of the passing spans.
+
+A NAME IS NOT A STATEMENT. A title, a heading, a caption, an index or
+reference entry, a table-of-contents line, a list of names, a
+bibliographic line: each establishes that the thing it names exists and
+how this document refers to it, and nothing else. It asserts nothing ABOUT
+that thing. Only running text does. A claim resting on such a line is
+carried only for the existence of what the line names, and FAILS for
+anything said about it.
 
 Attribution is itself a proposition. If the claim says WHERE its content
-comes from — "in case X", "the court held", "according to author Y" — that
+comes from — "in X", "the author concluded", "according to Y" — that
 provenance must be carried by the passages or by the document's own
 identification below. A passage may discuss X while belonging to a
-different case entirely; if the document identifies itself as something
-other than what the claim attributes, COVERAGE is PARTIAL and the mismatch
-is what you name.
+document that is something else entirely; if the document identifies
+itself as something other than what the claim attributes, COVERAGE is
+PARTIAL and the mismatch is what you name.
 
-Voice is part of attribution. A passage may be the deciding or authoring
-voice of its document, or the document REPORTING the words of an advocate
-or interested party. Check the passage's framing and the document
-identification for whose voice the quoted words are. If the claim presents
-a reported advocate's words as the decider's own finding or as an
-established rule, that proposition is NOT carried: the span FAILS for it,
-and you name whose voice the passage actually is. A claim that attributes
-the words to their true voice is carried. Reported speech NESTS: a
-document by one author may itself recite a position held by someone else
-("in the view of…", "according to…") — judge the words introducing the
-quoted sentences themselves, not only who wrote the document. This is
-about advocacy voices only: a source neutrally reporting what was decided
-is ordinary support — do not fail a span for being a secondary account.
+Voice is part of attribution. A passage may be the document's OWN voice —
+the author or body whose document this is, speaking for itself — or the
+document REPORTING speech it did not author: a position it records, a
+submission it recounts, a message or exhibit it reproduces. Check how the
+sentence is introduced, and check the document identification, for whose
+words these are. If the claim presents reported words as the document's
+own finding, or as something established rather than merely asserted by
+the speaker, that proposition is NOT carried: the span FAILS for it, and
+you name whose voice the passage actually is. A claim that attributes the
+words to their true voice IS carried. Reported speech NESTS: a document by
+one author may itself recite a position held by someone else ("in the view
+of…", "according to…") — judge the words introducing the quoted sentences
+themselves, not only who wrote the document. This is about reported
+positions only: a document neutrally reporting what another document
+established is ordinary support — do not fail a span for being a secondary
+account.
 
-Modality is part of coverage. The claim may not state more strongly than
-the source: a hedge ("possibly", "may"), a case-specific aside, or a
-provisional finding must survive into the claim; "possibly X" is not "X",
-and a speculative aside is not a rule. Name any strengthening as missing
+Modality is part of coverage. The claim may not state more strongly, or
+more broadly, than the source: a hedge ("possibly", "may"), a statement
+confined to the particular situation the passage addresses, and a finding
+the document marks as provisional must all survive into the claim.
+"Possibly X" is not "X", and something said of one situation is not a
+general proposition. Name any strengthening or broadening as missing
 coverage.
 
 DOCUMENT IDENTIFICATION (the opening of each cited document, verbatim):
@@ -188,6 +199,58 @@ def _front_matter_extent(content: str) -> int:
         if lines[i].strip() == "---":
             return i + 1
     return 0
+
+
+def _fold(text: str) -> str:
+    """Letters and digits, lower-cased, everything else gone.
+
+    What a paragraph label survives being copied through: a source printing
+    "42." and a drafter writing "42", "r.o. 4.2" and "R.O. 4.2", a label
+    that picked up a trailing space. Punctuation and spacing are the part
+    that varies; the characters that identify the paragraph are the part
+    that does not. Pure.
+    """
+    return "".join(ch.lower() for ch in (text or "") if ch.isalnum())
+
+
+def _span_lines(content: str, span: dict[str, Any]) -> str:
+    """The span's own lines, without the judging margin. The margin exists
+    so a judge can read around a passage; a locator has to be IN the passage
+    it labels, so it is checked against exactly those lines. Empty when the
+    coordinates do not name lines that exist. Pure."""
+    lines = (content or "").splitlines()
+    try:
+        lf = int(span.get("line_from") or 0)
+        lt = int(span.get("line_to") or lf)
+    except (TypeError, ValueError):
+        return ""
+    if lf < 1 or lt < lf or lt > len(lines):
+        return ""
+    return "\n".join(lines[lf - 1:lt])
+
+
+def locator_holds(locator: str | None, span_text: str) -> bool | None:
+    """Does the claimed paragraph label actually appear in the span?
+
+    True, False, or None when there is nothing to check. Deterministic and
+    total — no model is asked, and no pattern says what a paragraph label
+    looks like in a given corpus, because nothing here can know that. The
+    drafter proposes the label it read off the passage and this says whether
+    the passage shows it; a label the passage does not show is a citation
+    pointing somewhere a reader cannot follow, which is worse than a
+    citation with no paragraph at all.
+
+    A substring match, on the folded forms, because a label is a short token
+    and the ways a faithful copy of one differs from the source are exactly
+    what folding removes. It is a floor and not a proof: a bare "42" can
+    match digits that are not a paragraph number. A weak check that refuses
+    an invented "recital 99" and lets an ambiguous "42" through is the right
+    trade for a check whose failure throws a citation away. Pure.
+    """
+    want = _fold(locator)
+    if not want:
+        return None
+    return want in _fold(span_text)
 
 
 def _span_section(toc: list[dict], line_from: int, line_to: int) -> str:
@@ -371,10 +434,11 @@ async def validate_answer_evidence(
         span_text, lf, lt = _slice_span(content, ev.span or {})
         # Deterministic: a span wholly inside the front-matter envelope is
         # the document identifying itself, not the document speaking. The
-        # expert reviews found claims resting on exactly these lines — "the
-        # Court heard an appeal", cited to a title block — and the judge
-        # sometimes passed them. A span that merely STARTS in the envelope
-        # and runs into the body is left to the judge: it covers real text.
+        # expert reviews found claims resting on exactly these lines — an
+        # assertion about what a document established, cited to that
+        # document's own title block — and the judge sometimes passed them.
+        # A span that merely STARTS in the envelope and runs into the body is
+        # left to the judge: it covers real text.
         ck = id(content)
         if ck not in fm_cache:
             fm_cache[ck] = _front_matter_extent(content)
@@ -391,6 +455,30 @@ async def validate_answer_evidence(
                     "reasoning — it cannot support a claim"),
             })
             continue
+        # Deterministic, and before any judging call: the paragraph label the
+        # drafter attached to this span has to be IN the span. It is the one
+        # part of a citation a reader uses to find the passage in the source,
+        # and it is the one part nothing downstream can verify — so it is
+        # verified here, against the lines the span actually names, or the
+        # span is failed and the label discarded. A span that claims no
+        # label is untouched: the check is on what was asserted, and
+        # asserting nothing is not a defect.
+        held = locator_holds((ev.span or {}).get("locator"),
+                             _span_lines(content, ev.span or {}))
+        if held is False:
+            ev.paragraph_ref = None
+            pre_verdicts.append({
+                "evidence_id": ev.id, "validated": False,
+                "reasoning": (
+                    f"the paragraph label \"{(ev.span or {}).get('locator')}\" "
+                    f"does not appear in the cited lines "
+                    f"{s_lf}-{s_lt} — a citation must point at a passage the "
+                    "reader can find, and this one points at a label the "
+                    "passage does not carry"),
+            })
+            continue
+        if held is True:
+            ev.paragraph_ref = str((ev.span or {}).get("locator"))[:50]
         # The span's position in the document's own structure, from the
         # deterministic TOC — cached per content object, not per row.
         ck = id(content)
@@ -408,15 +496,15 @@ async def validate_answer_evidence(
         entry["rows"].append((ev, span_text, lf, lt, section))
         # The document's own opening lines, so the judge can check that a
         # claim's stated provenance matches what the document IS. Raw source
-        # text, not interpretation: one answer attributed a holding to
-        # Delivery Hero/Glovo citing the Naspers/Just Eat Takeaway decision,
-        # and per-span entailment could not see it — the passage really does
-        # discuss those facts, in a different case's decision.
+        # text, not interpretation: one answer attributed a finding to one
+        # proceeding while citing the document of another, and per-span
+        # entailment structurally could not see it — the passage really does
+        # discuss those facts, in a document about something else.
         fn = filenames.get(ev.document_id) or str(ev.document_id)
         if fn not in entry["doc_heads"]:
             # The document's ingestion-assigned class leads its head block:
-            # what kind of thing the document IS (a decision, an advisory
-            # opinion, commentary) is a judgment input, and the raw head
+            # what kind of thing the document IS — in the deployment's own
+            # words for its classes — is a judgment input, and the raw head
             # lines below stay as the document's own testimony to check the
             # class against.
             cls = doc_classes.get(ev.document_id)

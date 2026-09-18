@@ -12,6 +12,11 @@ pass, run on a timer by the backend (SGR_MAINTENANCE_INTERVAL_SECONDS,
 
     python -m app.services.maintenance
 
+It also carries the out-of-band work that is not repair: the corpus profile,
+the entity-type sizes and example values the planner is grounded in, which
+used to be computed on the hot path of every question out of the two largest
+tables in the database. See services/corpus_profile.
+
 Every step is deterministic — no model calls, no spend — except the
 extraction-retry step, which respawns the bulk pipeline over documents
 whose extraction failed (capped per pass; the pipeline itself skips
@@ -21,6 +26,7 @@ anything already extracted, so a retry costs only the failed docs).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import uuid
 from typing import Any
@@ -168,6 +174,7 @@ async def _retry_failed_extractions(session) -> int:
 async def run_maintenance() -> dict[str, Any]:
     """One idempotent upkeep pass. Order matters: resolutions and minting
     change the graph that rematerialization then walks."""
+    from app.services.corpus_profile import refresh_corpus_profile
     from app.services.entity_keys import shared_index
     from app.services.key_replay import (backfill_full_text_entities,
                                          rematerialize, replay_unresolved)
@@ -186,14 +193,72 @@ async def run_maintenance() -> dict[str, Any]:
         subjects = await _full_text_entity_ids(session)
         stats["rematerialized_values"] = await rematerialize(session, subjects)
         stats["remat_subjects"] = len(subjects)
+    # Last, and on its own session: the corpus profile describes the corpus
+    # the steps above have just finished repairing, and it opens and closes a
+    # transaction per statement so that it holds no snapshot across them.
+    # It skips itself while the stored profile is younger than
+    # SGR_CORPUS_PROFILE_INTERVAL_SECONDS, so it does not follow this pass's
+    # cadence, and a failure here must not lose the pass's other work.
+    try:
+        stats["corpus_profile"] = await refresh_corpus_profile()
+    except Exception:  # noqa: BLE001 — a stale profile beats a lost pass
+        log.exception("corpus profile refresh failed; the planner keeps the "
+                      "profile it has until the next pass")
+        stats["corpus_profile"] = "failed"
     log.info("maintenance pass: %s", stats)
     return stats
+
+
+async def ensure_corpus_profile() -> None:
+    """Build the planner's grounding if the deployment has none yet.
+
+    The profile — each entity type's size and example values — is what the
+    planner is shown so it can propose probes against what the corpus
+    actually holds. It is computed once and stored, and the only thing that
+    built it was the pass below, which waits a full interval first.
+
+    That made an empty profile self-perpetuating. This deployment restarts
+    more often than its six-hour interval, so the first pass never arrived
+    and the table stayed empty for the life of the corpus: measured on
+    127,000 documents, zero rows, and every question anyone had ever asked
+    was planned by a model told the NAMES of the entity types and nothing
+    else — not whether a type had twelve members or ninety thousand. Building
+    it took six minutes.
+
+    It is worse on a deployment that ships: every release restarts the clock,
+    so a service deployed twice a day never reaches its first pass at all.
+
+    Missing is not the same as stale. This builds only when there is nothing,
+    and leaves refreshing to the timer, so a boot never costs six minutes of
+    resampling a corpus that already has a profile.
+    """
+    from app.models.runtime import CorpusProfile
+    from app.services.corpus_profile import refresh_corpus_profile
+
+    try:
+        async with AsyncSessionLocal() as session:
+            have = (await session.execute(
+                select(CorpusProfile.entity_type_id).limit(1))).first()
+        if have:
+            return
+        log.info("no corpus profile stored; building it once before serving")
+        stats = await refresh_corpus_profile(force=True)
+        log.info("corpus profile built: %s", stats)
+    except Exception:  # noqa: BLE001 — grounding is better, not required
+        log.exception("could not build the corpus profile at boot; the "
+                      "planner runs without entity sizes until the next pass")
 
 
 async def maintenance_loop(interval_seconds: int) -> None:
     """Backend-resident timer. First pass after one full interval — boot is
     not the moment to rescan the corpus. A failing pass logs and waits for
-    the next tick; maintenance must never take the API down."""
+    the next tick; maintenance must never take the API down.
+
+    The one thing that does happen at boot is `ensure_corpus_profile`, and
+    only when there is no profile at all: see its own note for why waiting an
+    interval for THAT meant waiting forever.
+    """
+    await ensure_corpus_profile()
     while True:
         await asyncio.sleep(interval_seconds)
         try:

@@ -32,7 +32,7 @@ def _row(superseded, pattern=COURT, filename="a.md", superseding="Later v Case")
 
 
 def test_a_named_case_is_kept():
-    rows = [_row("Case T-451/20 Meta Platforms Ireland v Commission")]
+    rows = [_row("Case T-451/20 Kestrel Holdings v Northmoor Authority")]
     assert len(identified(rows)) == 1
 
 
@@ -69,9 +69,9 @@ def test_a_missing_name_is_dropped():
 
 def test_the_message_says_what_it_is_and_is_not():
     """It reports the record, not a legal judgement about the point."""
-    m = message(_row("Case T-451/20", filename="62020TJ0451.md",
+    m = message(_row("Case T-451/20", filename="an-earlier-decision.md",
                      superseding="Case C-123/45 Later"))
-    assert "62020TJ0451.md" in m
+    assert "an-earlier-decision.md" in m
     assert "Case C-123/45 Later" in m
     assert "not a judgement" in m
 

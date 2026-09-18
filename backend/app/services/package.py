@@ -47,6 +47,7 @@ from app.services.annotations import (
     parse_path,
 )
 from app.schemas.package import (
+    ENGINE_ROLES,
     SgrPackage,
     PackageDiff,
     PackageImportResult,
@@ -114,6 +115,20 @@ def validate_crossrefs(pkg: SgrPackage) -> tuple[list[str], list[str]]:
                 )
 
     rdef_names = {r.name for r in pkg.spec.relationship_definitions}
+
+    # A role naming a relation the package does not define is an error, not a
+    # warning: the whole point of the block is that a feature stops depending
+    # on a name matching, so a name that matches nothing is the failure it
+    # exists to prevent — and it would look exactly like a package that made
+    # no declaration.
+    for role in ENGINE_ROLES:
+        for name in pkg.spec.relationship_roles.names_for(role):
+            if name not in rdef_names:
+                errors.append(
+                    f"relationship role '{role}' names relationship '{name}' "
+                    "which is not defined in the package"
+                )
+
     seen_annotations: set[str] = set()
     for ann in pkg.spec.annotations:
         if ann.name in seen_annotations:
@@ -308,6 +323,13 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "identifier_property": dc.identifier_property,
                 "identifier_pattern": dc.identifier_pattern,
                 "name_property": dc.name_property,
+                "authority_label": dc.authority_label,
+                "naming_required": dc.naming_required,
+                "standing": dc.standing,
+                "declared_properties": [d.model_dump()
+                                        for d in dc.declared_properties] or None,
+                "filename_rules": [r.model_dump()
+                                   for r in dc.filename_rules] or None,
                 "attribution_cues": list(dc.attribution_cues) or None,
                 "managed_by": ctx.tag,
             },
@@ -341,6 +363,7 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                     "guidance": prop.guidance,
                     "manual": prop.manual,
                     "required": prop.required,
+                    "engine_role": prop.engine_role,
                     "cardinality": prop.cardinality,
                     "schema_version": prop.schema_version,
                 },
@@ -510,6 +533,18 @@ async def _apply_relationship_definitions(ctx: _ApplyCtx) -> None:
             return et_by_name[name]
         return doss_by_name[name]
 
+    # Role per definition name, from the manifest's one declaration block.
+    # Assigned with the rest of the fields rather than in a pass of its own,
+    # so removing a name from the block clears the column the same way
+    # removing a description clears that: the manifest is the whole truth
+    # about a managed row, and a role left behind after it was withdrawn
+    # would be the hidden state this block exists to remove.
+    role_by_name: dict[str, str] = {
+        name: role
+        for role in ENGINE_ROLES
+        for name in ctx.pkg.spec.relationship_roles.names_for(role)
+    }
+
     for rdef in ctx.pkg.spec.relationship_definitions:
         row = existing.get(rdef.name) or (
             await ctx.session.execute(
@@ -543,6 +578,7 @@ async def _apply_relationship_definitions(ctx: _ApplyCtx) -> None:
                 "extraction_guidance": rdef.extraction_guidance,
                 "discovery_guidance": rdef.discovery_guidance,
                 "creation_mode": rdef.creation_mode,
+                "engine_role": role_by_name.get(rdef.name),
                 "managed_by": ctx.tag,
             },
         )
@@ -714,6 +750,7 @@ async def _apply_annotations(ctx: _ApplyCtx) -> None:
                 "description": ann.description,
                 "path": ann.path,
                 "reduce": ann.reduce,
+                "engine_role": ann.engine_role,
                 "materialize": ann.materialize,
                 "subject_ref_type": subject_ref_type,
                 "managed_by": ctx.tag,
@@ -855,8 +892,20 @@ async def export_package(
                     "identifier_property": dc.identifier_property,
                     "identifier_pattern": dc.identifier_pattern,
                     "name_property": dc.name_property,
-                "name_property": dc.name_property,
+                    "authority_label": dc.authority_label,
+                "naming_required": dc.naming_required,
+                    # The rank, round-tripped. An export that dropped it would
+                    # hand back a manifest that silently unranks every class
+                    # when pasted over the original — and an unranked class is
+                    # inert, so the rule would go quiet with nothing saying so.
+                    "standing": dc.standing,
                     "attribution_cues": list(dc.attribution_cues or []),
+                    # Both of these are declarations the deployment wrote and
+                    # the import stored; an export that drops one hands back a
+                    # manifest that silently un-declares it when pasted over
+                    # the original.
+                    "declared_properties": list(dc.declared_properties or []),
+                    "filename_rules": list(dc.filename_rules or []),
                     "properties": [_export_property(p) for p in props],
                     "entity_types": [et.name for et in links],
                 }
@@ -903,6 +952,17 @@ async def export_package(
 
     if rdef_rows:
         out_rdef = []
+        # Round-tripped as the block it was written as, not as a field per
+        # definition: an export a deployment cannot paste back over its own
+        # manifest is not an export.
+        roles: dict[str, list[str]] = {}
+        for r in rdef_rows:
+            if r.engine_role:
+                roles.setdefault(r.engine_role, []).append(r.name)
+        if roles:
+            spec["relationship_roles"] = {
+                role: sorted(names) for role, names in sorted(roles.items())
+            }
         for r in rdef_rows:
             states = (
                 await session.execute(

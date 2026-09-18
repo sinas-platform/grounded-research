@@ -208,13 +208,14 @@ def test_the_audit_reaches_the_telemetry():
 def test_nothing_here_changes_what_publishes():
     """The whole point is to watch the judgment, not to act on it yet.
 
-    The gate does now block on an unmet accounting debt as well as an uncovered
-    part (see `test_gate_accounting`), but that is a different signal read from
-    the ledger. None of the `covered_by_*` findings reach `publishable`.
+    `publishable` reads the judge's verdict and the per-part coverage, and
+    nothing else — not an unmet accounting debt (see `test_gate_accounting`),
+    and none of the `covered_by_*` findings.
     """
     s = src()
-    assert "and not uncovered and not blocking" in " ".join(s.split())
-    i = s.index("publishable = (")
+    assert 'publishable = bool(data.get("publishable")) and not uncovered' \
+        in " ".join(s.split())
+    i = s.index("publishable = bool(")
     for k in ("covered_by_missing", "covered_by_unsupported", "covered_by_unresponsive"):
         assert k not in s[i:i + 400], k
 

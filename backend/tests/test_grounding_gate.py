@@ -385,23 +385,29 @@ def test_a_keep_records_a_reason_and_cannot_smuggle_in_a_claim():
     often right, and was previously indistinguishable from ignoring the
     finding — the reviser had no way to say "I read it, mine is better".
 
-    A keep carries a sequence number and a reason and nothing else: no text,
-    no spans. So it can never introduce or alter a claim, and the claim it
-    names keeps its verdicts because it is not rebuilt.
+    A keep carries a sequence number, a reason, and optionally the id of the
+    request it answers — no text, no spans. So it can never introduce or alter
+    a claim, and the claim it names keeps its verdicts because it is not
+    rebuilt.
     """
     from app.services.query_runner import _parse_patch
 
-    patch = _parse_patch(
-        '{"keep": [{"seq": 3, "rationale": "a-merger-decision.md restates the '
-        'operative paragraph; m11936.md carries the Commission\'s own '
-        'reasoning on the point."}]}'
-    )
+    reason = ("the named source restates the operative passage; the cited one "
+              "carries the deciding body's own reasoning on the point.")
+    patch = _parse_patch(json.dumps({"keep": [{"seq": 3, "rationale": reason}]}))
     assert patch and patch["keep"] == [
-        {"seq": 3, "rationale": "a-merger-decision.md restates the operative "
-                                "paragraph; m11936.md carries the "
-                                "Commission's own reasoning on the point."}
+        {"seq": 3, "rationale": reason, "objection": ""}
     ]
     assert patch["revise"] == [] and patch["add"] == [] and patch["drop"] == []
+
+    # And the id of the request it answers, when it is answering one: that is
+    # what turns a keep into a reply the review has to rule on rather than a
+    # change it reads as silence.
+    answered = _parse_patch(json.dumps({"keep": [
+        {"seq": 3, "objection": "obj-1234abcd", "rationale": reason}]}))
+    assert answered and answered["keep"] == [
+        {"seq": 3, "rationale": reason, "objection": "obj-1234abcd"}
+    ]
 
     for not_a_keep in [
         # no reason given: a bare refusal to act is not a decision

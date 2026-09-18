@@ -26,6 +26,22 @@ class Settings(BaseSettings):
     # annotation rematerialization, wall normalization). 0 disables.
 
     sgr_maintenance_interval_seconds: int = 21600
+
+    # The corpus profile: entity-type sizes and example values, sampled out of
+    # band so the planner never computes them (services/corpus_profile).
+    #
+    # The refresh is skipped while the stored profile is younger than this, so
+    # the profile's cadence is its own and not the maintenance pass's: a
+    # backend told to do upkeep every five minutes does not resample the
+    # corpus every five minutes. 0 refreshes on every pass.
+    sgr_corpus_profile_interval_seconds: int = 3600
+    # How old a profile the planner will still be grounded in. Generous on
+    # purpose — twenty-eight refreshes at the defaults above — because losing
+    # the examples costs the planner real grounding, so a few failed passes
+    # must not silently blank them; what this rules out is planning against a
+    # corpus that has since been replaced. 0 disables the check.
+    sgr_corpus_profile_max_age_seconds: int = 604800
+
     sgr_cors_origins: str = Field(default="", validation_alias="SGR_CORS_ORIGINS")
 
     # Auth
@@ -77,6 +93,16 @@ class Settings(BaseSettings):
     # still present and is now unreachable; it should be deleted.
     sgr_draft_mode: Literal["extract"] = Field(
         default="extract", validation_alias="SGR_DRAFT_MODE"
+    )
+    # How many feedback exchanges the drafting conversation carries whole
+    # before the oldest ones are folded into a one-line-per-round summary.
+    # Drafting is one chat per answer: the brief is turn one and every
+    # revision round is a later turn, so the transcript grows with the loop.
+    # At the cap the conversation is restarted from the SAME brief — which
+    # keeps the cached prefix — with a summary turn standing in for the
+    # rounds that were dropped.
+    sgr_draft_chat_exchanges: int = Field(
+        default=4, validation_alias="SGR_DRAFT_CHAT_EXCHANGES"
     )
     # Hard per-run spend ceiling in USD, summed over the run's LLM usage and
     # checked at every supervision poll. A run that crosses it ends "partial"

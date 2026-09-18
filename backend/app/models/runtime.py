@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 
 from sqlalchemy import (
     Boolean,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -13,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
 )
 from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -176,6 +178,42 @@ class EntityMention(Base, TimestampMixin):
     # ungrounded name stays for audit but no consumer query sees it.
     status: Mapped[str] = mapped_column(
         String(30), nullable=False, server_default="active", default="active"
+    )
+
+
+class CorpusProfile(Base):
+    """What the corpus holds of one entity type, in round numbers.
+
+    Derived, not declared: every column is computed from the corpus by
+    `services/corpus_profile` and may be recomputed at any time. It exists
+    because computing it is expensive and computing it per question was
+    costing more than the question — see that module for the method.
+
+    `entity_count_magnitude` is an ORDER OF MAGNITUDE on the 1-2-5 ladder,
+    not a count, and 0 means none observed. `examples` is a JSON array of
+    canonical forms of well-used entities of the type. `refreshed_at` says
+    when the figures were computed, and a reader that finds it older than its
+    tolerance uses no figures at all rather than old ones.
+
+    Keyed on the type rather than its name, so a dropped type takes its
+    profile with it and no name is stored twice.
+    """
+
+    __tablename__ = "corpus_profile"
+
+    entity_type_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("entity_type.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    entity_count_magnitude: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    examples: Mapped[list | None] = mapped_column(
+        JSONB, nullable=False, server_default="[]"
+    )
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
 
 
@@ -458,6 +496,31 @@ class Answer(Base, TimestampMixin, OwnedMixin):
     question: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default="draft", nullable=False)
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The date the answer states the law as at: the latest date carried by
+    #: a cited source, or the run date when no source carries one. Set on
+    #: publish; null on rows written before it existed.
+    law_stated_as_at: Mapped[date | None] = mapped_column(Date)
+    #: The decomposition the drafter worked from — a list of
+    #: {index, label, text}, one per distinct thing the question asks. Fixed
+    #: before planning so the planner, the drafter and the gate share one
+    #: reading of the question. Null when the run predates it or the split
+    #: could not be read.
+    question_parts: Mapped[list | None] = mapped_column(JSONB)
+    #: The answer as prose, assembled from its rows at publish by
+    #: services/answer_render. Regenerable; null before publish and on
+    #: answers from before it existed.
+    rendered_markdown: Mapped[str | None] = mapped_column(Text)
+    #: Points the completeness review raised that the answer did not take up,
+    #: one entry each: what was asked, how important the review called it, the
+    #: drafter's reason for declining, and how the argument ended. Written at
+    #: publish from the run's objection ledger.
+    #:
+    #: Most are a record only. The ones carrying `caveat: true` are not: a
+    #: source the review called essential, justified, pressed, and could not
+    #: settle. Those are rendered into the answer itself, beside the part they
+    #: bear on, because a reader deciding whether to rely on that part needs
+    #: to know two readers disagreed about whether it is complete.
+    open_notes: Mapped[list | None] = mapped_column(JSONB)
 
 
 class AnswerClaim(Base, TimestampMixin):
@@ -476,6 +539,40 @@ class AnswerClaim(Base, TimestampMixin):
     # sentence. This is the forward argument, and it is also where a
     # deliberate choice between two sources gets recorded.
     rationale: Mapped[str | None] = mapped_column(Text)
+    # Where the claim belongs in the answer and what it is. A flat list of
+    # rows rendered one paragraph each is how the conclusion ended up last
+    # and the second part of a question ended up thin; these say where a
+    # renderer puts the row. All nullable: a row without them is an answer
+    # drafted before the structure existed, and renders as it always did.
+    #: `conclusion` | `analysis` | `authority`
+    section: Mapped[str | None] = mapped_column(String(20))
+    #: 0-based index into Answer.question_parts; null = the whole question.
+    part_index: Mapped[int | None] = mapped_column(Integer)
+    part_label: Mapped[str | None] = mapped_column(String(300))
+    #: Render order within section + part.
+    position: Mapped[int | None] = mapped_column(Integer)
+    #: What the claim DOES: one of `app.services.answer_structure.CLAIM_KINDS`
+    #: — the engine's own words, not a deployment's. claim_type carries the
+    #: same vocabulary, coarser by the three structural kinds.
+    claim_kind: Mapped[str | None] = mapped_column(String(50))
+    #: For a test: {"name", "conditions": [{"text", "cumulative"}],
+    #: "source_para"} — the conditions in the order the source states them.
+    test: Mapped[dict | None] = mapped_column(JSONB)
+    # How far the source can be trusted for the proposition. The drafter's
+    # classification of the source, its tier in the deployment's authority
+    # hierarchy (1 = highest), and two notes that are null unless something
+    # is off: the source's jurisdiction differs from the question's, or the
+    # instrument is no longer current.
+    authority_label: Mapped[str | None] = mapped_column(String(40))
+    authority_tier: Mapped[int | None] = mapped_column(Integer)
+    jurisdiction_note: Mapped[str | None] = mapped_column(String(300))
+    currency_note: Mapped[str | None] = mapped_column(String(500))
+    #: The claims this one reasons from, as a list of claim ids. An
+    #: `inference` claim states a step ("because X and Y, Z follows") and
+    #: carries no span of its own; it rests on these, and the gate refuses
+    #: one that rests on nothing supported. A conclusion names what it
+    #: concludes from. Null on rows that rest on passages alone.
+    follows_from: Mapped[list | None] = mapped_column(JSONB)
 
 
 class ClaimEvidence(Base, TimestampMixin):
@@ -501,6 +598,16 @@ class ClaimEvidence(Base, TimestampMixin):
     #: Null on rows written before it existed, and on the reviser's rows,
     #: which carry the coordinates a model reports and no quote.
     quote: Mapped[str | None] = mapped_column(String(2000))
+    #: The source's own LABEL for the paragraph the span sits in — "42",
+    #: "r.o. 4.2", "recital 14" — as the drafter read it off the passage and
+    #: the faithfulness check found in the span's own lines. Never derived:
+    #: nothing here knows how a given source numbers itself, and a number
+    #: this system counted out would be a number the source never wrote. A
+    #: label the span does not carry fails the span and is discarded, so a
+    #: value here has been checked. Null when the drafter offered none and
+    #: on rows written before it existed. The unchecked proposal lives on
+    #: in `span["locator"]`; this is the accepted one.
+    paragraph_ref: Mapped[str | None] = mapped_column(String(50))
 
 
 # ─────────────────────────────────────────────────────────────

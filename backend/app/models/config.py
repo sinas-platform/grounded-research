@@ -33,7 +33,38 @@ class DocumentClass(Base, TimestampMixin):
     identifier_property: Mapped[str | None] = mapped_column(String(200))
     identifier_pattern: Mapped[str | None] = mapped_column(String(500))
     name_property: Mapped[str | None] = mapped_column(String(200))
+    #: What a claim citing a document of this class says about the source, in
+    #: the words a reader needs. Null means the class needs no label, which
+    #: is also what says the class may carry a rule on its own.
+    authority_label: Mapped[str | None] = mapped_column(String(40))
+    #: Whether a claim asserting a rule on this class of source must name it.
+    naming_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False)
+    #: How high a source of this class stands against the deployment's other
+    #: classes: 1 highest, larger lower, ties allowed. NULL means unranked,
+    #: and an unranked class is inert — a claim citing one neither satisfies
+    #: the highest-standing rule nor breaches it. Written from the class's own
+    #: declaration at import.
+    #:
+    #: NOT the annotation carrying the `standing_tier` role, which is derived
+    #: per DOCUMENT by walking the graph. This is declared per CLASS, is the
+    #: same for every document of it, and needs no graph.
+    standing: Mapped[int | None] = mapped_column(Integer)
+    #: Which front-matter keys this class reads directly, as a list of
+    #: {key, property, on_conflict}. Empty or null means every property is
+    #: extracted, which is what every class did before this existed.
+    declared_properties: Mapped[list | None] = mapped_column(JSONB)
     attribution_cues: Mapped[list[str] | None] = mapped_column(JSONB)
+    #: How a document of this class can be recognised from its FILENAME
+    #: alone, as a list of {pattern, confidence, reason}. Free and instant,
+    #: and the first rung of the classification ladder — but only a
+    #: deployment knows that its regulator's files are named one way and its
+    #: commentary feed another, so the rules are declared on the class rather
+    #: than listed in the ingestion code, where they named four of one
+    #: deployment's classes and classified nobody else's corpus at all.
+    #: Null or empty means the class is not recognisable by filename, which
+    #: is the default and what most classes are.
+    filename_rules: Mapped[list | None] = mapped_column(JSONB)
 
     properties: Mapped[list["DocumentClassProperty"]] = relationship(
         back_populates="document_class", cascade="all, delete-orphan"
@@ -55,6 +86,10 @@ class DocumentClassProperty(Base, TimestampMixin):
     description: Mapped[str | None] = mapped_column(Text)
     schema: Mapped[dict] = mapped_column(JSONB, nullable=False, server_default="{}")
     guidance: Mapped[str | None] = mapped_column(Text)
+    #: What this property MEANS to the engine — a date, a jurisdiction, a
+    #: status — written from the class's own declaration at import. NULL for
+    #: the normal case: a property that is the deployment's own business.
+    engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
     manual: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     required: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     cardinality: Mapped[str] = mapped_column(String(10), default="one", nullable=False)  # one|many
@@ -114,6 +149,13 @@ class RelationshipDefinition(Base, TimestampMixin):
         String(10), nullable=False, default="open", server_default="open"
     )
     managed_by: Mapped[str | None] = mapped_column(String(128), index=True)
+    # Which engine-meaningful role this definition carries, out of the fixed
+    # set in app.schemas.package.ENGINE_ROLES — written from the package's
+    # `spec.relationship_roles` block, NULL for a definition the deployment
+    # gave no role. This is the column engine features read instead of
+    # matching on a name the deployment chose. Indexed: every reader looks a
+    # role up, and there are a handful of rows per role at most.
+    engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
 
     states: Mapped[list["RelationshipState"]] = relationship(
         back_populates="definition", cascade="all, delete-orphan"
@@ -156,6 +198,9 @@ class AnnotationDefinition(Base, TimestampMixin):
     id: Mapped[uuid.UUID] = uuid_pk()
     name: Mapped[str] = mapped_column(String(200), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
+    #: What this annotation MEANS to the engine — which source stands higher,
+    #: who issued it. NULL unless the deployment declares it.
+    engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
     path: Mapped[str] = mapped_column(Text, nullable=False)
     reduce: Mapped[dict | str] = mapped_column(JSONB, nullable=False)
     materialize: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

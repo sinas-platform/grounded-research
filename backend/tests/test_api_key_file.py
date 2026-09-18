@@ -20,13 +20,25 @@ import pytest
 from app.config import Settings
 
 
+def _settings() -> Settings:
+    """Settings built from the environment alone.
+
+    A developer's checkout carries a working `.env`, and pydantic-settings
+    reads it as a lower-priority source — so a test that unsets a variable
+    still gets that file's value, and the assertion fails as though the
+    product were wrong. What is under test here is what the environment and
+    the mounted file produce, so the dotenv is left out of it.
+    """
+    return Settings(_env_file=None)
+
+
 def test_file_is_read_into_the_key_field(tmp_path, monkeypatch):
     key = tmp_path / "sinas-api-key"
     key.write_text("sk-from-file")
     monkeypatch.delenv("SINAS_API_KEY", raising=False)
     monkeypatch.setenv("SINAS_API_KEY_FILE", str(key))
 
-    assert Settings().sinas_api_key == "sk-from-file"
+    assert _settings().sinas_api_key == "sk-from-file"
 
 
 def test_trailing_newline_is_stripped(tmp_path, monkeypatch):
@@ -38,7 +50,7 @@ def test_trailing_newline_is_stripped(tmp_path, monkeypatch):
     monkeypatch.delenv("SINAS_API_KEY", raising=False)
     monkeypatch.setenv("SINAS_API_KEY_FILE", str(key))
 
-    assert Settings().sinas_api_key == "sk-from-file"
+    assert _settings().sinas_api_key == "sk-from-file"
 
 
 def test_literal_env_var_wins_over_the_file(tmp_path, monkeypatch):
@@ -50,7 +62,7 @@ def test_literal_env_var_wins_over_the_file(tmp_path, monkeypatch):
     monkeypatch.setenv("SINAS_API_KEY", "sk-from-env")
     monkeypatch.setenv("SINAS_API_KEY_FILE", str(key))
 
-    assert Settings().sinas_api_key == "sk-from-env"
+    assert _settings().sinas_api_key == "sk-from-env"
 
 
 def test_unreadable_path_fails_at_startup(tmp_path, monkeypatch):
@@ -61,7 +73,7 @@ def test_unreadable_path_fails_at_startup(tmp_path, monkeypatch):
     monkeypatch.setenv("SINAS_API_KEY_FILE", str(tmp_path / "absent"))
 
     with pytest.raises(ValueError, match="could not be read"):
-        Settings()
+        _settings()
 
 
 def test_empty_file_fails_at_startup(tmp_path, monkeypatch):
@@ -73,7 +85,7 @@ def test_empty_file_fails_at_startup(tmp_path, monkeypatch):
     monkeypatch.setenv("SINAS_API_KEY_FILE", str(key))
 
     with pytest.raises(ValueError, match="is empty"):
-        Settings()
+        _settings()
 
 
 def test_neither_set_leaves_the_key_empty(monkeypatch):
@@ -82,4 +94,4 @@ def test_neither_set_leaves_the_key_empty(monkeypatch):
     monkeypatch.delenv("SINAS_API_KEY", raising=False)
     monkeypatch.delenv("SINAS_API_KEY_FILE", raising=False)
 
-    assert Settings().sinas_api_key == ""
+    assert _settings().sinas_api_key == ""

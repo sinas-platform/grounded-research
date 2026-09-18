@@ -9,6 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy import desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.annotations import _load_definitions
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
 from app.models import (
@@ -28,7 +29,8 @@ from app.schemas.runtime import (
     EntityMentionWithEntityOut,
     PropertyValueOut,
 )
-from app.services.document_identity import document_title_subquery
+from app.services.annotations import annotations_for_documents
+from app.services.document_identity import document_title_subquery, properties_for_documents
 from app.services.visibility import visible_clause
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -143,9 +145,21 @@ async def get_document(
     if pair is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document not found")
     row, title = pair
+    # A single-document read serves what it takes to CITE the document, not
+    # just to name it: the class's declared properties (case number, CELEX,
+    # ECLI, date, status, superseded_by, jurisdiction) and the derived graph
+    # fields of the entity it is the full text of. Both were previously one
+    # extra call each, per document, which is how a reader ended up citing
+    # the filename instead. The list read is left alone — it is a list.
+    properties = (await properties_for_documents(session, [row.id])).get(row.id, {})
+    annotations = (await annotations_for_documents(
+        session, [row.id], await _load_definitions(session, None))).get(row.id)
     return DocumentOut(
-        **DocumentOut.model_validate(row).model_dump(exclude={"title"}),
+        **DocumentOut.model_validate(row).model_dump(
+            exclude={"title", "properties", "annotations"}),
         title=title,
+        properties=properties,
+        annotations=annotations,
     )
 
 

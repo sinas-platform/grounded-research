@@ -14,8 +14,8 @@ aliases, so the queue drains monotonically instead of refilling.
 
 After the edges land, the materialized annotations of every touched entity
 are recomputed, because the whole point of the edge is what it makes
-derivable: a document with an is_full_text_of edge gets an issuing body and
-an authority tier in the planning manifest; without one it shows nothing.
+derivable: a document with an identity edge to the subject it records gets an
+issuing body and a tier in the planning manifest; without one it shows nothing.
 
     python -m app.services.key_replay            # resolve + materialize
     python -m app.services.key_replay --dry-run  # count only
@@ -112,11 +112,11 @@ async def backfill_full_text_entities(
     session: AsyncSession, *, write: bool = True,
     key_index: KeyIndex | None = None,
 ) -> dict[str, Any]:
-    """Mint the case entity a document embodies, from the document itself.
+    """Mint the entity a document embodies, from the document itself.
 
-    For an unresolved is_full_text_of* row the target is not some other
-    entity the corpus may or may not mention — it is the case THIS document
-    is the full text of. The document is the authority on what that case is:
+    For an unresolved identity row the target is not some other entity the
+    corpus may or may not mention — it is the subject THIS document is the
+    full text of. The document is the authority on what that subject is:
     its extracted title names it, the parked key identifies it. So the
     entity can be created deterministically — no model call, no guessing —
     with the title as its name and the key as natural key and alias.
@@ -141,9 +141,9 @@ async def backfill_full_text_entities(
         .where(UnresolvedRelationship.status == "unresolved")
         # Structural, not by name: a document-embodies-entity definition is
         # one whose source is a document class and target an entity type —
-        # the same criterion annotations_for_documents uses. The definition
-        # names ("is_full_text_of" here) belong to the deployment's config,
-        # not to this module.
+        # the same criterion annotations_for_documents uses. Whatever a
+        # deployment calls such a definition belongs to its config, not to
+        # this module.
         .where(RelationshipDefinition.source_ref_type == "document_class")
         .where(RelationshipDefinition.target_ref_type == "entity_type")
     )).all())

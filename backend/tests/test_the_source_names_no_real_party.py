@@ -110,7 +110,9 @@ BACKEND = Path(__file__).resolve().parent.parent
 
 _INVENTED = {"Ashgrove", "Bellhaven", "Carwood", "Dunmore", "Kestrel",
              "Northmoor", "Phantom", "Systems", "Group", "Holdings", "Retail",
-             "Utilities", "Authority", "Tribunal", "Case"}
+             "Utilities", "Authority", "Tribunal", "Case",
+             # The same invented parties as a French fixture writes them.
+             "Établissements", "Autorité", "Société"}
 
 # A caption at the start of a sentence sweeps the sentence's first word into
 # itself. These are English, not anyone's vocabulary, and leaving them out
@@ -124,10 +126,25 @@ _REGISTER = re.compile(r'"(\d{5}[A-Z]{2}\d{4}\.md)"')
 _LONG_SLUG = re.compile(r'"([a-z0-9]+(?:-+[a-z0-9]+){3,}\.md)"')
 _BARE_SERIAL = re.compile(r'"(\d{6,}\.md)"')
 
-# A case caption: capitalised words, ` v `/` v. `, capitalised words.
+# A case caption: capitalised words, a versus marker, capitalised words.
+#
+# Both halves used to be English. The marker was `v`/`v.` only, and the words
+# either side were `[A-Z][A-Za-z.]+`, which cannot match a capital carrying an
+# accent: `Générale` matches `G` and then stops. So a French caption passed
+# this check without a word, in the one place a capitalised name is certainly
+# a party. A check that reads only one language is not a check on a corpus
+# that is a third French, and the cost of this one lands outside the run,
+# where a leak is public and permanent.
+#
+# `c/`, `c.` and `contre` are how the same relation is written in French. The
+# marker stays lower-case on purpose: an upper-case `C.` is an initial, and
+# reading `Exhibit C. Smith` as a caption would invent a finding.
+_CAP = r"[A-ZÀ-ÖØ-Þ]"
+_CAP_REST = r"[A-Za-zÀ-ÖØ-öø-ÿ.'’‐-]"
+_VERSUS = r"(?:v\.?|c[./]|contre)"
 _CAPTION = re.compile(
-    r"\b((?:[A-Z][A-Za-z.]+\s+){0,3}[A-Z][A-Za-z.]+)\s+v\.?\s+"
-    r"([A-Z][A-Za-z.]+(?:\s+[A-Z][A-Za-z.]+){0,3})\b")
+    rf"\b((?:{_CAP}{_CAP_REST}+\s+){{0,3}}{_CAP}{_CAP_REST}+)\s+{_VERSUS}\s+"
+    rf"({_CAP}{_CAP_REST}+(?:\s+{_CAP}{_CAP_REST}+){{0,3}})\b")
 
 # ── a deployment's chosen vocabulary ─────────────────────────────────────────
 
@@ -390,6 +407,13 @@ def test_the_checks_can_see_an_offender():
     assert _CAPTION.search("In Ferriere Nord v Commission the tribunal held")
     assert _CAPTION.search("Strintzis Lines Shipping v. Commission")
     assert not _CAPTION.search("the tribunal held in Case C-606/18")
+    # The shape that passed before: an accented capital, and a marker that is
+    # not `v`. Ten French benchmark questions are the reason this is here.
+    assert _CAPTION.search("Société Ashgrove c/ Autorité")
+    assert _CAPTION.search("Établissements Dunmore c. Kestrel")
+    assert _CAPTION.search("Bellhaven contre Northmoor")
+    # An initial is not a marker, and a lone capital is not a party.
+    assert not _CAPTION.search("see Exhibit C. Smith for the schedule")
     caption = _CAPTION.search("In Ashgrove Systems v Authority")
     words = [w for w in caption.group(0).replace(" v ", " ").split()
              if w not in _SENTENCE_LEAD]

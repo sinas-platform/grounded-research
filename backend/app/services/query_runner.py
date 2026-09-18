@@ -94,7 +94,15 @@ HARD_VALIDATE_ROUNDS = 3
 # verdict before it settles for a partial. Never 1 — one cycle means a single
 # attempt and then surrender, with the gate having named exactly what was
 # missing.
-EFFORT_GATE_CYCLES = {"low": 2, "medium": 3, "high": 5}
+#
+# Medium was 3. Measured on 18 September 2026, two questions run at medium
+# with the validation rounds already capped: four and five gate verdicts,
+# eight revisions each, 21 minutes, about $9 — because each remediation
+# cycle wraps its own validation rounds, so this budget, not the rounds, is
+# what the review loop's cost and length follow. Two remediations: an
+# answer the gate has sent back twice and still finds wanting is not one
+# more cycle from publishable.
+EFFORT_GATE_CYCLES = {"low": 2, "medium": 2, "high": 4}
 ANSWER_GATE_CYCLES = EFFORT_GATE_CYCLES["medium"]
 MIN_CLAIMS = 6
 # The synthesis playbook targets about 12 claims and says not to exceed 12.

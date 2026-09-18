@@ -26,13 +26,6 @@ import pytest
 from app.services import corpus_profile as cp
 
 
-@pytest.fixture(autouse=True)
-def _quiet():
-    cp.reset_notices()
-    yield
-    cp.reset_notices()
-
-
 # ─────────────────────────────────────────────────────────────
 # Magnitudes
 # ─────────────────────────────────────────────────────────────
@@ -162,9 +155,10 @@ async def test_a_populated_cache_is_read_and_not_recomputed(caplog):
                      [_row("Alpha", 500_000, ["aa", "ab"]),
                       _row("Beta", 2_000, ["ba"])])
     with caplog.at_level(logging.WARNING):
-        block = await cp.entity_type_block(s)
+        block, problem = await cp.entity_type_block(s)
     assert "- Alpha (~500,000): aa, ab" in block
     assert "- Beta (~2,000): ba" in block
+    assert problem is None
     assert caplog.records == []
     joined = " ".join(s.sql)
     for banned in ("entity_mention", "row_number", "count(*)", "array_agg"):
@@ -174,17 +168,20 @@ async def test_a_populated_cache_is_read_and_not_recomputed(caplog):
 
 
 @pytest.mark.asyncio
-async def test_an_empty_cache_costs_the_examples_and_says_so_once(caplog):
+async def test_an_empty_cache_costs_the_examples_and_says_so_every_time(caplog):
+    """Every time, as an error, and returned to the caller. Once per process
+    at WARNING was not noticed for the life of a 127,000-document corpus."""
     s = _FakeSession(["Alpha", "Beta"], [])
-    with caplog.at_level(logging.WARNING):
-        first = await cp.entity_type_block(s)
-        second = await cp.entity_type_block(s)
+    with caplog.at_level(logging.ERROR):
+        first, p1 = await cp.entity_type_block(s)
+        second, p2 = await cp.entity_type_block(s)
     assert first == second
     assert "- Alpha" in first and "- Beta" in first
     assert "~" not in first
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert len(warnings) == 1, "the notice is said once per process, not per question"
-    assert "empty" in warnings[0].message
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 2, "said on every build of the map, not once"
+    assert "empty" in errors[0].message
+    assert p1 == p2 and "empty" in p1, "the problem is handed back, not only logged"
 
 
 @pytest.mark.asyncio
@@ -194,13 +191,14 @@ async def test_a_stale_cache_is_discarded_rather_than_believed(caplog):
     tolerance = get_settings().sgr_corpus_profile_max_age_seconds
     s = _FakeSession(["Alpha"],
                      [_row("Alpha", 500_000, ["aa"], age_s=tolerance + 60)])
-    with caplog.at_level(logging.WARNING):
-        block = await cp.entity_type_block(s)
+    with caplog.at_level(logging.ERROR):
+        block, problem = await cp.entity_type_block(s)
     assert "- Alpha" in block
     assert "500,000" not in block and "aa" not in block
-    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
-    assert len(warnings) == 1
-    assert "stale" in warnings[0].message or "older than" in warnings[0].message
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert "older than" in errors[0].message
+    assert problem and "older than" in problem
 
 
 @pytest.mark.asyncio
@@ -210,7 +208,8 @@ async def test_a_profile_inside_the_tolerance_is_believed():
     tolerance = get_settings().sgr_corpus_profile_max_age_seconds
     s = _FakeSession(["Alpha"],
                      [_row("Alpha", 500_000, ["aa"], age_s=tolerance - 60)])
-    assert "~500,000" in await cp.entity_type_block(s)
+    block, problem = await cp.entity_type_block(s)
+    assert "~500,000" in block and problem is None
 
 
 def test_the_map_asks_the_profile_for_its_entity_types():
@@ -223,6 +222,22 @@ def test_the_map_asks_the_profile_for_its_entity_types():
     assert "entity_type_block" in src
     assert "entity_mention" not in src, (
         "the map reached into the mention table again")
+
+
+def test_a_plan_made_without_the_profile_says_so_on_the_run():
+    """The wiring for being loud: the problem the block hands back travels
+    into the plan's `warnings` and from there onto the run row's telemetry,
+    where the API shows it. A log line alone went unread for the life of a
+    corpus."""
+    import inspect
+
+    from app import retrieval_first
+    from app.services import query_runner
+
+    plan_src = inspect.getsource(retrieval_first.plan_question)
+    assert '"warnings"' in plan_src and "map_problem" in plan_src
+    run_src = inspect.getsource(query_runner)
+    assert 'await _tele(run_id, "retrieval", warnings=' in run_src
 
 
 # ─────────────────────────────────────────────────────────────

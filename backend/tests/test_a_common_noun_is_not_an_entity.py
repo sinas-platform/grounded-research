@@ -140,6 +140,36 @@ def test_a_word_is_a_whole_word_in_any_script():
     assert case_evidence("Kestrel", "the Kestrel filing")["any_case"] == 1
 
 
+def test_decomposed_text_counts_the_same_as_composed():
+    """A combining mark is not a letter to the boundary, so in decomposed
+    text a name matches inside a longer word that the composed form correctly
+    rejects. Which form arrives depends on where the text was extracted, and
+    a count must not vary with that."""
+    composed = "the Kestrel\u00e9 filing"
+    decomposed = "the Kestrele\u0301 filing"
+    assert composed != decomposed
+    for t in (composed, decomposed):
+        assert case_evidence("Kestrel", t)["lowercase_share"] is None, t
+    # The name can arrive decomposed too, and is still the same name: it is
+    # found in composed text and reported as never written lower-case.
+    # Without the fold it is not found at all and the share is None, which
+    # reads as "this word does not appear" rather than "it appears and is
+    # always capitalised".
+    assert case_evidence("E\u0301tat", "the \u00c9tat filing")[
+        "lowercase_share"] == 0.0
+
+
+def test_the_candidate_query_does_not_decide_what_lower_case_means():
+    """The SQL used to ask `~ '^[a-z]'`, which made the Python test below it
+    unreachable for the words it was widened to catch. The question is asked
+    once now, where the character can be asked."""
+    from app.services.generic_entities import _CANDIDATES
+
+    sql = str(_CANDIDATES)
+    assert "'^[a-z]'" not in sql
+    assert "lower(e.canonical_form)" in sql, "the cheap half stays"
+
+
 def test_the_strict_test_spares_everything_written_as_a_name():
     from app.services.generic_entities import written_as_a_word
 

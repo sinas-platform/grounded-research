@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from datetime import datetime
 
 from sqlalchemy import text
@@ -84,6 +85,13 @@ def case_evidence(name: str, text: str) -> dict:
     """
     if not name or not text:
         return {"as_written": 0, "lowercase": 0, "lowercase_share": None}
+    # Composed, both sides, before anything is counted. A combining mark is
+    # not a letter to the boundary below, so in decomposed text `Kestrel`
+    # matches inside `Kestrel` + U+0301 + `e` — the same word the composed
+    # form correctly rejects. Which form arrives depends on where the text
+    # was extracted, which is not a thing a count should vary with.
+    name = unicodedata.normalize("NFC", name)
+    text = unicodedata.normalize("NFC", text)
     if written_as_a_word(name):
         return {"as_written": 0, "lowercase": 0, "lowercase_share": 1.0,
                 "note": "the canonical form is itself lower-case"}
@@ -194,8 +202,16 @@ _CANDIDATES = text("""
     JOIN entity_type et ON et.id = e.entity_type_id
     WHERE e.merged_into_id IS NULL
       AND e.canonical_form = lower(e.canonical_form)
-      AND e.canonical_form ~ '^[a-z]'
 """)
+#: `AND e.canonical_form ~ '^[a-z]'` used to sit under the line above, and it
+#: made the Python test below unreachable for exactly the words that test was
+#: widened to catch: an accented lower-case word never came back from this
+#: query, so `written_as_a_word` never saw one. The condition was also the
+#: same question asked twice, and asked in the place least able to answer it,
+#: since a POSIX class here depends on the database's locale. `lower()` is
+#: kept because it is the cheap half and it is locale-independent for the
+#: comparison being made; deciding what a lower-case first character is
+#: belongs to `written_as_a_word`, which asks the character.
 
 
 async def mark_generic(session, when: str, dry_run: bool = True) -> dict:

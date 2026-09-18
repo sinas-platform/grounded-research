@@ -119,6 +119,18 @@ UNCLASSIFIED_HEADING = "Unclassified"
 #: A legislation `status` value in this set means the instrument is not
 #: current law. Declared by the deployment on the class as a property; these
 #: two words are the contract's, not a deployment's.
+#:
+#: They stay English on purpose and this is not an oversight: WHICH property
+#: says how a source stands is the deployment's to name, WHAT its value has
+#: to say is the engine's, and a set of words per language would be the
+#: engine guessing at another party's vocabulary. A deployment writing
+#: `abrogé` maps it to `superseded` where it extracts, not here.
+#:
+#: What was wrong is that a value outside this set was indistinguishable from
+#: no value at all: a source whose status never mapped read as current law
+#: and nothing said so. `unrecognised_statuses` is that silence made
+#: countable, because a contract nobody can see broken is a contract nobody
+#: keeps.
 STALE_STATUSES = ("repealed", "superseded")
 
 #: The shape of a tier value, whichever annotation carries it: `{"depth": n}`
@@ -865,6 +877,38 @@ def jurisdiction_of(
         return None
     v = unwrap((props or {}).get(name))
     return str(v) if v not in (None, "") else None
+
+
+def unrecognised_statuses(rows: list[dict],
+                          roles: DeclaredRoles) -> dict[str, int]:
+    """Status values the deployment wrote that the contract does not know,
+    and how many documents carry each. Pure.
+
+    Every value here is a document the currency check waved through. A status
+    of `repealed` or `superseded` produces a note a reader sees; anything
+    else produces nothing, and nothing is exactly what a document with no
+    status at all produces. The two cases are opposite and looked identical.
+
+    The one that brought this up: a French-language source whose status
+    extracts as its own word never matches either of the contract's two, so
+    an instrument that is no longer law reads as law and the answer says
+    nothing. The fix is the deployment's mapping, and this is how anyone
+    finds out the mapping is missing.
+
+    Counted per value rather than listed per document: the question a reader
+    has is which words are turning up, and a value on three hundred documents
+    and a value on one need telling apart.
+    """
+    out: dict[str, int] = {}
+    for r in rows:
+        if not r.get("filename"):
+            continue
+        status = str(unwrap(roles.value(roles.status, r.get("props") or {},
+                                        str(r.get("class") or "")))
+                     or "").strip().lower()
+        if status and status not in STALE_STATUSES:
+            out[status] = out.get(status, 0) + 1
+    return out
 
 
 def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:

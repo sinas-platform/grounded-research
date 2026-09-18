@@ -171,6 +171,33 @@ def test_what_counts_as_not_current_stays_the_engines_own_word():
                              ROLES) == {}
 
 
+def test_a_status_the_contract_does_not_know_is_counted_not_swallowed():
+    """A value outside the contract produces no note, and neither does no
+    value at all. The two are opposite and looked identical: an instrument
+    that is no longer law read as law and nothing said so.
+
+    The case that brought it up is a source whose status extracts in its own
+    language. The repair is the deployment's mapping; this is how anyone
+    learns the mapping is missing."""
+    rows = [_row("a.md", how_it_stands="abroge"),
+            _row("b.md", how_it_stands="abroge"),
+            _row("c.md", how_it_stands="in force"),
+            _row("d.md", how_it_stands="repealed")]
+    assert st.currency_notes(rows, ROLES) == {"d.md": "repealed"}
+    assert st.unrecognised_statuses(rows, ROLES) == {"abroge": 2, "in force": 1}
+
+
+def test_a_document_with_no_status_is_not_counted_as_an_unknown_one():
+    """Silence is not a broken contract. Counting it would bury the values
+    that are one under every document that simply has no status."""
+    assert st.unrecognised_statuses([_row("a.md")], ROLES) == {}
+    assert st.unrecognised_statuses(
+        [_row("a.md", how_it_stands="repealed")], ROLES) == {}
+    # A class that declares no status property says nothing about any of them.
+    assert st.unrecognised_statuses(
+        [_row("a.md", how_it_stands="abroge")], dr.NONE) == {}
+
+
 def test_a_class_that_declares_no_status_gets_no_currency_note():
     assert st.currency_notes([_row("a.md", how_it_stands="repealed")],
                              dr.NONE) == {}

@@ -3212,6 +3212,18 @@ def _source_context(rows: list[dict]) -> dict[str, dict]:
     roles = next((r["roles"] for r in rows if r.get("roles")),
                  declared_roles.NONE)
     currency = answer_structure.currency_notes(rows, roles)
+    # A status the contract does not know is a document the currency check
+    # waved through, and it looks exactly like a document with no status. Said
+    # out loud here because the repair is the deployment's mapping and nobody
+    # goes looking for a note that was never printed.
+    if unknown := answer_structure.unrecognised_statuses(rows, roles):
+        _log.warning(
+            "currency: %d status value(s) outside the contract, on %d "
+            "document(s): %s. These read as current law. The deployment maps "
+            "its own words onto %s where it extracts.",
+            len(unknown), sum(unknown.values()),
+            ", ".join(f"{v!r} x{n}" for v, n in sorted(unknown.items())),
+            " / ".join(answer_structure.STALE_STATUSES))
     jurisdiction = answer_structure.jurisdiction_notes(rows, roles)
     out: dict[str, dict] = {}
     for r in rows:

@@ -109,6 +109,79 @@ def test_the_strict_test_needs_no_corpus_at_all():
         assert written_as_a_word(word), word
 
 
+def test_a_lower_case_word_is_lower_case_in_any_script():
+    """`re.match(r"^[a-z]", name)` is a question about the ASCII range, not
+    about the character. Every word here is a lower-case common noun that the
+    check read as a name and left as an entity, on a corpus about a third of
+    which is in the language that writes them."""
+    from app.services.generic_entities import written_as_a_word
+
+    for word in ("état", "échange", "établissement", "édition", "égalité",
+                 "ökonomie", "überschuss", "época"):
+        assert written_as_a_word(word), word
+
+
+def test_an_accented_name_is_still_spared():
+    """The widening must not start marking names. A capital is a capital
+    whatever letter carries it."""
+    from app.services.generic_entities import written_as_a_word
+
+    for name in ("État", "Établissements Ashgrove", "Élysée", "Ökonomie"):
+        assert not written_as_a_word(name), name
+
+
+def test_a_word_is_a_whole_word_in_any_script():
+    """The boundary was `[A-Za-z]`, so an accented letter did not count as a
+    letter and a name could match inside a longer word that continues with
+    one."""
+    # No occurrence at all: the function says so by returning no share.
+    assert case_evidence("Kestrel", "the Kestrelé filing")[
+        "lowercase_share"] is None
+    assert case_evidence("Kestrel", "the Kestrel filing")["any_case"] == 1
+
+
+def test_decomposed_text_counts_the_same_as_composed():
+    """A combining mark is not a letter to the boundary, so in decomposed
+    text a name matches inside a longer word that the composed form correctly
+    rejects. Which form arrives depends on where the text was extracted, and
+    a count must not vary with that."""
+    composed = "the Kestrel\u00e9 filing"
+    decomposed = "the Kestrele\u0301 filing"
+    assert composed != decomposed
+    for t in (composed, decomposed):
+        assert case_evidence("Kestrel", t)["lowercase_share"] is None, t
+    # The name can arrive decomposed too, and is still the same name: it is
+    # found in composed text and reported as never written lower-case.
+    # Without the fold it is not found at all and the share is None, which
+    # reads as "this word does not appear" rather than "it appears and is
+    # always capitalised".
+    assert case_evidence("E\u0301tat", "the \u00c9tat filing")[
+        "lowercase_share"] == 0.0
+
+
+def test_composing_is_a_check_before_it_is_a_copy():
+    """The case tier hands the same sample of whole documents to every
+    candidate, so an unconditional normalise rebuilt a large string once per
+    entity. Already-composed text must come back as the same object."""
+    from app.services.generic_entities import _composed
+
+    composed = "the \u00c9tat filing"
+    assert _composed(composed) is composed
+    decomposed = "the E\u0301tat filing"
+    assert _composed(decomposed) == composed
+
+
+def test_the_candidate_query_does_not_decide_what_lower_case_means():
+    """The SQL used to ask `~ '^[a-z]'`, which made the Python test below it
+    unreachable for the words it was widened to catch. The question is asked
+    once now, where the character can be asked."""
+    from app.services.generic_entities import _CANDIDATES
+
+    sql = str(_CANDIDATES)
+    assert "'^[a-z]'" not in sql
+    assert "lower(e.canonical_form)" in sql, "the cheap half stays"
+
+
 def test_the_strict_test_spares_everything_written_as_a_name():
     from app.services.generic_entities import written_as_a_word
 

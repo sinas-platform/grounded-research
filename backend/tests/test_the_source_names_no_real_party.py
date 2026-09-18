@@ -139,12 +139,19 @@ _BARE_SERIAL = re.compile(r'"(\d{6,}\.md)"')
 # `c/`, `c.` and `contre` are how the same relation is written in French. The
 # marker stays lower-case on purpose: an upper-case `C.` is an initial, and
 # reading `Exhibit C. Smith` as a caption would invent a finding.
+# A party token: a capital, then a LETTER, then anything a name may carry.
+# The second character has to be a letter so an elided article is not read as
+# the start of a name: `L'affaire Ashgrove c/ Autorité` would otherwise put
+# `L'affaire` into the left-hand party, and a lead that is not in the
+# invented-name set reads as a real one. The English leads are handled by
+# `_SENTENCE_LEAD` because they are separate words; an elided article is not
+# a separate word, so it is excluded here instead.
 _CAP = r"[A-ZÀ-ÖØ-Þ]"
-_CAP_REST = r"[A-Za-zÀ-ÖØ-öø-ÿ.'’‐-]"
+_CAP_REST = r"[A-Za-zÀ-ÖØ-öø-ÿ](?:[A-Za-zÀ-ÖØ-öø-ÿ.'’‐-]*)"
 _VERSUS = r"(?:v\.?|c[./]|contre)"
 _CAPTION = re.compile(
-    rf"\b((?:{_CAP}{_CAP_REST}+\s+){{0,3}}{_CAP}{_CAP_REST}+)\s+{_VERSUS}\s+"
-    rf"({_CAP}{_CAP_REST}+(?:\s+{_CAP}{_CAP_REST}+){{0,3}})\b")
+    rf"\b((?:{_CAP}{_CAP_REST}\s+){{0,3}}{_CAP}{_CAP_REST})\s+{_VERSUS}\s+"
+    rf"({_CAP}{_CAP_REST}(?:\s+{_CAP}{_CAP_REST}){{0,3}})\b")
 
 # ── a deployment's chosen vocabulary ─────────────────────────────────────────
 
@@ -414,6 +421,10 @@ def test_the_checks_can_see_an_offender():
     assert _CAPTION.search("Bellhaven contre Northmoor")
     # An initial is not a marker, and a lone capital is not a party.
     assert not _CAPTION.search("see Exhibit C. Smith for the schedule")
+    # An elided article is not the start of a party name. Before this, the
+    # caption swallowed the lead and then reported it as a real one.
+    m = _CAPTION.search("L'affaire Société Ashgrove c/ Autorité")
+    assert m and "affaire" not in m.group(0)
     caption = _CAPTION.search("In Ashgrove Systems v Authority")
     words = [w for w in caption.group(0).replace(" v ", " ").split()
              if w not in _SENTENCE_LEAD]

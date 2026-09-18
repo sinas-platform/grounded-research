@@ -81,7 +81,18 @@ _CITED_SUPERSEDED = text("""
     LEFT JOIN relationship_state srs ON srs.id = r.current_state_id
     WHERE ac.answer_id = :a
       AND (r.current_state_id IS NULL OR srs.counts_as_active IS TRUE)
+      AND r.source_id <> r.target_id
 """)
+# The last condition: a source cannot supersede itself, and the graph says
+# some do. Measured on 18 September 2026: 22 of one collection's 307
+# supersession edges ran from an entity to that same entity. The shape that
+# makes them is an interim order and the final judgment in one case both
+# resolving to the case's entity, so the edge extracted between the two
+# documents collapses to a loop. Read without this condition, the loop told
+# the drafter the deciding judgment of a question "is recorded as superseded
+# by" itself, and the drafter dropped the citation — the one source the
+# expert review had said was missing. The loop is a resolution artefact, not
+# a fact about the law, and no reading of it is worth passing to a reviser.
 
 
 def identified(rows: list[dict]) -> list[dict]:

@@ -6276,6 +6276,13 @@ async def _record_refusals(run_id: uuid.UUID, answer_id: uuid.UUID,
     Returns how many replies were recorded, for the cycle's telemetry.
     """
     seen: set[str] = set()
+    # What the cycle actually recorded, counted apart from `seen`. A rejected
+    # refusal is not a reply and must not be counted; discarding its id from
+    # `seen` to achieve that also put the id back in play, so a drafter
+    # naming one objection in both a `refuse` and a `keep` had the second
+    # reply processed as if the first had never happened. Deduplication and
+    # accounting are different questions.
+    recorded = 0
     cycle = int((await _next_cycle_key(run_id, "validate", "gate"))
                 .removeprefix("gate_")) - 1
     replies = (
@@ -6305,10 +6312,10 @@ async def _record_refusals(run_id: uuid.UUID, answer_id: uuid.UUID,
                           run_id, oid, missing)
                 await objections.rejected(run_id, oid, why, missing,
                                           cycle=cycle)
-                seen.discard(oid)
                 continue
         await objections.refused(run_id, oid, why, cycle=cycle)
-    return len(seen)
+        recorded += 1
+    return recorded
 
 
 async def _revise_answer(

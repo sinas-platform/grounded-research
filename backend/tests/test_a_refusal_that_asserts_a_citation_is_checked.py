@@ -180,3 +180,54 @@ async def test_a_rejected_reply_is_on_the_record(ledger, cites):
     rec = [r for r in await objections.record(RUN) if r["id"] == oid][0]
     assert rec["state"] == objections.OPEN
     assert rec["rejected_replies"][0]["named"] == [FOUNDING]
+
+
+# -- the rejected argument is on the same clock as every other one -----------
+
+@pytest.mark.asyncio
+async def test_a_rejection_costs_an_exchange(ledger, cites):
+    """Reopening for free lets a drafter hold a point open for as long as the
+    run has rounds, by asserting the same absent citation every time. That is
+    the mirror of the failure the exchange bound already stops on the review's
+    side, so a rejection is put on the same clock."""
+    oid = await _ask()
+    before = ledger[oid]["exchanges"]
+    await qr._record_refusals(RUN, ANSWER, _refusal(
+        oid, f"Claim 5 already cites {FOUNDING} for both conditions."))
+    assert ledger[oid]["state"] == objections.OPEN, "back to the drafter"
+    assert ledger[oid]["exchanges"] == before + 1
+
+
+@pytest.mark.asyncio
+async def test_asserting_it_again_stalls_instead_of_reopening(ledger, cites):
+    """Not an infinite loop before this — the run ran out of cycles. The cost
+    was that an objection which never stalls never reaches `contested`, so an
+    essential request the drafter kept answering falsely ended the run with no
+    reader-visible caveat. The point was never settled and nothing said so."""
+    oid = await _ask()
+    for _ in range(objections.MAX_EXCHANGES):
+        await qr._record_refusals(RUN, ANSWER, _refusal(
+            oid, f"Claim 5 already cites {FOUNDING} for both conditions."))
+    entry = ledger[oid]
+    assert entry["state"] == objections.STALLED
+    assert len(entry["rejected_replies"]) == objections.MAX_EXCHANGES
+    # Where a stalled essential objection already goes, unchanged by this.
+    assert objections.state_after_rejection({"exchanges": 1}) == objections.OPEN
+
+
+@pytest.mark.asyncio
+async def test_one_objection_named_twice_is_answered_once(ledger, cites):
+    """`seen` deduplicates replies so the ledger's view of "the drafter
+    answered" does not depend on which disposition the reviser reached for.
+    Discarding a rejected id from `seen` to keep it out of the count put the
+    id back in play, and the second naming was processed as if the first had
+    never happened."""
+    oid = await _ask()
+    patch = {"refuse": [{"objection": oid,
+                         "rationale": f"Claim 5 already cites {FOUNDING}."}],
+             "keep": [{"seq": 5, "objection": oid,
+                       "rationale": f"Claim 5 already cites {FOUNDING}."}]}
+    recorded = await qr._record_refusals(RUN, ANSWER, patch)
+    assert recorded == 0, "a false assertion is not a reply"
+    assert len(ledger[oid]["rejected_replies"]) == 1, "and it is one reply"
+    assert ledger[oid]["exchanges"] == 2, "charged once, not twice"

@@ -84,10 +84,13 @@ def case_evidence(name: str, text: str) -> dict:
     """
     if not name or not text:
         return {"as_written": 0, "lowercase": 0, "lowercase_share": None}
-    if name == name.lower() and re.match(r"^[a-z]", name):
+    if written_as_a_word(name):
         return {"as_written": 0, "lowercase": 0, "lowercase_share": 1.0,
                 "note": "the canonical form is itself lower-case"}
-    boundary = r"(?<![A-Za-z]){}(?![A-Za-z])"
+    # A whole word, in any script. `[A-Za-z]` let an accented letter act as a
+    # boundary, so a name could match inside a longer word that continues
+    # with one.
+    boundary = r"(?<![^\W\d_]){}(?![^\W\d_])"
     pat = boundary.format(re.escape(name))
     any_case = len(re.findall(f"(?i){pat}", text))
     lowercase = len(re.findall(boundary.format(re.escape(name.lower())), text))
@@ -134,8 +137,15 @@ def written_as_a_word(name: str) -> bool:
     anywhere it was read, because the canonical form is what the extractor
     saw. Nothing here is a judgement about how often a word appears in one
     case or another, which is why it is the test to mark on first.
+
+    "Lower-case" is asked of the character, not of the ASCII range it might
+    sit in. The test was `re.match(r"^[a-z]", name)`, which `état`, `échange`
+    and `établissement` all fail: lower-case words the check read as names
+    and left as entities. The corpus this runs on is about a third French, so
+    the words it could least judge were a large part of the ones it exists to
+    catch.
     """
-    return bool(name) and name == name.lower() and bool(re.match(r"^[a-z]", name))
+    return bool(name) and name == name.lower() and name[:1].islower()
 
 
 def is_generic(name: str, documents: int, evidence: dict) -> bool:

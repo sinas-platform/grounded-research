@@ -109,6 +109,37 @@ def test_the_strict_test_needs_no_corpus_at_all():
         assert written_as_a_word(word), word
 
 
+def test_a_lower_case_word_is_lower_case_in_any_script():
+    """`re.match(r"^[a-z]", name)` is a question about the ASCII range, not
+    about the character. Every word here is a lower-case common noun that the
+    check read as a name and left as an entity, on a corpus about a third of
+    which is in the language that writes them."""
+    from app.services.generic_entities import written_as_a_word
+
+    for word in ("état", "échange", "établissement", "édition", "égalité",
+                 "ökonomie", "überschuss", "época"):
+        assert written_as_a_word(word), word
+
+
+def test_an_accented_name_is_still_spared():
+    """The widening must not start marking names. A capital is a capital
+    whatever letter carries it."""
+    from app.services.generic_entities import written_as_a_word
+
+    for name in ("État", "Établissements Ashgrove", "Élysée", "Ökonomie"):
+        assert not written_as_a_word(name), name
+
+
+def test_a_word_is_a_whole_word_in_any_script():
+    """The boundary was `[A-Za-z]`, so an accented letter did not count as a
+    letter and a name could match inside a longer word that continues with
+    one."""
+    # No occurrence at all: the function says so by returning no share.
+    assert case_evidence("Kestrel", "the Kestrelé filing")[
+        "lowercase_share"] is None
+    assert case_evidence("Kestrel", "the Kestrel filing")["any_case"] == 1
+
+
 def test_the_strict_test_spares_everything_written_as_a_name():
     from app.services.generic_entities import written_as_a_word
 

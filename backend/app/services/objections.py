@@ -175,6 +175,18 @@ def carries_something_new(entry: dict, added: str) -> bool:
     return True
 
 
+def state_after_rejection(entry: dict) -> str:
+    """Where an objection goes when its refusal is rejected. Pure.
+
+    Back to the drafter while there is an exchange left, and stalled at the
+    bound. A stalled essential objection already reaches `contested` and
+    prints as a caveat a reader sees, so this adds no new escalation: it puts
+    a rejected argument on the same clock as every other one.
+    """
+    return (STALLED if int(entry.get("exchanges") or 1) >= MAX_EXCHANGES
+            else OPEN)
+
+
 def is_essential(entry: dict) -> bool:
     """Essential, and justified. Pure.
 
@@ -280,10 +292,19 @@ async def rejected(run_id: uuid.UUID, oid: str, reason: str,
 
     A refusal that asserts a citation is checkable against the answer's own
     evidence rows before anyone rules on it, and one that fails the check is
-    not a reply: the request stays OPEN, and the failed reply is kept on the
-    entry so the next round can say why the request still stands. A false
-    assertion closing an argument is the same failure shape the objections
-    exist to catch, one level up.
+    not a reply: the request goes back to the drafter, and the failed reply
+    is kept on the entry so the next round can say why the request still
+    stands. A false assertion closing an argument is the same failure shape
+    the objections exist to catch, one level up.
+
+    It costs an exchange. Reopening for free lets a drafter hold a point open
+    for as long as the run has rounds by asserting the same absent citation
+    every time, which is the mirror of the failure the exchange bound already
+    stops on the review's side. It is not an infinite loop, because the run
+    runs out of cycles, and that is the problem: an objection that never
+    stalls never reaches `contested`, so an essential request the drafter
+    kept answering falsely ends the run with no reader-visible caveat. The
+    point was never settled and nothing said so.
     """
     entries = await _load(run_id)
     entry = entries.get(oid)
@@ -292,7 +313,10 @@ async def rejected(run_id: uuid.UUID, oid: str, reason: str,
     entry["rejected_replies"] = (entry.get("rejected_replies") or []) + [
         {"reason": (reason or "").strip()[:400], "named": list(named)[:5],
          "cycle": int(cycle)}]
-    entry["state"] = OPEN
+    # Decided on the count BEFORE this rejection spends one, as `_decide` is
+    # on the review's side of the same argument.
+    entry["state"] = state_after_rejection(entry)
+    entry["exchanges"] = int(entry.get("exchanges") or 1) + 1
     entries[oid] = entry
     await _store(run_id, entries)
 

@@ -21,6 +21,7 @@ import argparse
 import asyncio
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -627,7 +628,32 @@ async def plan_question(
             # reads: the profile was empty for the life of one corpus
             # before anyone noticed.
             "warnings": [map_problem] if map_problem else [],
+            # The question itself, because retrieval reads it: see the
+            # question channel in `retrieve_and_rank`. Stored with the plan
+            # so a replayed plan retrieves what the run retrieved.
+            "question": question,
             "effort": effort}
+
+
+#: Shorter than this and a word of the question is `a`, `of`, `v`.
+MIN_TERM_CHARS = 3
+
+
+def question_terms(question: str) -> str:
+    """The question's own words as one tsquery expression, any of them. Pure.
+
+    Every distinct word of at least MIN_TERM_CHARS characters, lower-cased,
+    joined by `|`, in first-seen order so the same question is the same
+    expression every time. Unicode word characters, so a French or a Dutch
+    question falls out the same way as an English one, and nothing here
+    knows a stopword: a word every document carries ranks nothing up, and
+    the rank is length-normalised so a long document does not win by
+    carrying more of them.
+    """
+    seen = dict.fromkeys(
+        w for w in re.findall(r"\w+", (question or "").lower())
+        if len(w) >= MIN_TERM_CHARS and not w.isdigit())
+    return " | ".join(seen)
 
 
 async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
@@ -751,6 +777,41 @@ async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
                 scores[did] += 8.0 * float(r) + 0.5
                 names[did] = fn
                 reasons[did].append(f"matched {q!r}")
+
+        # The question channel: the question's own words, ranked by the
+        # index. The only channel whose input is the same on every run of
+        # a question — the anchors and the text queries above are written
+        # by a model and a second run writes them differently — so it is
+        # the floor the rest of retrieval stands on. Measured on 18
+        # September 2026, on its own, one question: the chapter that
+        # decides it at rank 1, the two judgments the expert review had
+        # asked for at 30 and 55, and no two runs of it can differ. Reaches
+        # a document no entity ever recognised, which a sampled 29% of this
+        # collection is; see the reachability note in the same day's
+        # commits.
+        terms = question_terms(str(plan.get("question") or ""))
+        if terms:
+            rows = (await s.execute(text("""
+                SELECT d.id, d.filename,
+                       ts_rank(dv.content_tsvector,
+                               to_tsquery('simple', :terms), 1) AS r
+                FROM document d
+                JOIN document_version dv ON dv.id = d.current_version_id
+                WHERE dv.content_tsvector @@ to_tsquery('simple', :terms)
+                  AND d.staged IS NOT TRUE
+                ORDER BY r DESC, d.id LIMIT 100"""), {"terms": terms})).all()
+            # Scored against the best match, not on the index's own scale:
+            # the document that matches the question's words best counts
+            # as one strong anchor mention (3.0, the mention channel's
+            # hop-0 weight) and the rest in proportion. On the index's
+            # scale, scored like a text query, the channel touched 14 of
+            # 100 documents and moved none — measured on a replayed plan.
+            top = max((float(r) for _, _, r in rows), default=0.0) or 1.0
+            for did, fn, r in rows:
+                did = str(did)
+                scores[did] += 3.0 * float(r) / top
+                names[did] = fn
+                reasons[did].append("matched the question's own words")
 
         # filename channel: decision docs are named after their cases
         import re as _re

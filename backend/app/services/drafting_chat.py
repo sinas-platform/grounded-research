@@ -322,7 +322,19 @@ def objections_block(open_points: list[dict[str, Any]]) -> str:
         weight = (" — the review calls this essential: "
                   + str(p.get("why_essential") or "").strip()
                   if p.get("why_essential") else "")
-        lines.append(f'- [{p.get("id")}] {subject}: {asked}{weight}')
+        # A refusal that named a file the answer does not cite was not a
+        # reply, and the drafter is told so rather than asked again cold:
+        # the same words a second time would fail the same check.
+        failed = [r for r in (p.get("rejected_replies") or [])
+                  if isinstance(r, dict)]
+        checked = ""
+        if failed:
+            named = ", ".join(str(f) for f in (failed[-1].get("named") or []))
+            checked = (f" — your earlier refusal said the answer cites {named}; "
+                       "no claim's evidence does, so it did not count. A "
+                       "refusal that asserts a citation must be true of the "
+                       "answer as it stands.")
+        lines.append(f'- [{p.get("id")}] {subject}: {asked}{weight}{checked}')
     return (
         "\n\nOUTSTANDING REQUESTS — each carries the id a reply names. For "
         "every one of them you must do ONE of two things, and silence is "

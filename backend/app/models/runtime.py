@@ -239,6 +239,9 @@ class EntityStats(Base):
     documents: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default="0"
     )
+    recognised_documents: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
     recognised: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false"
     )

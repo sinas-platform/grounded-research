@@ -344,13 +344,13 @@ def test_round_1_losing_all_three_matching_fields_fails():
 def test_round_1_losing_one_matching_field_passes():
     """The other two still produce matches, so nothing is lost."""
     assert _require(
-        {"value_probes": [], "seed_cases": [], "websearch_queries": []},
+        {"value_probes": [], "known_sources": [], "websearch_queries": []},
         _ROUND1_GROUPS,
     )
 
 
 def test_round_1_losing_two_matching_fields_passes():
-    assert _require({"seed_cases": ["x"], "websearch_queries": []}, _ROUND1_GROUPS)
+    assert _require({"known_sources": ["x"], "websearch_queries": []}, _ROUND1_GROUPS)
 
 
 def test_round_1_losing_the_text_channel_fails():
@@ -362,7 +362,7 @@ def test_empty_lists_pass_because_presence_is_the_test():
     """A question naming no entities properly yields an empty list, and a
     question needing no reranking an empty class_boost. Both are answers."""
     assert _require(
-        {"named_entities": [], "value_probes": [], "seed_cases": [], "websearch_queries": []},
+        {"named_entities": [], "value_probes": [], "known_sources": [], "websearch_queries": []},
         _ROUND1_GROUPS,
     )
 

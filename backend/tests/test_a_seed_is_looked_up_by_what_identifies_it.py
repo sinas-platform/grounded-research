@@ -69,3 +69,15 @@ def test_the_planner_is_asked_for_the_identifier():
     assert '"known_sources"' in rf._ROUND1_PROMPT
     assert '"identifier"' in rf._ROUND1_PROMPT and '"title"' in rf._ROUND1_PROMPT
     assert "known_sources" in rf._ROUND1_GROUPS[0]
+
+
+def test_a_lookup_returns_the_closest_names_not_the_most_mentioned():
+    """Ranked by mentions, `Article 7` returned "Article 700 du code de
+    procédure civile" and `Commission` every commission in the corpus:
+    the most-mentioned entity containing a short key is rarely the one
+    meant. Containment filters, trigram similarity ranks, mentions only
+    break ties — in both resolvers."""
+    for fn in (rf._entities_matching, rf._resolve_value_probes):
+        src = inspect.getsource(fn)
+        assert "similarity(e.canonical_form, :key)" in src, fn.__name__
+        assert "ORDER BY closeness DESC, docs DESC" in src, fn.__name__

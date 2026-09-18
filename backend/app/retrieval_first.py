@@ -389,19 +389,20 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
             tname = str(pr.get("type") or "").strip()
             if len(m) < 3:
                 continue
-            # `docs` is read off `entity_stats`, not counted: see the note on
-            # `_resolve_names`.
+            # `docs` is read off `entity_stats`, not counted, and the cut is
+            # closest name first: see `_entities_matching`.
             rows = (await s.execute(text("""
                 SELECT e.id, e.canonical_form, t.name,
-                       coalesce(st.documents, 0) AS docs
+                       coalesce(st.documents, 0) AS docs,
+                       similarity(e.canonical_form, :key) AS closeness
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                 LEFT JOIN entity_stats st ON st.entity_id = e.id
                 WHERE e.merged_into_id IS NULL
                   AND (:tname = '' OR t.name ILIKE :tname)
                   AND e.canonical_form ILIKE :pat
-                ORDER BY docs DESC, e.id LIMIT 12"""),
-                {"tname": tname, "pat": f"%{m}%"})).all()
-            for eid, cf, tn, docs in rows:
+                ORDER BY closeness DESC, docs DESC, e.id LIMIT 12"""),
+                {"tname": tname, "pat": f"%{m}%", "key": m})).all()
+            for eid, cf, tn, docs, _closeness in rows:
                 out.append({"id": str(eid), "value": cf, "type": tn,
                             "docs": int(docs)})
     return out
@@ -527,7 +528,7 @@ async def _resolve_names(names: list) -> list[dict]:
     async with AsyncSessionLocal() as s:
         for item in names:
             for n in lookup_keys(item):
-                for eid, cf, tn, docs in await _entities_matching(s, n):
+                for eid, cf, tn, docs, _closeness in await _entities_matching(s, n):
                     seen[str(eid)] = {"id": str(eid), "value": cf,
                                       "type": tn, "docs": int(docs)}
     return list(seen.values())
@@ -569,7 +570,19 @@ def lookup_keys(item) -> list[str]:
 
 
 async def _entities_matching(s, n: str):
-    """The six most-mentioned entities whose name or alias contains `n`."""
+    """The six entities whose name or alias contains `n`, closest name first.
+
+    Containment is the filter; how closely the whole name resembles what
+    the planner wrote is the rank, and only then how much the entity is
+    mentioned. Ranked by mentions alone, as this was, `Article 7` returned
+    "Article 700 du code de procédure civile" and `Commission` returned
+    every commission in the corpus, because the most-mentioned entity
+    containing a short key is rarely the one meant. Trigram similarity is
+    the standard measure and knows nothing of any language; measured:
+    `Article 7` → Article 7, Article 7(7), Article 7(A); `European
+    Commission` → European Commission, The European Commission; the case
+    number → the case.
+    """
     # Two branches unioned, not one WHERE with an OR: a trigram index serves
     # `ILIKE '%…%'` on a column, and Postgres cannot use it across
     # `name ILIKE … OR id IN (alias subquery)` — that form scans the whole
@@ -577,20 +590,22 @@ async def _entities_matching(s, n: str):
     # OR, 0.26 s as a union.
     return (await s.execute(text("""
                 SELECT e.id AS id, e.canonical_form AS value, t.name AS type,
-                       coalesce(st.documents, 0) AS docs
+                       coalesce(st.documents, 0) AS docs,
+                       similarity(e.canonical_form, :key) AS closeness
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                 LEFT JOIN entity_stats st ON st.entity_id = e.id
                 WHERE e.merged_into_id IS NULL AND e.canonical_form ILIKE :pat
                 UNION
                 SELECT e.id, e.canonical_form, t.name,
-                       coalesce(st.documents, 0)
+                       coalesce(st.documents, 0),
+                       similarity(a.alias, :key)
                 FROM entity_alias a
                 JOIN entity e ON e.id = a.entity_id
                 JOIN entity_type t ON t.id = e.entity_type_id
                 LEFT JOIN entity_stats st ON st.entity_id = e.id
                 WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
-                ORDER BY docs DESC, id
-                LIMIT 6"""), {"pat": f"%{n}%"})).all()
+                ORDER BY closeness DESC, docs DESC, id
+                LIMIT 6"""), {"pat": f"%{n}%", "key": n})).all()
 
 
 async def plan_question(

@@ -263,6 +263,29 @@ def _sentence(c: dict, ev_by_claim: dict, cites: _Cites) -> str:
     return _str(c.get("claim_text")).strip() + _markers(c, ev_by_claim, cites) + _labels(c)
 
 
+def _has_test(c: dict) -> bool:
+    """Whether this claim renders as a test, asked of the test itself.
+
+    The kind and the test object can come apart. `normalise_claim` keeps a
+    test only for a claim of kind `test`, but a revision that changes the kind
+    and does not resend the test leaves the object on the row: the update
+    writes `claim_kind` and never reaches `test`, because `test` is only
+    rewritten when the patch carries one. Gating the block on the kind then
+    prints a structured test, name and ordered conditions and all, as an
+    ordinary sentence, which is the defect an expert reviewer reported as her
+    largest: a test not set out as a test.
+
+    So the block asks for what it needs. Two conditions with text is the same
+    floor `normalise_test` applies, because a test of one condition is a rule
+    and is stored as one.
+    """
+    t = c.get("test")
+    if not isinstance(t, dict):
+        return False
+    return sum(1 for x in (t.get("conditions") or [])
+               if isinstance(x, dict) and _str(x.get("text")).strip()) >= 2
+
+
 def _test_block(c: dict, ev_by_claim: dict, cites: _Cites) -> str:
     t = c.get("test") or {}
     conds = [x for x in (t.get("conditions") or []) if isinstance(x, dict)]
@@ -287,7 +310,7 @@ def _paragraphs(claims: list[dict], ev_by_claim: dict, cites: _Cites) -> list[st
     for c in claims:
         pos = c.get("position")
         gap = (isinstance(pos, int) and isinstance(last_pos, int) and pos > last_pos + 1)
-        if c.get("claim_kind") == "test":
+        if _has_test(c):
             if current:
                 out.append(" ".join(current))
                 current = []
@@ -477,7 +500,7 @@ def render_markdown(answer: dict, claims: list[dict], evidence: list[dict],
             out += [_sentence(c, ev_by_claim, cites), ""]
     else:
         for c in claims:
-            if c.get("claim_kind") == "test":
+            if _has_test(c):
                 out += [_test_block(c, ev_by_claim, cites), ""]
             else:
                 out += [_sentence(c, ev_by_claim, cites), ""]

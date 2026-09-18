@@ -6154,7 +6154,7 @@ async def _removal_record(session, claim_ids: list) -> list[dict]:
 
 def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
                      id_by_seq: Mapping[int, uuid.UUID], added: bool = False,
-                     sources: Mapping[str, dict] | None = None) -> None:
+                     sources: Mapping[str, dict] | None = None) -> dict | None:
     """Write the structure fields a patch item carries onto a claim row.
 
     A revised claim keeps whatever the patch does not mention; an added claim
@@ -6168,7 +6168,17 @@ def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
     revision rebinds evidence, so a claim that moves to another document must
     move to that document's labels with it — leaving the old ones on the row
     is how an answer ends up calling a source something it is not.
+
+    Returns what the kind did, or None when it did not move. `test` is only
+    rewritten when the patch carries one, so a revision that changes the kind
+    and says nothing about the test leaves the object behind on the row. That
+    state is legible in the answer only as a test printed as a sentence, and
+    it was found by reading stored rows rather than by anything reporting it.
+    The caller records what comes back, so the next one is read rather than
+    reconstructed.
     """
+    was_kind = row.claim_kind
+    was_test = isinstance(row.test, dict)
     carries = {k for k in ("part", "kind", "type", "test", "conditions",
                            "test_name") if item.get(k) is not None}
     if added or carries:
@@ -6190,6 +6200,20 @@ def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
         ids = [str(id_by_seq[r]) for r in refs
                if r in id_by_seq and id_by_seq[r] != row.id]
         row.follows_from = ids or None
+    if added or row.claim_kind == was_kind:
+        return None
+    return {
+        "sequence": row.sequence,
+        "from": was_kind,
+        "to": row.claim_kind,
+        # The case worth seeing: the kind left `test` and the object stayed.
+        # Nothing downstream reads the pair, so it is named here.
+        "orphaned_test": bool(
+            was_kind == "test" and row.claim_kind != "test"
+            and isinstance(row.test, dict)),
+        "test_before": was_test,
+        "test_after": isinstance(row.test, dict),
+    }
 
 
 def _apply_source_facts(row: AnswerClaim, evidence: Any,
@@ -6598,6 +6622,7 @@ async def _revise_answer(
             touched += 1
 
         id_by_seq = {seq: c.id for seq, c in by_seq.items()}
+        kind_moves: list[dict] = []
         for item in patch["revise"]:
             claim = by_seq.get(item["seq"])
             if claim is None:
@@ -6610,7 +6635,10 @@ async def _revise_answer(
                 row.rationale = item["rationale"][:2000]
             # The structure moves with the text when the patch says so; a
             # revision that says nothing about it leaves the row where it is.
-            _apply_structure(row, item, parts, id_by_seq, sources=src_facts)
+            moved = _apply_structure(row, item, parts, id_by_seq,
+                                     sources=src_facts)
+            if moved is not None:
+                kind_moves.append(moved)
             # its evidence is re-bound, so its verdicts no longer apply
             await session.execute(ClaimEvidence.__table__.delete()
                                   .where(ClaimEvidence.claim_id == row.id))
@@ -6709,6 +6737,15 @@ async def _revise_answer(
             "abstentions": sum(1 for a in admitted
                                if a.get("type") == "abstention"),
             "dropped": len(patch["drop"]), "dropped_detail": dropped_here,
+            # Which claims changed kind this cycle, and whether a test object
+            # was left behind when one stopped being a test. Written every
+            # cycle, empty list included: an empty list says the cycle moved
+            # no kind, a missing key says the run predates the record. The
+            # state this exists to surface was found by reading stored rows,
+            # and nothing reported it.
+            "claim_kind_moves": kind_moves,
+            "orphaned_tests": [m["sequence"] for m in kind_moves
+                               if m.get("orphaned_test")],
             # Claims the reviser asked to drop and declined to explain. They
             # were not removed. If this is where the drops go, the requirement
             # is suppressing the disposition rather than documenting it, and

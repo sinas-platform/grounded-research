@@ -332,6 +332,10 @@ class _Claim:
         self.section = "analysis"
         self.part_index = 0
         self.claim_kind = "rule"
+        # The model has this column and `_apply_structure` reads it to report
+        # a kind that moved without its test. A stub is only as complete as
+        # the paths it happened to reach.
+        self.test = None
 
 
 @pytest.fixture

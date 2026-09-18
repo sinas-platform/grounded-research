@@ -6217,7 +6217,52 @@ def _apply_source_facts(row: AnswerClaim, evidence: Any,
                          else None)
 
 
-async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
+def named_citations_hold(
+    reason: str, subject_of: dict[str, str], cited: set[str],
+) -> bool | None:
+    """Does every document this refusal names actually appear in the answer?
+    Pure.
+
+    `None` when the reason names no document at all, which is the ordinary
+    refusal and the one the engine has no standing to rule on: an argument
+    that a source cannot carry the point is a judgement about the source, and
+    the engine cannot read it.
+
+    A reason that puts a document's own filename forward is doing something
+    else. The filenames looked for are the ones this run demanded, taken from
+    the ledger, so this matches a token the engine issued rather than a word
+    in any language: nothing here parses prose, and a corpus in French reads
+    the same as one in English.
+
+    What makes the check safe to act on is that a source objection whose
+    document is cited is already resolved by `objections.resolve`. So a
+    document named by a refusal on a still-open objection has not reached the
+    answer, and a reason offering it as the reason the request is met is
+    offering a fact that is not true.
+
+    Measured: a refusal read "Claim 5 already cites <document> for both
+    conditions of the two-part test, so the founding judgment is cited for
+    the point it carries." No evidence row existed against that document
+    anywhere in the answer. The objection closed, the document was never
+    opened, and a third condition it states never reached the answer.
+
+    The limit, stated rather than hidden: a refusal that names a document
+    while arguing it is off the point is judged the same way, because telling
+    the two apart is a reading and the whole of this check is a lookup. It
+    costs that refusal one exchange, and the drafter is shown what was
+    rejected and why. The gate's own wording for the case this arose on asks
+    for "the document was opened and no passage stating it came back", which
+    names nothing and passes.
+    """
+    haystack = str(reason or "")
+    named = {f for f in set(subject_of.values()) if f and f in haystack}
+    if not named:
+        return None
+    return named <= cited
+
+
+async def _record_refusals(run_id: uuid.UUID, patch: dict,
+                           cited_now: dict[int, list[dict]]) -> int:
     """The patch's replies to the gate's requests, into the objection ledger.
 
     Three shapes, one meaning. An explicit `refuse` entry is a reply and
@@ -6228,11 +6273,28 @@ async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
     of "the drafter answered" from depending on which disposition the reviser
     happened to reach for.
 
+    A reply that names a demanded document is also asserting something the
+    engine can check, and `named_citations_hold` checks it. A refusal resting
+    on a document the answer cites nowhere is not recorded as an answer.
+
     Returns how many replies were recorded, for the cycle's telemetry.
     """
     seen: set[str] = set()
     cycle = int((await _next_cycle_key(run_id, "validate", "gate"))
                 .removeprefix("gate_")) - 1
+    # The filenames this run demanded, and what the answer stands on at the
+    # moment the patch arrives. Only `source` objections: a standing
+    # objection's subject is a claim rather than a filename, and looking for
+    # one among document names would match nothing.
+    subject_of = {
+        str(e.get("id") or ""): str(e.get("subject") or "").strip()
+        for e in await objections.ledger(run_id)
+        if e.get("kind") == objections.SOURCE
+        and str(e.get("subject") or "").strip()
+    }
+    cited = {str(c.get("filename") or "")
+             for rows in cited_now.values() for c in rows}
+    cited.discard("")
     for oid, why in (
         [(r["objection"], r["rationale"]) for r in (patch.get("refuse") or [])]
         + [(oid, (patch.get("drop_reasons") or {}).get(seq, ""))
@@ -6242,7 +6304,10 @@ async def _record_refusals(run_id: uuid.UUID, patch: dict) -> int:
     ):
         if oid and oid not in seen:
             seen.add(oid)
-            await objections.refused(run_id, oid, why, cycle=cycle)
+            holds = (named_citations_hold(why, subject_of, cited)
+                     if oid in subject_of else None)
+            await objections.refused(run_id, oid, why, cycle=cycle,
+                                     citation_holds=holds)
     return len(seen)
 
 
@@ -6517,7 +6582,7 @@ async def _revise_answer(
         # reply that mattered on the measured run was exactly that — a reason
         # why a source could not carry the point — and the shape that lost it
         # was "nothing was applied, so nothing is recorded".
-        refusals = await _record_refusals(run_id, patch)
+        refusals = await _record_refusals(run_id, patch, cited_now)
     if not patch or not (patch["revise"] or patch["add"] or patch["drop"]
                          or patch["keep"]):
         # Numbered like any other cycle, though it changed nothing. The reviser

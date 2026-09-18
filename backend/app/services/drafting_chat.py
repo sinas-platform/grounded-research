@@ -323,6 +323,15 @@ def objections_block(open_points: list[dict[str, Any]]) -> str:
                   + str(p.get("why_essential") or "").strip()
                   if p.get("why_essential") else "")
         lines.append(f'- [{p.get("id")}] {subject}: {asked}{weight}')
+        # A reply already rejected is shown back, because a drafter that is
+        # not told why its answer did not count answers the same way again
+        # and spends the second exchange on the first one's mistake.
+        for r in (p.get("rejected") or []):
+            if isinstance(r, dict):
+                lines.append(
+                    f'    (an earlier reply to this was not accepted: '
+                    f'{str(r.get("why") or "").strip()}. Cite the document or '
+                    f'refuse it on what it says, not on where it is.)')
     return (
         "\n\nOUTSTANDING REQUESTS — each carries the id a reply names. For "
         "every one of them you must do ONE of two things, and silence is "

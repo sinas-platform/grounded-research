@@ -81,6 +81,12 @@ RESOLVED = "resolved"
 #: States that end the argument. A subject here is never asked for again.
 _SETTLED = (ACCEPTED, STALLED, RESOLVED)
 
+#: The kind whose subject is a document filename. Named because a caller has
+#: to tell these apart from the kinds whose subject is something else (a
+#: standing objection's subject is a claim), and it was previously a literal
+#: default on one function.
+SOURCE = "source"
+
 _log = logging.getLogger(__name__)
 
 
@@ -175,6 +181,26 @@ def carries_something_new(entry: dict, added: str) -> bool:
     return True
 
 
+def state_after_rejection(entry: dict) -> str:
+    """Where an objection goes when the engine finds the refusal's citation
+    absent. Pure.
+
+    Back to the drafter, not into a block. A refusal resting on a document
+    the answer does not cite is a reply that was never made, and an objection
+    nobody answered is OPEN — the same reading `refused` already gives a
+    refusal with no reason.
+
+    It costs an exchange, and that is the whole of the bound. Reopening for
+    free would let a drafter hold a point open forever by asserting the same
+    absent citation every round, which is the mirror of the failure the
+    exchange bound exists to stop on the review's side. At the bound the
+    objection stalls, and a stalled essential objection already reaches the
+    verdict and prints as a reader-visible caveat. Nothing new blocks.
+    """
+    return (STALLED if int(entry.get("exchanges") or 1) >= MAX_EXCHANGES
+            else OPEN)
+
+
 def is_essential(entry: dict) -> bool:
     """Essential, and justified. Pure.
 
@@ -247,11 +273,31 @@ async def raise_objection(
 
 @_best_effort(None)
 async def refused(run_id: uuid.UUID, oid: str, reason: str,
-                  cycle: int = 0) -> None:
+                  cycle: int = 0, citation_holds: bool | None = None) -> None:
     """The drafter declines a request and says why.
 
     A reason is the whole point, so a refusal without one is not recorded:
     it leaves the objection open, which is what a silence already meant.
+
+    `citation_holds` is the caller's verdict on the one thing a reply can
+    assert that the engine can check without asking anybody. Most reasons are
+    judgements about a source — it does not say that, it is not on point —
+    and the engine has no standing to rule on those. One is not: a reply that
+    keeps a claim as the answer to a source request asserts that the claim
+    already cites the demanded document, and the answer's own evidence rows
+    settle whether it does.
+
+    `None` means the reply asserted nothing checkable and the refusal is
+    recorded as it always was. `False` means it asserted a citation the
+    answer does not have, and a refusal resting on a fact that is not true is
+    not an answer: the objection goes back to the drafter under
+    `state_after_rejection`, with what was rejected kept on the entry.
+
+    Measured: on one run an objection naming a retrieved and uncited founding
+    authority was closed by a reply asserting that a named claim cited it for
+    both conditions of a test. No evidence row existed against that document
+    anywhere in the answer, the document was never opened, and a third
+    condition it states never reached the answer.
     """
     reason = (reason or "").strip()
     if len(reason) < 20:
@@ -259,6 +305,22 @@ async def refused(run_id: uuid.UUID, oid: str, reason: str,
     entries = await _load(run_id)
     entry = entries.get(oid)
     if entry is None or entry.get("state") in _SETTLED:
+        return
+    if citation_holds is False:
+        entry["rejected"] = (entry.get("rejected") or []) + [{
+            "cycle": int(cycle),
+            "reason": reason[:400],
+            "why": ("the answer has no evidence row against "
+                    + str(entry.get("subject") or "this document")),
+        }]
+        # Decided on the count BEFORE this rejection spends one, as `_decide`
+        # does on the review's side. Reading the incremented value stalls the
+        # objection on its first rejection and the drafter never gets the
+        # answer it is entitled to make.
+        entry["state"] = state_after_rejection(entry)
+        entry["exchanges"] = int(entry.get("exchanges") or 1) + 1
+        entries[oid] = entry
+        await _store(run_id, entries)
         return
     entry["reply"] = {"reason": reason[:400], "cycle": int(cycle)}
     entry["state"] = ANSWERED
@@ -352,7 +414,7 @@ async def rule_all(run_id: uuid.UUID, rulings: list[dict],
 
 @_best_effort(None)
 async def resolve(run_id: uuid.UUID, subjects: list[str],
-                  kind: str = "source") -> None:
+                  kind: str = SOURCE) -> None:
     """These requests were met. Terminal, and it outranks every other state.
 
     Called with what the answer now cites: a source that made it into the
@@ -429,6 +491,11 @@ def as_record(entry: dict) -> dict[str, Any]:
         "rulings": rulings,
         "state": entry.get("state"),
         "exchanges": int(entry.get("exchanges") or 1),
+        # Replies the engine found false. Empty on almost every entry, and
+        # the one place a reader can see that an argument was not won but
+        # withdrawn.
+        "rejected": [r for r in (entry.get("rejected") or [])
+                     if isinstance(r, dict)],
     }
 
 

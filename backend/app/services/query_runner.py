@@ -6217,6 +6217,24 @@ def _apply_source_facts(row: AnswerClaim, evidence: Any,
                          else None)
 
 
+def _names_file(haystack: str, filename: str) -> bool:
+    """Whether `haystack` writes this filename, as a filename. Pure.
+
+    A plain substring test reads one name inside another: with `case.md` and
+    `showcase.md` both demanded, a reason naming only `showcase.md` also
+    counts as naming `case.md`, and the verdict then turns on whether the
+    other file happens to be cited. The names come from one ledger, so
+    collisions are not hypothetical: a scheme that suffixes or prefixes is
+    how most of them are built.
+
+    A filename is bounded by anything that cannot continue one. The trailing
+    guard admits a full stop, because a reason ending "...as set out in
+    a-judgment.md." is naming the file and not a different one.
+    """
+    return re.search(r"(?<![A-Za-z0-9_.\-])" + re.escape(filename)
+                     + r"(?![A-Za-z0-9_\-])", haystack) is not None
+
+
 def named_citations_hold(
     reason: str, subject_of: dict[str, str], cited: set[str],
 ) -> bool | None:
@@ -6255,7 +6273,8 @@ def named_citations_hold(
     names nothing and passes.
     """
     haystack = str(reason or "")
-    named = {f for f in set(subject_of.values()) if f and f in haystack}
+    named = {f for f in set(subject_of.values())
+             if f and _names_file(haystack, f)}
     if not named:
         return None
     return named <= cited
@@ -6280,6 +6299,7 @@ async def _record_refusals(run_id: uuid.UUID, patch: dict,
     Returns how many replies were recorded, for the cycle's telemetry.
     """
     seen: set[str] = set()
+    recorded = 0
     cycle = int((await _next_cycle_key(run_id, "validate", "gate"))
                 .removeprefix("gate_")) - 1
     # The filenames this run demanded, and what the answer stands on at the
@@ -6308,7 +6328,15 @@ async def _record_refusals(run_id: uuid.UUID, patch: dict,
                      if oid in subject_of else None)
             await objections.refused(run_id, oid, why, cycle=cycle,
                                      citation_holds=holds)
-    return len(seen)
+            # A rejected refusal is not a reply. It leaves the objection open
+            # and writes no `reply`, so counting it here would report the
+            # drafter as having answered a request it has not answered, on
+            # the one number a reader checks to see whether the conversation
+            # is working. `seen` still holds it: dedup and accounting are
+            # different questions.
+            if holds is not False:
+                recorded += 1
+    return recorded
 
 
 async def _revise_answer(

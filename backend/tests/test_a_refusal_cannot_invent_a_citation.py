@@ -111,6 +111,34 @@ def test_the_match_is_on_filenames_and_never_on_words():
         SUBJECTS, set()) is None
 
 
+def test_one_filename_inside_another_is_not_that_filename():
+    """The names come from one ledger and a scheme that prefixes or suffixes
+    is how most of them are built, so a plain substring test reads one name
+    inside another. With both demanded, a reason naming only the cited file
+    would otherwise make the uncited one named too, and the verdict would
+    turn on a file the reason never mentions."""
+    subjects = {"obj-1": "case.md", "obj-2": "showcase.md"}
+    reason = "showcase.md already carries this point, so the request is met."
+    # Only the long name is named, and it is cited: nothing fails.
+    assert qr.named_citations_hold(reason, subjects, {"showcase.md"}) is True
+    # The short name on its own is still found where it really is written.
+    assert qr.named_citations_hold(
+        "case.md already carries this point.", subjects, set()) is False
+
+
+def test_a_filename_at_the_end_of_a_sentence_is_still_named():
+    """The trailing guard admits a full stop. A reason that ends on the file
+    is naming it, and reading the sentence's own punctuation as part of the
+    name would let the assertion through unchecked."""
+    subjects = {"obj-1": "a-judgment.md"}
+    assert qr.named_citations_hold(
+        "The point is already carried by a-judgment.md.", subjects,
+        set()) is False
+    # And a longer name that merely starts the same way is not it.
+    assert qr.named_citations_hold(
+        "see a-judgment.mdx for the schedule", subjects, set()) is None
+
+
 # -- where the objection goes -------------------------------------------------
 
 def test_the_first_rejection_reopens_and_the_bound_stalls():
@@ -152,6 +180,33 @@ async def test_asserting_it_twice_stalls_rather_than_looping(ledger):
     entry = ledger[oid]
     assert entry["state"] == objections.STALLED
     assert len(entry["rejected"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_refusal_is_not_counted_as_a_reply(ledger, monkeypatch):
+    """`_record_refusals` returns how many replies the cycle recorded, and a
+    rejected refusal is not one: it leaves the objection open and writes no
+    `reply`. Counting it reports the drafter as having answered a request it
+    has not answered, on the one number a reader checks to see whether the
+    conversation is working."""
+    oid = await objections.raise_objection(
+        RUN, kind=objections.SOURCE, subject="a-judgment.md",
+        asked="cite it for the rule", cycle=1)
+    other = await objections.raise_objection(
+        RUN, kind=objections.SOURCE, subject="b-judgment.md",
+        asked="cite it too", cycle=1)
+    async def _cycle(*_a, **_k):
+        return "gate_1"
+
+    monkeypatch.setattr(qr, "_next_cycle_key", _cycle)
+    patch = {"refuse": [
+        {"objection": oid, "rationale": ASSERTS_A_CITATION},
+        {"objection": other, "rationale": ARGUES_ABOUT_THE_SOURCE},
+    ]}
+    n = await qr._record_refusals(RUN, patch, {1: [{"filename": "z.md"}]})
+    assert n == 1, "only the refusal that was actually recorded"
+    assert ledger[oid]["state"] == objections.OPEN
+    assert ledger[other]["state"] == objections.ANSWERED
 
 
 @pytest.mark.asyncio

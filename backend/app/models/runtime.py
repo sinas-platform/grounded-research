@@ -217,6 +217,36 @@ class CorpusProfile(Base):
     )
 
 
+class EntityStats(Base):
+    """What the corpus holds of one entity: how many documents mention it,
+    and whether anything other than a blind string match ever recognised it.
+
+    Derived, not declared — the per-entity sibling of `CorpusProfile`, kept
+    for the same reason: both figures are read on the path of every question
+    and computing them there cost minutes per question. Refreshed whole by
+    the maintenance pass (`services/generic_entities.refresh_entity_stats`);
+    an entity created since the last refresh has no row and reads as zero
+    documents and unrecognised until the next one.
+    """
+
+    __tablename__ = "entity_stats"
+
+    entity_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("entity.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    documents: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default="0"
+    )
+    recognised: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false"
+    )
+    refreshed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class EntityProposal(Base, TimestampMixin):
     """Proposed Entity awaiting human approval.
 

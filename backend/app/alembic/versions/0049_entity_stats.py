@@ -47,12 +47,6 @@ def upgrade() -> None:
                   primary_key=True),
         sa.Column("documents", sa.Integer(), nullable=False,
                   server_default="0"),
-        # Documents in which something other than a blind string match found
-        # the entity. `documents` counts the gazetteer's hits too, which for a
-        # word that became an entity is most of the corpus; this is the count
-        # that says how much the entity is actually written about.
-        sa.Column("recognised_documents", sa.Integer(), nullable=False,
-                  server_default="0"),
         sa.Column("recognised", sa.Boolean(), nullable=False,
                   server_default=sa.false()),
         sa.Column("refreshed_at", sa.DateTime(timezone=True),

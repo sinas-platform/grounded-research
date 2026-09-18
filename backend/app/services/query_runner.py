@@ -3390,9 +3390,10 @@ async def _stage_synthesize(run_id: uuid.UUID, sinas: _Sinas) -> uuid.UUID:
     # is settled: `_source_context` runs several times a run and is pure, so
     # saying it there said it repeatedly and from a function that should not
     # be speaking at all.
-    if unknown := answer_structure.unrecognised_statuses(
-            all_rows, next((r["roles"] for r in all_rows if r.get("roles")),
-                           declared_roles.NONE)):
+    unknown = answer_structure.unrecognised_statuses(
+        all_rows, next((r["roles"] for r in all_rows if r.get("roles")),
+                       declared_roles.NONE))
+    if unknown["by_value"]:
         await _tele(run_id, "retrieval",
                     unrecognised_statuses=answer_structure.status_report(unknown))
     # One conversation for the whole answer, opened here and continued by

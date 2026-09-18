@@ -902,17 +902,18 @@ MAX_REPORTED_STATUSES = 20
 MAX_REPORTED_STATUS_LEN = 80
 
 
-def status_report(counts: dict[str, int]) -> dict:
+def status_report(found: dict) -> dict:
     """`unrecognised_statuses` as a bounded row. Pure.
 
     The whole of the count is kept — `values` says how many distinct words
     there were and `documents` how many documents carried one — so a truncated
     list never reads as the complete picture.
     """
+    counts = found.get("by_value") or {}
     top = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
     return {
         "values": len(counts),
-        "documents": sum(counts.values()),
+        "documents": int(found.get("documents") or 0),
         "top": [{"value": v[:MAX_REPORTED_STATUS_LEN], "documents": n}
                 for v, n in top[:MAX_REPORTED_STATUSES]],
         "truncated": len(counts) > MAX_REPORTED_STATUSES,
@@ -920,7 +921,7 @@ def status_report(counts: dict[str, int]) -> dict:
 
 
 def unrecognised_statuses(rows: list[dict],
-                          roles: DeclaredRoles) -> dict[str, int]:
+                          roles: DeclaredRoles) -> dict:
     """Status values the deployment wrote that the contract does not know,
     and how many documents carry each. Pure.
 
@@ -935,11 +936,15 @@ def unrecognised_statuses(rows: list[dict],
     nothing. The fix is the deployment's mapping, and this is how anyone
     finds out the mapping is missing.
 
-    Counted per value rather than listed per document: the question a reader
-    has is which words are turning up, and a value on three hundred documents
-    and a value on one need telling apart.
+    Returns `{"by_value": {word: documents}, "documents": n}`. Counted per
+    value rather than listed per document, because the question a reader has
+    is which words are turning up and a value on three hundred documents and
+    a value on one need telling apart. The document total is carried rather
+    than derived, since one document can state two unknown words and summing
+    the per-value counts would report occurrences as documents.
     """
     out: dict[str, int] = {}
+    documents = 0
     for r in rows:
         if not r.get("filename"):
             continue
@@ -949,10 +954,17 @@ def unrecognised_statuses(rows: list[dict],
         # contract knows has its note and is not waved through, so counting
         # its other words would report a mapping gap where the mapping
         # worked.
-        if values and not any(v in STALE_STATUSES for v in values):
-            for v in values:
-                out[v] = out.get(v, 0) + 1
-    return out
+        if not values or any(v in STALE_STATUSES for v in values):
+            continue
+        documents += 1
+        # Per value, DOCUMENTS and not occurrences: one document that states
+        # the same unknown word twice is one document, and one that states
+        # two different unknown words is one document against each of them.
+        # Summing the per-value counts is therefore never the document
+        # total, which is why the total is carried rather than derived.
+        for v in set(values):
+            out[v] = out.get(v, 0) + 1
+    return {"by_value": out, "documents": documents}
 
 
 def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:

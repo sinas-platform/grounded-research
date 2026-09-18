@@ -44,6 +44,7 @@ from app.services import answer_structure as st
 from app.services import declared_roles
 from app.services import drafting_chat as dc
 from app.services import query_runner as qr
+from app.services import standing
 
 PARTS = [
     {"index": 0, "label": "Whether it applies", "text": "Whether it applies"},
@@ -500,7 +501,28 @@ def test_a_gloss_is_one_line_because_the_block_is_one_line_each():
     for kind, gloss in st.CLAIM_KIND_GLOSS.items():
         assert "\n" not in gloss, kind
     offered = [k for k in st.CLAIM_KINDS if k != "abstention"]
-    assert len(qr._KIND_GLOSS_BLOCK.splitlines()) == len(offered)
+    lines = qr._KIND_GLOSS_BLOCK.splitlines()
+    # One bullet per kind, then the boundary line and nothing after it.
+    assert len(lines) == len(offered) + 1
+    assert all(ln.startswith('- "') for ln in lines[:-1])
+    assert lines[-1] == qr._KIND_BOUNDARY
+
+
+def test_the_drafter_is_told_which_kind_a_requirement_is():
+    """`standing` judges `rule` claims and no others, so a requirement filed
+    as a `procedure` is a requirement that no longer has to rest on the best
+    source retrieved: the check does not fire and nothing reports that it did
+    not. The drafter chooses the kind, so the drafter is the one that has to
+    be told, and a boundary stated only in a source comment is a boundary it
+    never reads.
+
+    Guidance, not a guard: the guard would be widening `standing.RULE_KINDS`,
+    which is a decision with a measurement in front of it. This pins that the
+    guidance at least reaches the reply the kind is chosen in."""
+    assert "procedure" not in standing.RULE_KINDS
+    assert qr._KIND_BOUNDARY in qr._KIND_GLOSS_BLOCK
+    for kind in ("rule", "procedure"):
+        assert f'"{kind}"' in qr._KIND_BOUNDARY
 
 
 def test_the_contract_the_drafter_gets_is_built_from_the_taxonomy():

@@ -124,25 +124,6 @@ class TypeProfile:
     examples: tuple[str, ...]
 
 
-# Said once per process, not once per question: a planner running every few
-# minutes against an unbuilt profile would otherwise write the same warning
-# into the log a thousand times and bury whatever else is in there.
-_told: set[str] = set()
-
-
-def reset_notices() -> None:
-    """Forget what has been said once. For tests."""
-    _told.clear()
-
-
-def _say_once(key: str, msg: str, *args: Any) -> None:
-    if key in _told:
-        log.debug(msg, *args)
-        return
-    _told.add(key)
-    log.warning(msg, *args)
-
-
 def render_entity_types(
     type_names: list[str], profile: dict[str, TypeProfile]
 ) -> str:
@@ -208,31 +189,44 @@ async def read_profile(session) -> tuple[dict[str, TypeProfile], datetime | None
     return out, newest
 
 
-async def entity_type_block(session) -> str:
-    """The planner's view of the corpus's entity types. A lookup.
+async def entity_type_block(session) -> tuple[str, str | None]:
+    """The planner's view of the corpus's entity types, and what is wrong
+    with it. A lookup.
 
     Never computes the profile. An absent one, or one older than the
     deployment's tolerance, yields the type names alone — see
-    `render_entity_types`.
+    `render_entity_types` — and the second value says so, in a sentence the
+    caller can put in front of someone.
+
+    Said every time, as an error. This used to be one warning per process,
+    on the theory that a planner running every few minutes against an
+    unbuilt profile would bury the log. What happened instead: the profile
+    was empty for the life of a 127,000-document corpus, the one warning
+    scrolled past at boot, and every question anyone asked was planned by a
+    model told the names of the entity types and nothing else. A planner
+    working without its grounding is an error condition on every question it
+    plans, and this is called once per corpus-map build, which is cached, so
+    the volume is bounded by the map's TTL and not by the question rate.
     """
     names = [str(r[0]) for r in (await session.execute(
         text("SELECT name FROM entity_type"))).all()]
     profile, refreshed_at = await read_profile(session)
     max_age = get_settings().sgr_corpus_profile_max_age_seconds
+    problem: str | None = None
     if not profile:
-        _say_once("empty",
-                  "corpus profile is empty: the planner gets entity type names "
-                  "with no sizes and no examples. Build it with "
-                  "`python -m app.services.corpus_profile`, or let the "
-                  "maintenance pass do it.")
+        problem = ("corpus profile is empty: the planner gets entity type "
+                   "names with no sizes and no examples. Build it with "
+                   "`python -m app.services.corpus_profile`, or let the "
+                   "maintenance pass do it.")
     elif max_age > 0 and refreshed_at is not None and _age_s(refreshed_at) > max_age:
-        _say_once("stale",
-                  "corpus profile last refreshed %s, older than the %ss "
-                  "tolerance: discarded, so the planner gets entity type names "
-                  "with no sizes and no examples rather than a stale corpus.",
-                  refreshed_at.isoformat(), max_age)
+        problem = (f"corpus profile last refreshed {refreshed_at.isoformat()}, "
+                   f"older than the {max_age}s tolerance: discarded, so the "
+                   "planner gets entity type names with no sizes and no "
+                   "examples rather than a stale corpus.")
         profile = {}
-    return render_entity_types(names, profile)
+    if problem:
+        log.error(problem)
+    return render_entity_types(names, profile), problem
 
 
 def _age_s(when: datetime) -> float:

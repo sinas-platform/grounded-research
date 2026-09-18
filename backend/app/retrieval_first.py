@@ -313,10 +313,12 @@ def invalidate_corpus_map() -> None:
     _corpus_map_cache = None
 
 
-async def build_corpus_map() -> str:
+async def build_corpus_map() -> tuple[str, str | None]:
     """Schema snapshot: entity types (approximate sizes and most-mentioned
     examples, read from the stored corpus profile), document classes with
-    counts, and per-class properties with example values.
+    counts, and per-class properties with example values — and what is wrong
+    with the snapshot, if anything (an unbuilt or stale profile), as a
+    sentence, so the plan can carry it.
 
     Cached for _CORPUS_MAP_TTL_S; see invalidate_corpus_map().
     """
@@ -334,7 +336,7 @@ async def build_corpus_map() -> str:
         return built
 
 
-async def _build_corpus_map_uncached() -> str:
+async def _build_corpus_map_uncached() -> tuple[str, str | None]:
     from app.db import AsyncSessionLocal
     from app.services.corpus_profile import entity_type_block
 
@@ -352,7 +354,7 @@ async def _build_corpus_map_uncached() -> str:
         # sample and stores it; this reads it. An unbuilt or stale profile
         # costs the planner the sizes and examples and is logged, and is never
         # a reason to run the old query again.
-        et_block = await entity_type_block(s)
+        et_block, problem = await entity_type_block(s)
         # Left exact: one grouped scan of `document`, three orders of
         # magnitude smaller than the mention table and already behind this
         # map's own TTL. Sampling it would buy nothing and cost accuracy where
@@ -376,7 +378,7 @@ async def _build_corpus_map_uncached() -> str:
     for cname, pname, ex in props:
         exs = ", ".join(str(x) for x in (ex or []) if x)[:90]
         lines.append(f"- {cname}.{pname}: {exs}")
-    return "\n".join(lines)
+    return "\n".join(lines), problem
 
 
 async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
@@ -539,7 +541,7 @@ async def plan_question(
     # Unbound, `record_llm_call` drops them, and their spend is invisible to
     # both `_run_cost_usd` and the cost cap that reads it.
     sinas = _Sinas(run_id=run_id)
-    corpus_map = await build_corpus_map()
+    corpus_map, map_problem = await build_corpus_map()
     guidance, guidance_skipped = await _retrieval_guidance()
     r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
         corpus_map=corpus_map, question=question, domain=_domain_prefix(),
@@ -590,6 +592,12 @@ async def plan_question(
             "class_boost": [str(c) for c in (r2.get("class_boost") or [])],
             # Named, not dropped: see `_playbook_block`.
             "guidance_skipped": guidance_skipped,
+            # What the planner had to do without, in sentences. Stored with
+            # the result and copied onto the run, so a plan made blind says
+            # so where the run is looked at and not only in a log nobody
+            # reads: the profile was empty for the life of one corpus
+            # before anyone noticed.
+            "warnings": [map_problem] if map_problem else [],
             "effort": effort}
 
 

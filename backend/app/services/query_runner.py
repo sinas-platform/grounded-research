@@ -7493,6 +7493,11 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
     # billable calls of the stage, and a checkpoint is only worth having
     # where it can still stop the next one from being made.
     plan = await rf.plan_question(question, effort=effort, run_id=run_id)
+    if plan.get("warnings"):
+        # On the run row, where the API and the UI read it; the plan itself
+        # is stored with the result, but nobody opens a result to learn the
+        # planner was working blind.
+        await _tele(run_id, "retrieval", warnings=list(plan["warnings"]))
     await _check_cancel(run_id)
     ranked = await rf.retrieve_and_rank(plan)
     await _check_cancel(run_id)

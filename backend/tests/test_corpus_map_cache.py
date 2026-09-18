@@ -62,6 +62,22 @@ def test_invalidate_forces_rebuild(monkeypatch):
     assert len(calls) == 2
 
 
+def test_the_problem_travels_with_the_map(monkeypatch):
+    """The cache holds what the build returned — the map AND what is wrong
+    with it — so a plan made from a cached blind map is still told it is
+    blind."""
+    async def fake_build():
+        return "MAP", "corpus profile is empty: ..."
+
+    monkeypatch.setattr(retrieval_first, "_build_corpus_map_uncached", fake_build)
+
+    async def run():
+        return await retrieval_first.build_corpus_map(), await retrieval_first.build_corpus_map()
+
+    first, second = asyncio.run(run())
+    assert first == second == ("MAP", "corpus profile is empty: ...")
+
+
 def test_concurrent_callers_build_once(monkeypatch):
     calls = []
 

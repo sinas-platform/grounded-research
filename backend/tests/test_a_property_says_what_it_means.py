@@ -171,6 +171,74 @@ def test_what_counts_as_not_current_stays_the_engines_own_word():
                              ROLES) == {}
 
 
+def test_a_status_the_contract_does_not_know_is_counted_not_swallowed():
+    """A value outside the contract produces no note, and neither does no
+    value at all. The two are opposite and looked identical: an instrument
+    that is no longer law read as law and nothing said so.
+
+    The case that brought it up is a source whose status extracts in its own
+    language. The repair is the deployment's mapping; this is how anyone
+    learns the mapping is missing."""
+    rows = [_row("a.md", how_it_stands="abroge"),
+            _row("b.md", how_it_stands="abroge"),
+            _row("c.md", how_it_stands="in force"),
+            _row("d.md", how_it_stands="repealed")]
+    assert st.currency_notes(rows, ROLES) == {"d.md": "repealed"}
+    found = st.unrecognised_statuses(rows, ROLES)
+    assert found["by_value"] == {"abroge": 2, "in force": 1}
+    assert found["documents"] == 3
+
+
+def test_a_status_declared_many_is_read_as_its_values():
+    """`cardinality: many` is legal on a status property and extraction then
+    returns a list. Read as one scalar it stringified, so a document stating
+    a value the contract knows produced no note AND an unknown word that is
+    not a word."""
+    rows = [_row("a.md", how_it_stands=["repealed", "abroge"])]
+    assert st.currency_notes(rows, ROLES) == {"a.md": "repealed"}
+    # Nothing was waved through, so nothing is reported as a mapping gap.
+    assert st.unrecognised_statuses(rows, ROLES)["by_value"] == {}
+    # A list with no known value is counted, every word of it — but it is ONE
+    # document, and the per-value counts must not be summed into a document
+    # total. Two words on one row is `documents: 1`, not 2.
+    found = st.unrecognised_statuses(
+        [_row("b.md", how_it_stands=["abroge", "caduc"])], ROLES)
+    assert found["by_value"] == {"abroge": 1, "caduc": 1}
+    assert found["documents"] == 1
+    assert st.status_report(found)["documents"] == 1
+    # The same word twice on one row is still one document for that word.
+    twice = st.unrecognised_statuses(
+        [_row("c.md", how_it_stands=["abroge", "abroge"])], ROLES)
+    assert twice["by_value"] == {"abroge": 1} and twice["documents"] == 1
+
+
+def test_the_report_is_bounded_because_a_status_has_no_length_limit():
+    """It is written into a run's telemetry. An extraction that went wrong
+    could otherwise put a manifest's worth of text into a row nobody can
+    read, so the count survives whole and the list is cut."""
+    counts = {f"value-{i}" * 40: i + 1 for i in range(50)}
+    rep = st.status_report({"by_value": counts, "documents": 31})
+    assert rep["values"] == 50 and rep["documents"] == 31
+    assert len(rep["top"]) == st.MAX_REPORTED_STATUSES and rep["truncated"]
+    assert all(len(e["value"]) <= st.MAX_REPORTED_STATUS_LEN
+               for e in rep["top"])
+    # Busiest first, so a cut list keeps the values that matter.
+    assert rep["top"][0]["documents"] >= rep["top"][-1]["documents"]
+    assert st.status_report({})["truncated"] is False
+
+
+def test_a_document_with_no_status_is_not_counted_as_an_unknown_one():
+    """Silence is not a broken contract. Counting it would bury the values
+    that are one under every document that simply has no status."""
+    for rows_, roles_ in (([_row("a.md")], ROLES),
+                          ([_row("a.md", how_it_stands="repealed")], ROLES),
+                          # A class that declares no status property says
+                          # nothing about any of them.
+                          ([_row("a.md", how_it_stands="abroge")], dr.NONE)):
+        found = st.unrecognised_statuses(rows_, roles_)
+        assert found["by_value"] == {} and found["documents"] == 0
+
+
 def test_a_class_that_declares_no_status_gets_no_currency_note():
     assert st.currency_notes([_row("a.md", how_it_stands="repealed")],
                              dr.NONE) == {}

@@ -11,10 +11,10 @@ drafter told to cite one has nothing verbatim to quote and can only refuse,
 however apt the document is. The refusal then looks like a considered
 judgement and is an artefact of never having seen the text.
 
-WHY IT MATTERED. A review of published answers named this failure six times over, and
-each time identified the missing material by its RANK in the retrieved set:
-"sources at ranks 11 and 31, unused"; "T-125/03, rank 33"; "ranks 26, 41, 51".
-The documents were retrieved every time. They were never read.
+WHY IT MATTERED. Each time this failure was found, the missing material was
+already in the retrieved set, identified by its RANK there. The documents
+were retrieved every time. They were never read. The instances are in
+issue 1474 in the originating deployment's tracker.
 
 The standing check has always opened its documents before objecting, for
 exactly this reason. This is the same look, pointed at the third case.
@@ -51,15 +51,15 @@ async def test_a_named_document_is_opened_and_its_passage_comes_back(monkeypatch
         async def invoke(self, agent: str, prompt: str) -> str:
             asked.append(agent)
             return ('{"found": true, "line_from": 12, "line_to": 14, '
-                    '"quote": "The protection extends to documents drawn up '
-                    'exclusively to seek external advice."}')
+                    '"quote": "The pass extends to vessels moored only for '
+                    'repair."}')
 
     _stub_documents(monkeypatch, {"a-judgment.md": "x" * 500})
     found = await qr._look_owed(
         _Sinas(), [{"doc": "a-judgment.md", "note": "It states the rule."}])
 
     assert asked == ["sgr/passage-extractor-agent"]
-    assert found["a-judgment.md"]["quote"].startswith("The protection extends")
+    assert found["a-judgment.md"]["quote"].startswith("The pass extends")
     assert found["a-judgment.md"]["line_from"] == 12
 
 
@@ -128,14 +128,13 @@ def _stub_documents(monkeypatch, texts: dict[str, str]) -> None:
 
 @pytest.mark.asyncio
 async def test_a_cited_source_is_asked_what_else_it_carries(monkeypatch):
-    """The reviewer's findings are mostly 'thin', not 'wrong'.
+    """An answer can be thin rather than wrong: a document it already cites
+    holds a passage for a part of the question that no claim uses.
 
-    T-125/03 was retrieved, cited three times by the answer, and paragraph 123
-    of it states the rule the reviewer asked for. No claim said it, and
-    nothing in the run ever asked that document about that part of the
-    question — extraction reads per planned claim from that claim's anchors,
-    and the plan is written before any document is read. The gate cannot
-    catch it either: it names sources the answer did NOT use.
+    Nothing in the run ever asks that document about that part. Extraction
+    reads per planned claim from that claim's anchors, and the plan is
+    written before any document is read. The gate cannot catch it either: it
+    names sources the answer did NOT use.
     """
     from app.services import query_runner as qr
 
@@ -144,9 +143,9 @@ async def test_a_cited_source_is_asked_what_else_it_carries(monkeypatch):
     class _Sinas:
         async def invoke(self, agent: str, prompt: str) -> str:
             asked.append(prompt)
-            return ('{"found": true, "line_from": 123, "line_to": 123, '
-                    '"quote": "Preparatory documents drawn up exclusively for '
-                    'the purpose of seeking legal advice may be covered."}')
+            return ('{"found": true, "line_from": 48, "line_to": 48, '
+                    '"quote": "Vessels moored only for repair may be covered by '
+                    'a harbour pass."}')
 
     _stub_class_documents(monkeypatch, [
         ("a-judgment.md", "x" * 500, 10),
@@ -154,12 +153,12 @@ async def test_a_cited_source_is_asked_what_else_it_carries(monkeypatch):
     ])
     found = await qr._look_deeper(
         _Sinas(), ["a-judgment.md", "a-commentary.md"],
-        [{"asks": "whether preparatory documents are protected"}])
+        [{"asks": "whether vessels moored for repair are covered"}])
 
     # only the top declared rank is opened — a commentary re-read yields
     # more commentary
     assert [d["doc"] for d in found] == ["a-judgment.md"]
-    assert "whether preparatory documents are protected" in asked[0]
+    assert "whether vessels moored for repair are covered" in asked[0]
     assert "already cites the document below" in asked[0]
 
 

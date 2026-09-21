@@ -5,10 +5,9 @@ rather than lexically: every proposition carries a source, and where that
 source is one the field treats as authority the claim must name it — the
 parties and the reference — so a reader can look it up and weigh it.
 
-The check this replaces looked for attribution WORDS, which were English
-while about a third of the collection is French, so a claim resting on a
-French judgment passed by never tripping it. The tests below pin the
-language-neutral behaviour that fixes it.
+The check this replaces looked for attribution WORDS, which were English, so
+a claim resting on a source in any other language passed by never tripping
+it. The tests below pin the language-neutral behaviour that fixes it.
 """
 
 from app.services.naming import (
@@ -42,7 +41,7 @@ def test_a_source_is_named_by_its_parties_not_its_stored_title():
     assert names_source(
         "In Zvezda Remesla the tribunal found otherwise.",
         None, "Zvëzda Řemesla inspection ruling")
-    # The accents are in the corpus, not necessarily in the claim, and the
+    # The accents are in the stored title, not necessarily in the claim, and the
     # splitter must not lose the first letter of a word outside Latin-1.
     assert names_source(
         "In Zvëzda Řemesla the tribunal found otherwise.",

@@ -1,18 +1,17 @@
 """Mark entities that are words rather than names, without deleting them.
 
 The extractor was told to be EXHAUSTIVE about named entities and read that as
-every capitalised token. The result, measured on a 35,407-document corpus on
-10 September 2026: an entity whose name is the bare word "Decision" with
-19,311 document mentions, "Thus" and "Only" typed as undertakings with 14,706
-and 18,804, and four entities named after their own entity type. One junk
-entity does not stay small, because a name once created is matched against
-every occurrence of that string in every document: "Thus" has exactly one
-surface form across all of its mentions, and that form is the adverb.
+every capitalised token. The result is entities whose name is a bare common
+word, "Decision" among them, adverbs such as "Thus" and "Only" typed as
+companies, and entities named after their own entity type. One junk entity
+does not stay small, because a name once created is matched against every
+occurrence of that string in every document: an entity named "Thus" is
+matched wherever the adverb is written.
 
-They are not inert. They acquire relationships like any other entity, which is
-where this was found: one of the 149 targets of a corpus's supersession
-relationship is "Decision", and reading that relationship without a filter
-reports twenty thousand mentions of superseded authority.
+They are not inert. They acquire relationships like any other entity: an
+entity named "Decision" can be the target of a supersession relationship, and
+reading that relationship without a filter then reports every mention of the
+word as superseded authority.
 
 NOTHING IS DELETED HERE. The evidence for calling an entity generic is its
 mentions and its relationships, and deleting it destroys the evidence for the
@@ -20,13 +19,13 @@ decision to delete it. So this writes a mark and leaves everything in place; a
 reader that wants to exclude them can, and a later pass that wants to check
 this judgement still can too.
 
-THE TEST, AND WHY NOT WORD COUNT. Shape does not separate them: "Google",
-"Nexans" and "Servier" are one word, and "European Commission" appears in 53.8%
-of this corpus legitimately. Case does. A proper noun is written with a capital
-wherever it falls in a sentence; a common word is not. Measured over 11.2 MB of
-this corpus, "European Commission", "TFEU" and "France" appear lower-case 0% of
-the time, "United" 1% and "Council" 7%, while "SAME", "ALSO", "Must" and "Will"
-are lower-case in 100% of their occurrences, "Decision" and "Case" in 86%.
+THE TEST, AND WHY NOT WORD COUNT. Shape does not separate them: "Kestrel",
+"Northmoor" and "Ashgrove" are one word each, and a legitimate name can appear
+in a large share of a collection's documents. Case does. A proper noun is
+written with a capital wherever it falls in a sentence; a common word is not.
+Names and common words fall into two populations by how often they are written
+lower-case, far apart, and the thresholds below sit clear of both. The
+measured figures are in issue 1474 in the originating deployment's tracker.
 
 The span guard cannot carry this. `_locate` is a hallucination check: it asks
 whether the extracted name occurs in the document, and a common word always
@@ -47,26 +46,26 @@ from sqlalchemy import text
 log = logging.getLogger("sgr.generic_entities")
 
 #: A name written lower-case at least this often is a word, not a name. Set
-#: clear of the observed populations rather than between them: the highest
-#: legitimate name measured was 7% and the lowest junk 76%.
+#: clear of the observed populations rather than between them: legitimate
+#: names sit well below it and junk well above. The figures are in
+#: issue 1474 in the originating deployment's tracker.
 #:
-#: This is the wider test and it is not what the first marking pass used. On
-#: this corpus it selects 766 entities against 274 for `written_as_a_word`,
-#: and the extra 492 are the ones needing a judgement about how often a word
-#: happens to be capitalised, which is the kind of call a mark exists to
-#: avoid making. Widening to it later is a threshold change over reversible
-#: marks; narrowing after a deletion is not a change at all.
+#: This is the wider test and it is not what the first marking pass used. It
+#: selects more entities than `written_as_a_word`, and the extra ones are
+#: those needing a judgement about how often a word happens to be capitalised,
+#: which is the kind of call a mark exists to avoid making. Widening to it
+#: later is a threshold change over reversible marks; narrowing after a
+#: deletion is not a change at all.
 LOWERCASE_SHARE = 0.60
 
 #: Types the test cannot read, excluded as a rule rather than one entity at a
 #: time. A relevant market is named by a common noun phrase because that is
-#: what a market is: "retail market", "upstream market", "resale price
-#: maintenance" are lower-case for the same reason "services" is, and the test
-#: cannot tell a correctly recorded market from a mistakenly recorded one. On
-#: this corpus 229 of the 274 entities the strict test selects are of this
-#: type, so applying it here would be 229 individual judgements wearing the
-#: clothes of a rule. If Relevant Market carries junk, and it may, it needs a
-#: test that knows what a market is. This one does not.
+#: what a market is: "retail market", "upstream market", "wholesale supply"
+#: are lower-case for the same reason "services" is, and the test cannot tell
+#: a correctly recorded market from a mistakenly recorded one. Applying it to
+#: this type would be one judgement per entity wearing the clothes of a rule.
+#: If the type carries junk, and it may, it needs a test that knows what a
+#: market is. This one does not.
 EXCLUDED_TYPES = frozenset({"Relevant Market"})
 
 #: Below this many documents an entity is too rare to be worth judging, and
@@ -124,18 +123,18 @@ def case_evidence(name: str, text: str) -> dict:
 def carries_an_identifier(name: str, patterns: list[str]) -> bool:
     """Whether the name carries a reference its deployment declares.
 
-    Case alone does not separate a name from a word on a corpus that is partly
-    French. In English a proper noun is capitalised wherever it falls, so
-    lower case is evidence; in French legal nomenclature lower case is the
-    convention, and `ordonnance n° 86-1243 du 1er décembre 1986` is as
-    specific as `Regulation No 1/2003` and as correctly written. It appears in
-    1,411 documents and is not a word.
+    Case alone does not separate a name from a word where documents are in
+    more than one language. In English a proper noun is capitalised wherever
+    it falls, so lower case is evidence; in French legal nomenclature lower
+    case is the convention, and `décret n° 01-999 du 31 février 2001` is as
+    specific as `Harbour Order No 9/2001` and as correctly written. It is not
+    a word.
 
     An identifier is the signal that survives the language. The patterns come
     from `document_class.identifier_pattern`, declared by the deployment for
     its own classes, so this asks nothing about French or English and nothing
-    about competition law. `paragraph 49` and `décision attaquée` carry no
-    identifier in any language and stay marked.
+    about the subject of the collection. `paragraph 49` and `décision attaquée`
+    carry no identifier in any language and stay marked.
     """
     if not name:
         return False
@@ -310,8 +309,8 @@ async def mark_generic_by_case(
     The first pass marks canonical forms that are already lower-case — the
     strictest test, needing no corpus scan. It structurally cannot reach the
     worst offenders, whose canonical form is capitalised while the corpus
-    writes the word lower-case everywhere: an undertaking named `Thus` with
-    14,704 blind mentions is invisible to it.
+    writes the word lower-case everywhere: an entity named `Thus`, matched
+    blind wherever the adverb occurs, is invisible to it.
 
     So this tier brings the corpus: one deterministic sample of in-service
     documents (md5-ordered, so re-runs read the same sample), one case
@@ -397,17 +396,18 @@ BLIND_LINK_METHODS = ("gazetteer", "legacy")
 
 # Below this share of context-validated mentions, a widely-matched name is
 # functioning as a word: the extractor that reads documents almost never
-# recognises the thing the string matcher keeps finding. Measured poles on
-# the working corpus: "Thus" 2/14,704 (0.01%), real undertakings near 100%.
-# The floor sits far from both.
+# recognises the thing the string matcher keeps finding. Junk and real
+# entities sit at opposite ends of this share, and the floor sits clear of
+# both. The figures are in issue 1474 in the originating deployment's tracker.
 LINK_PROBABILITY_FLOOR = 0.02
 
 # A ratio alone can wrong a famous real entity: the gazetteer pre-links
 # heavily for everything, junk and giants alike, so a widely-cited real
 # party's share is diluted too. What dilution cannot fake is the absolute
-# count — a real entity the corpus keeps recognising accumulates hundreds
-# of recognised mentions whatever its ratio, while a word accumulates a
-# handful ("Thus": 2). Both conditions must hold to mark.
+# count: a real entity the extractor keeps recognising accumulates many
+# recognised mentions whatever its ratio, while a word accumulates a handful.
+# The ceiling sits clear of both; the figures are in issue 1474 in the
+# originating deployment's tracker. Both conditions must hold to mark.
 #
 # The gray zone is irreducible: an entity with a starved ratio AND a
 # starved count could still, rarely, be real. No threshold can decide
@@ -507,8 +507,8 @@ async def mark_generic_by_link_probability(
 # entity nothing ever recognised from being force-picked as an anchor.
 #
 # Both were computed per question, per entity, out of the mention table, in
-# four places. On 22.7 million mentions the recognised count alone ran 169
-# seconds for "European Commission"; the document count ran for every
+# four places. On a large mention table the recognised count alone ran for
+# minutes on the most common entity; the document count ran for every
 # entity a resolver's pattern matched BEFORE its cut to six, and a seed the
 # planner writes as "Kestrel Holdings v Northmoor Authority (T-123/45 P)" is
 # split on its punctuation into fragments like `45 P)` that match thousands

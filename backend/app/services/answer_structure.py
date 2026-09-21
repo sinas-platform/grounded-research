@@ -134,7 +134,7 @@ _LABELLING_KINDS = ("label",)
 UNCLASSIFIED_HEADING = "Unclassified"
 #: A legislation `status` value in this set means the instrument is not
 #: current law. Declared by the deployment on the class as a property; these
-#: two words are the contract's, not a deployment's.
+#: words are the contract's, not a deployment's.
 #:
 #: They stay English on purpose and this is not an oversight: WHICH property
 #: says how a source stands is the deployment's to name, WHAT its value has
@@ -148,6 +148,28 @@ UNCLASSIFIED_HEADING = "Unclassified"
 #: countable, because a contract nobody can see broken is a contract nobody
 #: keeps.
 STALE_STATUSES = ("repealed", "superseded")
+
+#: The other half of the same contract: a value in this set means the
+#: instrument IS current law, in force as enacted or in force as amended.
+#:
+#: With only the stale half named, every value that was not stale was one the
+#: contract did not know, so a document in force was reported as a mapping
+#: gap and the real gaps were lost among them. The rule above holds here too:
+#: the engine names the value once, and a deployment writing `en vigueur`
+#: maps it to `in_force` where it extracts.
+CURRENT_STATUSES = ("in_force", "amended")
+
+
+def status_token(value: Any) -> str:
+    """A status value as the contract spells it: lower case, with any run of
+    spaces, hyphens or underscores written as one underscore. Pure.
+
+    Form, not vocabulary. `In force`, `in-force` and `in_force` are one value
+    written three ways, and an extractor shown the enum writes any of them.
+    `en vigueur` becomes `en_vigueur`, which the contract does not know, and
+    reporting it is what `unrecognised_statuses` is for.
+    """
+    return re.sub(r"[\s_-]+", "_", str(value or "").strip().lower())
 
 #: The shape of a tier value, whichever annotation carries it: `{"depth": n}`
 #: from a `length` reducer over a standing walk, or a bare integer.
@@ -967,10 +989,12 @@ def unrecognised_statuses(rows: list[dict],
         values = status_values(r.get("props") or {},
                                str(r.get("class") or ""), roles)
         # Only where NOTHING matched. A document that also states a value the
-        # contract knows has its note and is not waved through, so counting
-        # its other words would report a mapping gap where the mapping
-        # worked.
-        if not values or any(v in STALE_STATUSES for v in values):
+        # contract knows has been read: a stale value gives it its note and a
+        # current one says it is law. Counting its other words would report a
+        # mapping gap where the mapping worked.
+        if not values or any(status_token(v) in STALE_STATUSES
+                             or status_token(v) in CURRENT_STATUSES
+                             for v in values):
             continue
         documents += 1
         # Per value, DOCUMENTS and not occurrences: one document that states
@@ -1013,8 +1037,8 @@ def currency_notes(rows: list[dict], roles: DeclaredRoles) -> dict[str, str]:
         # engine's own vocabulary — `STALE_STATUSES` is the contract a class
         # writes its status values against, not a guess at another party's
         # words, and it stays here for that reason.
-        status = next((v for v in status_values(props, cls, roles)
-                       if v in STALE_STATUSES), None)
+        status = next((status_token(v) for v in status_values(props, cls, roles)
+                       if status_token(v) in STALE_STATUSES), None)
         if status:
             note = f"{status}"
             by = unwrap(roles.value(roles.superseded_by, props, cls))

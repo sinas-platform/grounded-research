@@ -6171,11 +6171,14 @@ def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
 
     Returns what the kind did, or None when it did not move. `test` is only
     rewritten when the patch carries one, so a revision that changes the kind
-    and says nothing about the test leaves the object behind on the row. That
-    state is legible in the answer only as a test printed as a sentence, and
-    it was found by reading stored rows rather than by anything reporting it.
-    The caller records what comes back, so the next one is read rather than
-    reconstructed.
+    and says nothing about the test would leave the object behind on the row
+    under a kind that disowns it. That state was found by reading stored rows
+    rather than by anything reporting it, and it printed as a test written
+    out as a sentence. The object decides: a test that meets the contract's
+    floor keeps the kind `test`, whatever the patch asked, and one below the
+    floor is dropped with the kind, so a row never says one thing in its
+    kind and another in its test. The move is recorded as asked for and as
+    it landed, so the next reader reads it rather than reconstructs it.
     """
     was_kind = row.claim_kind
     was_test = isinstance(row.test, dict)
@@ -6194,20 +6197,29 @@ def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
                 if added or k in ("section", "part_index", "part_label") or \
                         k in carries or (k == "claim_kind" and "kind" in carries):
                     setattr(row, k, cols[k])
+    asked = row.claim_kind
+    if not added and was_kind == "test" and asked != "test" and "test" not in carries:
+        if answer_structure.normalise_test(row.test) is not None:
+            row.claim_kind = "test"
+        else:
+            row.test = None
     _apply_source_facts(row, item.get("evidence"), sources)
     refs = answer_structure.ref_list(item.get("follows_from"))
     if refs:
         ids = [str(id_by_seq[r]) for r in refs
                if r in id_by_seq and id_by_seq[r] != row.id]
         row.follows_from = ids or None
-    if added or row.claim_kind == was_kind:
+    if added or (row.claim_kind == was_kind and asked == was_kind):
         return None
     return {
         "sequence": row.sequence,
         "from": was_kind,
+        "asked": asked,
         "to": row.claim_kind,
-        # The case worth seeing: the kind left `test` and the object stayed.
-        # Nothing downstream reads the pair, so it is named here.
+        # The patch asked the kind to leave `test` and the object held it.
+        "kept_for_test": asked != row.claim_kind,
+        # Should never be true now; kept so a reader of an older record and
+        # of this one reads the same key.
         "orphaned_test": bool(
             was_kind == "test" and row.claim_kind != "test"
             and isinstance(row.test, dict)),

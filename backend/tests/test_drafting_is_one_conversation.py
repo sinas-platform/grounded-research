@@ -433,15 +433,16 @@ def round_(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_kind_move_that_strands_a_test_is_recorded_for_the_cycle(
+async def test_a_kind_move_a_test_holds_is_recorded_for_the_cycle(
         round_, ledger):
     """The cycle's own record, not the helper's return value.
 
     `claim_kind_moves` and `orphaned_tests` are what a reader opens when an
-    answer prints a test as prose, and the state they exist to surface was
-    found by reading stored rows because nothing reported it. A test on the
-    helper alone leaves the written record undefended: the helper can be
-    right and the cycle still write the wrong key, or write nothing at all.
+    answer prints a test as prose; the state they exist to surface was found
+    by reading stored rows because nothing reported it, and the row no
+    longer reaches it, the object holds the kind. A test on the helper alone
+    leaves the written record undefended: the helper can be right and the
+    cycle still write the wrong key, or write nothing at all.
     """
     claim = round_.claims[0]
     claim.claim_kind = "test"
@@ -452,11 +453,12 @@ async def test_a_kind_move_that_strands_a_test_is_recorded_for_the_cycle(
         "kind": "rule", "rationale": "the review asked for the rule",
         "evidence": [{"filename": "a.md", "line_from": 1, "line_to": 2}]}]})
     cycle = round_.cycle()
-    assert cycle["orphaned_tests"] == [1]
+    assert cycle["orphaned_tests"] == []
     move = next(m for m in cycle["claim_kind_moves"] if m["sequence"] == 1)
-    assert (move["from"], move["to"]) == ("test", "rule")
-    # The object survived the kind that justified it, which is the whole
-    # reason the sequence is listed.
+    assert (move["from"], move["asked"], move["to"]) == ("test", "rule", "test")
+    assert move["kept_for_test"] is True
+    # The object held the kind that justifies it, which is why the move is
+    # listed at all.
     assert move["test_before"] is True and move["test_after"] is True
 
 

@@ -1,10 +1,13 @@
-"""A kind that moves is recorded, and a test left behind is named.
+"""A kind that moves is recorded, and a test that stays keeps its kind.
 
 `normalise_claim` keeps a test only for a claim of kind `test`, and the
 revision path writes `claim_kind` while reaching `test` only when the patch
-carries one. So a revision that changes the kind and says nothing about the
-test leaves the object on the row, under a kind that no longer routes to the
-test block. That state was found by reading stored rows; nothing reported it.
+carries one. So a revision that changed the kind and said nothing about the
+test used to leave the object on the row, under a kind that no longer routed
+to the test block. That state was found by reading stored rows; nothing
+reported it. Now the object decides: a test that meets the floor holds the
+kind, one below it goes with the kind, and the move records what was asked
+and what landed.
 
 Run from the backend directory:
 `python -m pytest tests/test_claim_kind_moves.py`
@@ -45,19 +48,32 @@ def _two_conditions():
                            {"text": "the second holds", "cumulative": True}]}
 
 
-def test_a_kind_that_leaves_test_with_its_object_intact_is_named():
+def test_a_kind_cannot_leave_a_test_that_stays():
     """The case this exists for: the patch changes the kind and says nothing
-    about the test, so the object survives under a kind that cannot render
-    it."""
+    about the test. The object meets the floor, so it holds the kind, and
+    the move records the kind that was asked for."""
     row = _Row(kind="test", test=_two_conditions())
     moved = _apply_structure(row, {"kind": "rule"}, PARTS, {})
 
     assert moved is not None
-    assert moved["from"] == "test" and moved["to"] == "rule"
-    assert moved["orphaned_test"] is True
+    assert moved["from"] == "test" and moved["asked"] == "rule"
+    assert moved["to"] == "test" and moved["kept_for_test"] is True
+    assert moved["orphaned_test"] is False
     assert moved["test_before"] is True and moved["test_after"] is True
     assert moved["sequence"] == 5
-    assert isinstance(row.test, dict), "the object is still on the row"
+    assert row.claim_kind == "test" and isinstance(row.test, dict)
+
+
+def test_a_test_below_the_floor_goes_with_the_kind():
+    """One condition is not a test; the renderer would not print it as one,
+    so the row does not keep it under a kind that disowns it."""
+    row = _Row(kind="test", test={"name": "half a test",
+                                  "conditions": [{"text": "the only one"}]})
+    moved = _apply_structure(row, {"kind": "rule"}, PARTS, {})
+    assert moved is not None
+    assert moved["from"] == "test" and moved["to"] == "rule"
+    assert moved["kept_for_test"] is False and moved["orphaned_test"] is False
+    assert row.claim_kind == "rule" and row.test is None
 
 
 def test_a_kind_that_does_not_move_reports_nothing():

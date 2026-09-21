@@ -243,16 +243,6 @@ def test_a_plan_made_without_the_profile_says_so_on_the_run():
 # ─────────────────────────────────────────────────────────────
 # The refresh
 # ─────────────────────────────────────────────────────────────
-def test_the_sample_reads_a_page_budget_and_no_more():
-    assert cp.sample_percent(0) == 100.0
-    assert cp.sample_percent(cp.SAMPLE_PAGE_BUDGET) == 100.0, (
-        "a table smaller than the budget is read whole, so a small corpus is "
-        "exact and carries no sampling error")
-    assert cp.sample_percent(20_000, budget=2_000) == 10.0
-    huge = cp.sample_percent(100_000_000, budget=2_000)
-    assert 0.01 <= huge < 0.01 + 1e-9
-
-
 def test_the_refresh_writes_a_row_for_every_declared_type():
     a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     now = datetime.now(timezone.utc)
@@ -292,16 +282,27 @@ def test_the_refresh_never_holds_the_database():
     assert cp._STATEMENT_TIMEOUT_MS > 0 and cp._LOCK_TIMEOUT_MS > 0
 
 
-def test_the_refresh_samples_both_large_tables():
-    """The two reads that used to be the full scan. Neither may be an
-    unqualified aggregate again."""
+def test_the_refresh_never_reads_the_mention_table():
+    """The two reads that used to be the full scan, then a sample of it.
+    Neither touches the mention table now: the counts are a grouped count
+    over the entity table, exact, and the examples are read off
+    `entity_stats`, which the maintenance pass computes before this."""
     for sql in (cp._COUNTS_SQL, cp._EXAMPLES_SQL):
-        assert "TABLESAMPLE SYSTEM" in sql
-        assert "REPEATABLE" in sql, (
-            "a fixed seed is what keeps the example names from wobbling "
-            "between refreshes for reasons that are not the corpus changing")
-    assert "merged_into_id IS NULL" in cp._COUNTS_SQL
-    assert "merged_into_id IS NULL" in cp._EXAMPLES_SQL
+        assert "entity_mention" not in sql
+        assert "merged_into_id IS NULL" in sql
+    assert "entity_stats" in cp._EXAMPLES_SQL
+
+
+def test_the_examples_are_the_most_written_about_not_the_most_matched():
+    """Measured 18 September 2026: ranked by mentions, the planner was told
+    the collection's companies were "Case, Parties, Only, Lang, This" — the
+    gazetteer's blind hits. Ranked by documents in which something actually
+    recognised the entity, and never a marked generic term."""
+    sql = cp._EXAMPLES_SQL
+    assert "ORDER BY st.recognised_documents DESC" in sql
+    assert "st.recognised_documents > 0" in sql
+    assert "? 'generic_term'" in sql
+    assert "e.canonical_form) AS rn" in sql, "ties break on the name"
 
 
 @pytest.mark.asyncio
@@ -325,7 +326,8 @@ async def test_a_fresh_profile_is_not_resampled(monkeypatch):
     monkeypatch.setattr(app.db, "AsyncSessionLocal", _Maker())
     out = await cp.refresh_corpus_profile()
     assert out["skipped"] == "fresh"
-    assert not any("TABLESAMPLE" in q for q in s.sql)
+    assert not any("entity_stats" in q or "corpus_profile" in q and "INSERT" in q
+                   for q in s.sql), "a fresh profile is not recomputed"
 
 
 def test_the_maintenance_pass_is_what_triggers_it():

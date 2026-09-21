@@ -528,9 +528,13 @@ async def mark_generic_by_link_probability(
 # the corpus profile's staleness, accepted for the same reason.
 
 _REFRESH_ENTITY_STATS = text("""
-    INSERT INTO entity_stats (entity_id, documents, recognised, refreshed_at)
+    INSERT INTO entity_stats
+        (entity_id, documents, recognised_documents, recognised, refreshed_at)
     SELECT entity_id,
            count(DISTINCT document_id),
+           count(DISTINCT document_id)
+               FILTER (WHERE link_method IS NOT NULL
+                       AND NOT (link_method = ANY(:blind))),
            bool_or(link_method IS NOT NULL
                    AND NOT (link_method = ANY(:blind))),
            CAST(:when AS timestamptz)
@@ -539,6 +543,7 @@ _REFRESH_ENTITY_STATS = text("""
     GROUP BY entity_id
     ON CONFLICT (entity_id) DO UPDATE
       SET documents = EXCLUDED.documents,
+          recognised_documents = EXCLUDED.recognised_documents,
           recognised = EXCLUDED.recognised,
           refreshed_at = EXCLUDED.refreshed_at
 """)

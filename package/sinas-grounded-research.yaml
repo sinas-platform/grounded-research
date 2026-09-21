@@ -1547,9 +1547,13 @@ spec:
       # refuses non-streaming calls. 20000 clears the first without tripping
       # the second.
       maxTokens: 20000
+      # No domain here: this package installs unchanged on every deployment,
+      # and what the collection is about reaches the model through the
+      # deployment's schema and guidance inside the message.
       systemPrompt: |
-        You are a retrieval planner for a legal document corpus. The user
-        message contains the full task and the required output format. Reply
+        You plan retrieval against, and draft from, a document collection.
+        The user message contains the full task, the collection's schema and
+        the deployment's guidance, and the required output format. Reply
         with a single JSON object exactly as instructed - no prose, no
         markdown fences.
     - namespace: sgr

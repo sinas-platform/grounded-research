@@ -125,7 +125,7 @@ question against a corpus with this schema:
 Propose retrieval probes grounded in the schema. Reply ONLY JSON:
 {{"named_entities": ["<entities NAMED in the question>"],
   "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'air transp'>"}}],
-  "seed_cases": ["<specific cases/decisions/parties you KNOW bear on this topic even if unnamed>"],
+  "known_sources": [{{"identifier": "<how this collection cites the source, exactly, or empty if you do not know it>", "title": "<the source's name or title>"}}],
   "websearch_queries": ["<3-10 SHORT queries: one quoted phrase or 2-4 words each; several small queries beat one long one; one per concept, in each language the corpus uses>"]}}
 
 QUESTION: {question}"""
@@ -167,7 +167,7 @@ QUESTION: {question}"""
 # empty `class_boost`; both are answers. Demanding every field would turn a
 # legitimate plan for an abstract question into a failed run.
 _ROUND1_GROUPS = (
-    ("value_probes", "named_entities", "seed_cases"),
+    ("value_probes", "named_entities", "known_sources"),
     ("websearch_queries",),
 )
 _ROUND2_GROUPS = (("anchor_entity_ids", "websearch_queries", "class_boost"),)
@@ -364,21 +364,18 @@ async def _build_corpus_map_uncached() -> tuple[str, str | None]:
             SELECT c.name, count(d.id) FROM document_class c
             LEFT JOIN document d ON d.document_class_id = c.id
             GROUP BY c.name ORDER BY 2 DESC"""))).all()
-        props = (await s.execute(text("""
-            SELECT c.name, p.name,
-                   (SELECT (array_agg(DISTINCT pv.value->>'_'))[1:3]
-                    FROM property_value pv WHERE pv.property_id = p.id)
-            FROM document_class_property p
-            JOIN document_class c ON c.id = p.document_class_id
-            LIMIT 40"""))).all()
+    # No property block. It used to list forty class.property pairs with
+    # three example values each — ids, slugs, urls, sector codes, a 1902
+    # date — because it listed every property the deployment declared and
+    # nothing declares which of them a planner could use. Thirty lines of
+    # identifiers in front of every plan, and the query behind them was two
+    # minutes of the map's build. The planner is asked about entity types
+    # and document classes; what a class's documents carry is the guidance's
+    # to say, in the deployment's own words.
     lines = [et_block]
     lines.append("DOCUMENT CLASSES (name, count):")
     for name, cnt in dc:
         lines.append(f"- {name} ({cnt})")
-    lines.append("DOCUMENT PROPERTIES (class.property: example values):")
-    for cname, pname, ex in props:
-        exs = ", ".join(str(x) for x in (ex or []) if x)[:90]
-        lines.append(f"- {cname}.{pname}: {exs}")
     return "\n".join(lines), problem
 
 
@@ -393,19 +390,20 @@ async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
             tname = str(pr.get("type") or "").strip()
             if len(m) < 3:
                 continue
-            # `docs` is read off `entity_stats`, not counted: see the note on
-            # `_resolve_names`.
+            # `docs` is read off `entity_stats`, not counted, and the cut is
+            # closest name first: see `_entities_matching`.
             rows = (await s.execute(text("""
                 SELECT e.id, e.canonical_form, t.name,
-                       coalesce(st.documents, 0) AS docs
+                       coalesce(st.documents, 0) AS docs,
+                       similarity(e.canonical_form, :key) AS closeness
                 FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                 LEFT JOIN entity_stats st ON st.entity_id = e.id
                 WHERE e.merged_into_id IS NULL
                   AND (:tname = '' OR t.name ILIKE :tname)
                   AND e.canonical_form ILIKE :pat
-                ORDER BY docs DESC, e.id LIMIT 12"""),
-                {"tname": tname, "pat": f"%{m}%"})).all()
-            for eid, cf, tn, docs in rows:
+                ORDER BY closeness DESC, docs DESC, e.id LIMIT 12"""),
+                {"tname": tname, "pat": f"%{m}%", "key": m})).all()
+            for eid, cf, tn, docs, _closeness in rows:
                 out.append({"id": str(eid), "value": cf, "type": tn,
                             "docs": int(docs)})
     return out
@@ -493,8 +491,11 @@ def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]
     return anchors
 
 
-async def _resolve_names(names: list[str]) -> list[dict]:
+async def _resolve_names(names: list) -> list[dict]:
     """Named entities / seed cases -> entity matches (alias-tolerant).
+
+    Each item is a bare string or a `{"identifier", "name"}` object from the
+    planner; `lookup_keys` says what each is looked up by.
 
     The cut is ordered, and that is not tidiness. This took SIX rows with no
     ORDER BY, so which six a name resolved to was whatever order the rows
@@ -525,41 +526,103 @@ async def _resolve_names(names: list[str]) -> list[dict]:
     from app.db import AsyncSessionLocal
 
     seen: dict[str, dict] = {}
-    parts: list[str] = []
-    for name in names:
-        parts.append(name)
-        for p in name.replace("/", ",").split(","):
-            if p.strip() and p.strip() != name:
-                parts.append(p.strip())
     async with AsyncSessionLocal() as s:
-        for n in dict.fromkeys(x.strip() for x in parts):
-            if len(n) < 4:
-                continue
-            # Two branches unioned, not one WHERE with an OR: a trigram
-            # index serves `ILIKE '%…%'` on a column, and Postgres cannot
-            # use it across `name ILIKE … OR id IN (alias subquery)` — that
-            # form scans the whole entity table. Measured with the index in
-            # place, one name: 20 s as an OR, 0.26 s as a union.
-            rows = (await s.execute(text("""
-                SELECT e.id AS id, e.canonical_form AS value, t.name AS type,
-                       coalesce(st.documents, 0) AS docs
-                FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
-                LEFT JOIN entity_stats st ON st.entity_id = e.id
-                WHERE e.merged_into_id IS NULL AND e.canonical_form ILIKE :pat
-                UNION
-                SELECT e.id, e.canonical_form, t.name,
-                       coalesce(st.documents, 0)
-                FROM entity_alias a
-                JOIN entity e ON e.id = a.entity_id
-                JOIN entity_type t ON t.id = e.entity_type_id
-                LEFT JOIN entity_stats st ON st.entity_id = e.id
-                WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
-                ORDER BY docs DESC, id
-                LIMIT 6"""), {"pat": f"%{n}%"})).all()
-            for eid, cf, tn, docs in rows:
-                seen[str(eid)] = {"id": str(eid), "value": cf, "type": tn,
-                                  "docs": int(docs)}
+        for item in names:
+            for n in lookup_keys(item):
+                for eid, cf, tn, docs, _closeness in await _entities_matching(s, n):
+                    seen[str(eid)] = {"id": str(eid), "value": cf,
+                                      "type": tn, "docs": int(docs)}
     return list(seen.values())
+
+
+#: Shorter than this and a string names nothing: `v`, `and`, `Ltd`.
+MIN_KEY_CHARS = 4
+
+
+def lookup_keys(item) -> list[str]:
+    """What to look an entity up by, from what the planner wrote. Pure.
+
+    The planner names a known source as an object — `{"identifier": …,
+    "title": …}` — and the identifier, when it gives one, is the key: the
+    reference by which the collection cites a source lands on the same
+    entity however its title is written around it, and the planner writes
+    the same source three ways in three samples of one prompt. Without an
+    identifier the whole title is the key. A bare string (a named entity,
+    or an older reply) is looked up whole.
+
+    NOTHING IS SPLIT. This used to cut every name on "/" and "," and look
+    each piece up beside the whole — so a case number `C-583/13` became
+    `C-583` and `13`, a merger `Gaz de France/Suez` became two utilities, and
+    a fragment like `Court of Justice` pulled in the six most-mentioned
+    entities containing it: High Court of Justice, Federal Court of Justice,
+    Superior Court of Justice. Measured on two independent plannings of one
+    question: half of every resolved entity set was that noise, and the
+    halves differed. Which part of a name identifies the thing is a
+    judgement, and the planner makes it in the call it already makes; a
+    string rule here would make it wrong in the next language.
+    """
+    if isinstance(item, dict):
+        ident = " ".join(str(item.get("identifier") or "").split())
+        name = " ".join(str(item.get("title") or item.get("name") or "").split())
+        key = ident if len(ident) >= MIN_KEY_CHARS else name
+    else:
+        key = " ".join(str(item or "").split())
+    return [key] if len(key) >= MIN_KEY_CHARS else []
+
+
+async def _entities_matching(s, n: str):
+    """The six entities whose name or alias contains `n`, closest name first.
+
+    Containment is the filter; how closely the whole name resembles what
+    the planner wrote is the rank, and only then how much the entity is
+    mentioned. Ranked by mentions alone, as this was, `Article 7` returned
+    "Article 700 du code de procédure civile" and `Commission` returned
+    every commission in the corpus, because the most-mentioned entity
+    containing a short key is rarely the one meant. Trigram similarity is
+    the standard measure and knows nothing of any language; measured:
+    `Article 7` → Article 7, Article 7(7), Article 7(A); `European
+    Commission` → European Commission, The European Commission; the case
+    number → the case.
+    """
+    # Two branches unioned, not one WHERE with an OR: a trigram index serves
+    # `ILIKE '%…%'` on a column, and Postgres cannot use it across
+    # `name ILIKE … OR id IN (alias subquery)` — that form scans the whole
+    # entity table. Measured with the index in place, one name: 20 s as an
+    # OR, 0.26 s as a union.
+    #
+    # And only the closest, not the six closest. A key names one thing; the
+    # entities beside it — `Article 7` beside Article 7(1) to 7(7) — are its
+    # neighbourhood, and reaching a neighbourhood is what the graph walk is
+    # for. Returned from here, every proposal the planner made became six
+    # entities, so a plan that differed from the last by one proposal
+    # differed by six. Measured: single plans overlapped by 26% with the
+    # six, and the differing entities were almost all sub-articles of
+    # something both plans had named.
+    return (await s.execute(text("""
+                WITH found AS (
+                    SELECT e.id AS id, e.canonical_form AS value,
+                           t.name AS type, coalesce(st.documents, 0) AS docs,
+                           similarity(e.canonical_form, :key) AS closeness
+                    FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
+                    LEFT JOIN entity_stats st ON st.entity_id = e.id
+                    WHERE e.merged_into_id IS NULL
+                      AND e.canonical_form ILIKE :pat
+                    UNION
+                    SELECT e.id, e.canonical_form, t.name,
+                           coalesce(st.documents, 0),
+                           similarity(a.alias, :key)
+                    FROM entity_alias a
+                    JOIN entity e ON e.id = a.entity_id
+                    JOIN entity_type t ON t.id = e.entity_type_id
+                    LEFT JOIN entity_stats st ON st.entity_id = e.id
+                    WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
+                ), best AS (
+                    SELECT *, max(closeness) OVER () AS top FROM found
+                )
+                SELECT id, value, type, docs, closeness FROM best
+                WHERE closeness = top
+                ORDER BY docs DESC, id
+                LIMIT 6"""), {"pat": f"%{n}%", "key": n})).all()
 
 
 async def plan_question(
@@ -579,7 +642,7 @@ async def plan_question(
         _ROUND1_GROUPS, run_id, "round 1")
     probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
     name_matches = await _resolve_names(
-        (r1.get("named_entities") or []) + (r1.get("seed_cases") or []))
+        (r1.get("named_entities") or []) + (r1.get("known_sources") or []))
     all_matches = await _annotate_matches(
         {m["id"]: m for m in probe_matches + name_matches})
     match_lines = "\n".join(

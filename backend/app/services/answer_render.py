@@ -272,8 +272,8 @@ def _has_test(c: dict) -> bool:
     writes `claim_kind` and never reaches `test`, because `test` is only
     rewritten when the patch carries one. Gating the block on the kind then
     prints a structured test, name and ordered conditions and all, as an
-    ordinary sentence, which is the defect an expert reviewer reported as her
-    largest: a test not set out as a test.
+    ordinary sentence, which is the defect a review of published answers reported
+    first: a test not set out as a test.
 
     So the block asks for what it needs. Two conditions with text is the same
     floor `normalise_test` applies, because a test of one condition is a rule

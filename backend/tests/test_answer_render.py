@@ -6,20 +6,20 @@ def test_a_test_renders_as_a_test_whatever_its_kind():
     does not resend the test leaves the object on the row, because the update
     writes `claim_kind` and only reaches `test` when the patch carries one.
 
-    Measured on a published answer: one claim held a full AM&S test object,
+    Measured on a published answer: one claim held a full two-condition test object,
     name and two ordered cumulative conditions, with `claim_kind` set to
-    `rule`. It printed as a sentence. That is the defect an expert reviewer
-    reported as her largest, a test not set out as a test.
+    `rule`. It printed as a sentence. That is the defect a review of
+    published answers reported first: a test not set out as a test.
     """
     from app.services.answer_render import _has_test
 
     orphaned = {
         "claim_kind": "rule",
-        "claim_text": "The Court stated the privilege test.",
-        "test": {"name": "AM & S independence test", "conditions": [
-            {"text": "the exchange is connected to the rights of defence",
+        "claim_text": "The tribunal stated the two-limb test.",
+        "test": {"name": "Kestrel two-limb test", "conditions": [
+            {"text": "the exchange concerns the matter in dispute",
              "cumulative": True},
-            {"text": "the exchange emanates from an independent lawyer",
+            {"text": "the exchange comes from an outside adviser",
              "cumulative": True}]},
     }
     assert _has_test(orphaned), "a test object renders as a test whatever the kind says"

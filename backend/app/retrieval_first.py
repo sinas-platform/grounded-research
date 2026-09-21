@@ -571,7 +571,8 @@ def lookup_keys(item) -> list[str]:
 
 
 async def _entities_matching(s, n: str):
-    """The six entities whose name or alias contains `n`, closest name first.
+    """The six entities whose name or alias contains `n` — or, when none
+    does, most resembles it — closest name first.
 
     Containment is the filter; how closely the whole name resembles what
     the planner wrote is the rank, and only then how much the entity is
@@ -598,31 +599,73 @@ async def _entities_matching(s, n: str):
     # differed by six. Measured: single plans overlapped by 26% with the
     # six, and the differing entities were almost all sub-articles of
     # something both plans had named.
-    return (await s.execute(text("""
+    #
+    # Containment first, resemblance when containment finds nothing. The
+    # planner writes a source as it would cite it in a brief — "Kestrel
+    # Holdings v Northmoor Authority (T-123/45 P)" — and no stored name or
+    # alias CONTAINS a caption that long, so every such source resolved to
+    # nothing and the graph channel walked from nowhere. Measured on one
+    # question's hypotheses: four sources named in full, all four present
+    # in the collection, none resolved. Trigram resemblance over the same
+    # indexed columns puts the right entity first for all four (0.75 to
+    # 0.94), and it is the same language-blind measure the rank already
+    # uses; the threshold is pg_trgm's own operator setting, applied for
+    # this statement only.
+    #
+    # Ties broken by RECOGNISED documents, the name itself before an alias.
+    # Thirty-four entities carry an alias equal to one regulation's name —
+    # articles that cite it, which the alias importer took for it — and
+    # thirteen of them have never been recognised anywhere; ordered by raw
+    # mention counts, those articles came before the regulation.
+    rows = await _entities_matching_sql(
+        s, n, "e.canonical_form ILIKE :pat", "a.alias ILIKE :pat",
+        {"pat": f"%{n}%", "key": n})
+    if rows:
+        return rows
+    # set_config(…, true) is SET LOCAL with a bind parameter: this
+    # transaction only, and no literal in the statement text.
+    await s.execute(text(
+        "SELECT set_config('pg_trgm.similarity_threshold', :t, true)"),
+        {"t": str(RESEMBLANCE_FLOOR)})
+    return await _entities_matching_sql(
+        s, n, "e.canonical_form % :key", "a.alias % :key", {"key": n})
+
+
+#: Below this trigram similarity a name resembles nothing in particular:
+#: pg_trgm's default is 0.3, and the four measured captions scored 0.75+.
+RESEMBLANCE_FLOOR = 0.3
+
+
+async def _entities_matching_sql(s, n: str, name_filter: str,
+                                 alias_filter: str, params: dict):
+    return (await s.execute(text(f"""
                 WITH found AS (
                     SELECT e.id AS id, e.canonical_form AS value,
-                           t.name AS type, coalesce(st.documents, 0) AS docs,
-                           similarity(e.canonical_form, :key) AS closeness
+                           t.name AS type,
+                           coalesce(st.recognised_documents, 0) AS docs,
+                           similarity(e.canonical_form, :key) AS closeness,
+                           0 AS via
                     FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
                     LEFT JOIN entity_stats st ON st.entity_id = e.id
                     WHERE e.merged_into_id IS NULL
-                      AND e.canonical_form ILIKE :pat
+                      AND {name_filter}
                     UNION
                     SELECT e.id, e.canonical_form, t.name,
-                           coalesce(st.documents, 0),
-                           similarity(a.alias, :key)
+                           coalesce(st.recognised_documents, 0),
+                           similarity(a.alias, :key),
+                           1
                     FROM entity_alias a
                     JOIN entity e ON e.id = a.entity_id
                     JOIN entity_type t ON t.id = e.entity_type_id
                     LEFT JOIN entity_stats st ON st.entity_id = e.id
-                    WHERE e.merged_into_id IS NULL AND a.alias ILIKE :pat
+                    WHERE e.merged_into_id IS NULL AND {alias_filter}
                 ), best AS (
                     SELECT *, max(closeness) OVER () AS top FROM found
                 )
                 SELECT id, value, type, docs, closeness FROM best
                 WHERE closeness = top
-                ORDER BY docs DESC, id
-                LIMIT 6"""), {"pat": f"%{n}%", "key": n})).all()
+                ORDER BY (lower(value) = lower(:key)) DESC, via, docs DESC, id
+                LIMIT 6"""), params)).all()
 
 
 async def plan_question(

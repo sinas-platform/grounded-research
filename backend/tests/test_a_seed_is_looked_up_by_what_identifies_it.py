@@ -77,7 +77,7 @@ def test_a_lookup_returns_the_closest_names_not_the_most_mentioned():
     the most-mentioned entity containing a short key is rarely the one
     meant. Containment filters, trigram similarity ranks, mentions only
     break ties — in both resolvers."""
-    for fn in (rf._entities_matching, rf._resolve_value_probes):
+    for fn in (rf._entities_matching_sql, rf._resolve_value_probes):
         src = inspect.getsource(fn)
         assert "similarity(e.canonical_form, :key)" in src, fn.__name__
     assert "ORDER BY closeness DESC, docs DESC" in inspect.getsource(rf._resolve_value_probes)
@@ -88,6 +88,6 @@ def test_a_name_lookup_returns_what_was_named_not_its_neighbourhood():
     and reaching neighbours is the graph walk's job. Returned from the
     lookup, one differing proposal between two plans became six differing
     entities. Only the closest name and its exact ties come back."""
-    src = inspect.getsource(rf._entities_matching)
+    src = inspect.getsource(rf._entities_matching_sql)
     assert "max(closeness) OVER () AS top" in src
     assert "WHERE closeness = top" in src

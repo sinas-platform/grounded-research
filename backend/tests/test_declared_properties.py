@@ -3,7 +3,7 @@
 A property its class does not declare is asked of a model: ingestion puts the
 whole document, header included, into a prompt and asks for the properties, so
 a stored value can disagree with the document's own header. The fixtures
-below have a header saying 1973-03-26 and a stored 1973-02-22, weeks out,
+below have a header saying 1987-10-12 and a stored 1987-09-07, weeks out,
 which is what a date taken from the body looks like.
 
 A code is copied as it stands. A field the model has to decide about, such as
@@ -40,7 +40,7 @@ MAPPING = [
     {"key": "title", "property": "title", "on_conflict": "fill_only"},
     {"key": "language", "property": "language"},
 ]
-HEADER = {"decision_date": "1973-03-26", "title": "A judgment",
+HEADER = {"decision_date": "1987-10-12", "title": "A judgment",
           "language": "en", "seat": "somewhere"}
 
 
@@ -50,7 +50,7 @@ def _plan(existing=None):
 
 def test_a_property_with_no_value_is_written():
     w = {p.property: p for p in _plan().write}
-    assert w["decision_date"].value == "1973-03-26"
+    assert w["decision_date"].value == "1987-10-12"
     assert w["decision_date"].replaces is None
 
 
@@ -76,23 +76,23 @@ def test_a_mapped_key_absent_from_the_header_is_not_invented():
 def test_an_auto_value_that_disagrees_is_replaced():
     """Nothing about an `auto` value is a human decision, so a header that
     disagrees with it wins."""
-    plan = _plan({"decision_date": Existing(value="1973-02-22", method="auto",
+    plan = _plan({"decision_date": Existing(value="1987-09-07", method="auto",
                                             locked=False)})
     p = {x.property: x for x in plan.write}["decision_date"]
-    assert p.value == "1973-03-26"
-    assert p.replaces == "1973-02-22"
+    assert p.value == "1987-10-12"
+    assert p.replaces == "1987-09-07"
 
 
 def test_a_manual_value_is_never_replaced():
     """A person deciding a value outranks a header."""
-    plan = _plan({"decision_date": Existing(value="1973-02-22", method="manual",
+    plan = _plan({"decision_date": Existing(value="1987-09-07", method="manual",
                                             locked=False)})
     assert "decision_date" not in {p.property for p in plan.write}
     assert plan.kept_manual == ["decision_date"]
 
 
 def test_a_locked_value_is_never_replaced():
-    plan = _plan({"decision_date": Existing(value="1973-02-22", method="auto",
+    plan = _plan({"decision_date": Existing(value="1987-09-07", method="auto",
                                             locked=True)})
     assert "decision_date" not in {p.property for p in plan.write}
     assert plan.kept_locked == ["decision_date"]
@@ -111,14 +111,14 @@ def test_fill_only_writes_into_a_gap_and_never_over_a_value():
 def test_an_agreeing_value_is_not_rewritten():
     """Rewriting a value to the same value would churn the row and lose the
     method that says where the current one came from."""
-    plan = _plan({"decision_date": Existing(value="1973-03-26", method="auto",
+    plan = _plan({"decision_date": Existing(value="1987-10-12", method="auto",
                                             locked=False)})
     assert "decision_date" not in {p.property for p in plan.write}
     assert plan.unchanged == ["decision_date"]
 
 
 def test_a_value_this_path_already_wrote_is_left_alone():
-    plan = _plan({"decision_date": Existing(value="1973-03-26",
+    plan = _plan({"decision_date": Existing(value="1987-10-12",
                                             method=DECLARED_METHOD, locked=False)})
     assert "decision_date" not in {p.property for p in plan.write}
 
@@ -126,9 +126,9 @@ def test_a_value_this_path_already_wrote_is_left_alone():
 def test_the_reason_follows_the_backfill_convention():
     """`backfill <date> <operation>; prior value: {"_": "<old>"}`, so a
     reader who finds a replaced value knows where the old one is."""
-    r = replacement_reason("2026-09-10", "1973-02-22")
+    r = replacement_reason("2026-09-10", "1987-09-07")
     assert r.startswith("backfill 2026-09-10 declared_properties; prior value:")
-    assert '{"_": "1973-02-22"}' in r
+    assert '{"_": "1987-09-07"}' in r
 
 
 def test_a_first_write_says_where_the_value_came_from_without_a_prior():
@@ -161,7 +161,7 @@ def _old_reader(value):
 
 
 @pytest.mark.parametrize("value", [
-    {"_": "2019-01-01"}, {"_": 1973}, {"_": ["a", "b"]}, {"_": None}, {},
+    {"_": "2019-01-01"}, {"_": 1987}, {"_": ["a", "b"]}, {"_": None}, {},
 ])
 def test_every_stored_shape_reads_exactly_as_it_did(value):
     """Every row ingestion writes is a dict. Changing how one reads
@@ -174,7 +174,7 @@ def test_a_bare_value_no_longer_fails_the_document():
     with pytest.raises(AttributeError):
         _old_reader("2019-01-01")
     assert stored_text("2019-01-01") == "2019-01-01"
-    assert stored_text(1973) == "1973"
+    assert stored_text(1987) == "1987"
     assert stored_text(None) == ""
 
 

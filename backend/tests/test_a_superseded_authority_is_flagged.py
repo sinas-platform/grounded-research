@@ -1,9 +1,10 @@
 """A cited authority the collection records as superseded should say so.
 
-The reviewer's must-have has three parts and this is the third: never rely on
-superseded case law without flagging it. The first two, citing the leading
-authority together with the most recent decision confirming it, need a stance
-on citation edges that nothing extracts, and are not attempted here.
+An answer resting on case law has three things to get right: cite the leading
+authority, cite the most recent decision that confirms it, and never rely on
+superseded case law without flagging it. This covers the third. The first two
+need a stance on citation edges that nothing extracts, and are not attempted
+here.
 
 The filter is the whole feature. A `supersedes` edge can point at an entity
 that is not a source at all, such as a bare common noun that extraction made
@@ -114,11 +115,11 @@ def test_an_edge_with_no_state_counts_as_active():
 def test_a_source_is_never_recorded_as_superseding_itself():
     """A supersession edge can run from an entity to that same entity. Here an
     interim order and the final judgment in one case both resolved to the
-    case's entity, and the edge extracted between the two documents
-    collapsed to a loop. Read as a
-    finding, the loop told the drafter the deciding judgment of a question
-    was "recorded as superseded by" itself, and the drafter dropped it: the
-    one source the expert review had said was missing.
+    case's entity, and the edge extracted between the two documents collapsed
+    to a loop. Read as a finding, the loop told the drafter the deciding
+    judgment of a question was "recorded as superseded by" itself, and the
+    drafter dropped it. A citation the answer has to keep must not be lost to
+    a loop.
 
     Pinned on the supersession read specifically, by position: the loop
     guard must sit in the WHERE of the outer query, where `r` is the

@@ -87,8 +87,8 @@ _CITED_SUPERSEDED = text("""
 # case both resolving to the case's entity, so the edge extracted between the
 # two documents collapses to a loop. Read without this condition, the loop told
 # the drafter the deciding judgment of a question "is recorded as superseded
-# by" itself, and the drafter dropped the citation — the one source the
-# expert review had said was missing. The loop is a resolution artefact, not
+# by" itself, and the drafter dropped the citation. A citation the answer has
+# to keep must not be lost to a loop. The loop is a resolution artefact, not
 # a fact about the law, and no reading of it is worth passing to a reviser.
 
 

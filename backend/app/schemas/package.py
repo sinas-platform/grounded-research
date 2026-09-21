@@ -246,6 +246,16 @@ class PackageDocumentClassEntry(_Strict):
                 raise ValueError(
                     f"{field} is {named!r}, which this class does not declare"
                 )
+        # A header value mapped to a property the class does not have was
+        # accepted here, stored, and then skipped at ingestion for every
+        # document with nothing recording it: the same failure as above, with
+        # the same cure.
+        for d in self.declared_properties:
+            if d.property not in declared:
+                raise ValueError(
+                    f"declared_properties maps {d.key!r} to {d.property!r}, "
+                    f"which this class does not declare"
+                )
         return self
 
     @model_validator(mode="after")

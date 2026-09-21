@@ -30,7 +30,7 @@ from app.models import Document, DocumentVersion
 from app.models.config import DocumentClass, DocumentClassProperty
 from app.models.runtime import PropertyValue
 from app.services.declared_properties import (
-    Existing, plan_declared_values, replacement_reason)
+    plan_declared_values, read_held, replacement_reason, unknown_targets)
 from app.services.front_matter import split_front_matter
 from app.services.ingestion_oneshot import wrap_property_value
 
@@ -38,7 +38,7 @@ from app.services.ingestion_oneshot import wrap_property_value
 async def run(class_name: str, apply: bool, limit: int | None) -> dict:
     totals = {"documents": 0, "no_front_matter": 0, "written": 0,
               "replaced": 0, "kept_manual": 0, "kept_locked": 0,
-              "kept_existing": 0, "unchanged": 0}
+              "kept_existing": 0, "unchanged": 0, "left_unreadable": 0}
     today = datetime.now(timezone.utc).date().isoformat()
 
     async with AsyncSessionLocal() as session:
@@ -59,6 +59,10 @@ async def run(class_name: str, apply: bool, limit: int | None) -> dict:
                 DocumentClassProperty.document_class_id == cls.id)
         )).scalars().all()
         by_name = {p.name: p for p in props}
+        prop_ids = {n: p.id for n, p in by_name.items()}
+        # Reported once, for the class: a mapping entry naming a property the
+        # class no longer has does nothing on every document.
+        totals["unknown_targets"] = unknown_targets(mapping, by_name)
 
         q = select(Document.id, DocumentVersion.content_md,
                    DocumentVersion.id).join(
@@ -78,15 +82,10 @@ async def run(class_name: str, apply: bool, limit: int | None) -> dict:
                 select(PropertyValue).where(
                     PropertyValue.document_id == doc_id))).scalars().all()
             by_prop_id = {r.property_id: r for r in held}
-            existing = {}
-            for name, p in by_name.items():
-                r = by_prop_id.get(p.id)
-                if r is not None:
-                    existing[name] = Existing(
-                        value=str((r.value or {}).get("_", "")),
-                        method=r.method, locked=bool(r.locked))
+            h = read_held(mapping, prop_ids, by_prop_id)
+            totals["left_unreadable"] += len(h.unreadable)
 
-            plan = plan_declared_values(header, mapping, existing)
+            plan = plan_declared_values(header, h.planned, h.existing)
             for k, v in plan.as_dict().items():
                 if k in totals:
                     totals[k] += v
@@ -133,6 +132,11 @@ def main() -> None:
           f"{totals['kept_locked']} locked, "
           f"{totals['kept_existing']} fill-only with a value, "
           f"{totals['unchanged']} already agreeing")
+    if totals["left_unreadable"]:
+        print(f"  left alone, not one value: {totals['left_unreadable']}")
+    if totals["unknown_targets"]:
+        print(f"  mapped to properties the class does not have: "
+              f"{', '.join(totals['unknown_targets'])}")
 
 
 if __name__ == "__main__":

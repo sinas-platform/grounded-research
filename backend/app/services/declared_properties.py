@@ -34,12 +34,96 @@ _ON_CONFLICT = ("replace", "fill_only")
 _DEFAULT_ON_CONFLICT = "fill_only"
 
 
+def stored_text(value) -> str | None:
+    """A stored property value as the text a header value is compared with,
+    or None when it is not one value. Pure.
+
+    Values are written as `{"_": x}` so a scalar or a list fits the JSONB
+    column, and every row on the corpus this was measured on has that shape.
+    The dict path is therefore left exactly as it was: changing how an
+    existing row reads would change what the header replaces.
+
+    What it adds is an answer for the shapes the column also accepts and the
+    old reader could not take. `(value or {}).get("_")` on a bare string,
+    number or list raised `AttributeError`, and the per-document isolation
+    around ingestion turned that into a failed document with nothing to say
+    why. A bare scalar is its own value. A bare list is not one value, so it
+    is not compared and is never overwritten: the caller leaves it alone and
+    reports it.
+    """
+    if isinstance(value, dict):
+        return str(value.get("_", ""))
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return None
+    return str(value)
+
+
 @dataclass(frozen=True)
 class Existing:
     """What is already stored for one property."""
     value: str
     method: str
     locked: bool
+
+
+def unknown_targets(mapping: list[dict], declared: set[str] | dict) -> list[str]:
+    """Properties a class maps header values to and no longer declares. Pure.
+
+    Read off the mapping, not off the plan. A plan only names a property when
+    the document states that header key, so a stale declaration on a document
+    that does not state it would never be seen, and a class that lost a
+    property would look like one whose documents simply lack the field.
+    """
+    return sorted({str(m.get("property") or "") for m in mapping}
+                  - {""} - set(declared))
+
+
+@dataclass(frozen=True)
+class Held:
+    """What the planner may compare, and what it must leave alone."""
+    existing: dict[str, "Existing"]
+    planned: list[dict]
+    unreadable: list[str]
+    unknown: list[str]
+
+
+def read_held(mapping: list[dict], prop_ids: dict, rows: dict) -> Held:
+    """The stored values this mapping compares, read the one way. Pure.
+
+    `prop_ids` is property name to id for the class, `rows` is property id to
+    the stored row for the document. Both callers, ingestion and the backfill
+    script, go through here: they used to carry a copy each, and a fix to one
+    left the other crashing on the same value.
+
+    Only the properties the mapping names are read. Anything else the
+    document holds is not this path's business, and a list on an unrelated
+    property is a legitimate value, not something to report.
+
+    A value that is not one value is left out of `existing` and its mapping
+    entry is dropped from `planned`. Dropping only the first would read as
+    "nothing stored", and the write would overwrite it. Unknown targets are
+    dropped from `planned` for the same reason they are reported.
+    """
+    unknown = unknown_targets(mapping, prop_ids)
+    existing: dict[str, Existing] = {}
+    unreadable: list[str] = []
+    for name in dict.fromkeys(str(m.get("property") or "") for m in mapping):
+        if name not in prop_ids:
+            continue
+        r = rows.get(prop_ids[name])
+        if r is None:
+            continue
+        text = stored_text(r.value)
+        if text is None:
+            unreadable.append(name)
+            continue
+        existing[name] = Existing(
+            value=text, method=r.method, locked=bool(r.locked))
+    skip = set(unreadable) | set(unknown)
+    planned = [m for m in mapping if m.get("property") not in skip]
+    return Held(existing, planned, unreadable, unknown)
 
 
 @dataclass(frozen=True)

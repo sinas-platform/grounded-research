@@ -500,7 +500,7 @@ async def _write_declared_properties(
     is the part that reads and writes rows.
     """
     from app.services.declared_properties import (
-        Existing, plan_declared_values, replacement_reason)
+        plan_declared_values, read_held, replacement_reason, unknown_targets)
     from app.services.front_matter import split_front_matter
 
     if not class_id or not class_props:
@@ -510,28 +510,29 @@ async def _write_declared_properties(
         .where(DocumentClass.id == class_id))).scalar_one_or_none() or []
     if not mapping:
         return {"mapped": 0}
+    by_name = {p["name"]: p for p in class_props}
+    # A class-level fault, so it is reported whatever this document states.
+    unknown = unknown_targets(mapping, by_name)
     header, _body = split_front_matter(content or "")
     if not header:
-        return {"mapped": len(mapping), "no_front_matter": True}
+        out = {"mapped": len(mapping), "no_front_matter": True}
+        if unknown:
+            out["unknown_targets"] = unknown
+        return out
 
-    by_name = {p["name"]: p for p in class_props}
     rows = (await session.execute(
         select(PropertyValue).where(
             PropertyValue.document_id == document_id))).scalars().all()
     by_prop_id = {r.property_id: r for r in rows}
-    existing = {}
-    for name, p in by_name.items():
-        r = by_prop_id.get(p["id"])
-        if r is not None:
-            existing[name] = Existing(
-                value=str((r.value or {}).get("_", "")),
-                method=r.method, locked=bool(r.locked))
+    held = read_held(
+        mapping, {n: p["id"] for n, p in by_name.items()}, by_prop_id)
 
-    plan = plan_declared_values(header, mapping, existing)
+    plan = plan_declared_values(header, held.planned, held.existing)
     today = datetime.now(timezone.utc).date().isoformat()
     for w in plan.write:
         p = by_name.get(w.property)
         if p is None:
+            # Unreachable: unknown targets are dropped from the plan above.
             continue
         if not write:
             continue
@@ -549,7 +550,12 @@ async def _write_declared_properties(
                 value=wrap_property_value(w.value),
                 method=w.method, confidence=w.confidence,
                 reason=replacement_reason(today, w.replaces)))
-    return {"mapped": len(mapping), **plan.as_dict()}
+    report = {"mapped": len(mapping), **plan.as_dict()}
+    if held.unreadable:
+        report["left_unreadable"] = held.unreadable
+    if unknown:
+        report["unknown_targets"] = unknown
+    return report
 
 async def oneshot_ingest_document(
     session: AsyncSession,

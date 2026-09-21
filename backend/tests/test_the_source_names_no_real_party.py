@@ -115,11 +115,20 @@ _INVENTED = {"Ashgrove", "Bellhaven", "Carwood", "Dunmore", "Kestrel",
              "Établissements", "Autorité", "Société"}
 
 # A caption at the start of a sentence sweeps the sentence's first word into
-# itself. These are English, not anyone's vocabulary, and leaving them out
-# would make every "In X v Y" a false alarm.
-_SENTENCE_LEAD = {"In", "The", "See", "On", "At", "For", "Per", "From"}
+# itself. These are the leads a fixture sentence starts with in the languages
+# the fixtures are written in, not anyone's vocabulary, and leaving them out
+# would make every "In X v Y" or "Dans X c/ Y" a false alarm.
+_SENTENCE_LEAD = {"In", "The", "See", "On", "At", "For", "Per", "From",
+                  "Dans", "Voir", "Selon", "Sur", "Par", "Contre"}
 
 _STRING = re.compile(r'"([^"\n]{6,300})"')
+
+
+def _invented(word: str) -> bool:
+    """A party word is invented when every hyphen-joined part of it is: a
+    fixture may write `Ashgrove-Bellhaven Group`, and the hyphen is part of
+    the token now that a name may carry one."""
+    return all(part in _INVENTED for part in word.strip(".").split("-") if part)
 
 # A filename carrying a collection's scheme rather than a fixture's label.
 _REGISTER = re.compile(r'"(\d{5}[A-Z]{2}\d{4}\.md)"')
@@ -267,7 +276,7 @@ def test_no_case_caption_names_a_real_party():
                 for m in _CAPTION.finditer(lit):
                     words = [w for w in (m.group(1) + " " + m.group(2)).split()
                              if w not in _SENTENCE_LEAD]
-                    if any(w.strip(".") not in _INVENTED for w in words):
+                    if any(not _invented(w) for w in words):
                         bad.append(f"{f.relative_to(BACKEND)}:{n}: "
                                    f"{m.group(0)}")
     assert not bad, (
@@ -429,3 +438,11 @@ def test_the_checks_can_see_an_offender():
     words = [w for w in caption.group(0).replace(" v ", " ").split()
              if w not in _SENTENCE_LEAD]
     assert caption and all(w in _INVENTED for w in words), words
+    # A lead in another language is a lead, not a party; a hyphen-joined
+    # invented name is still invented.
+    for lead in ("Dans Ashgrove c/ Bellhaven", "Voir Ashgrove contre Bellhaven"):
+        m = _CAPTION.search(lead)
+        words = [w for w in (m.group(1) + " " + m.group(2)).split()
+                 if w not in _SENTENCE_LEAD]
+        assert m and all(_invented(w) for w in words), (lead, words)
+    assert _invented("Ashgrove-Bellhaven") and not _invented("Ashgrove-Nord")

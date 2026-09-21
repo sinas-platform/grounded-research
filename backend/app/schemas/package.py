@@ -158,11 +158,11 @@ class PackageDocumentClassEntry(_Strict):
     #
     # Declaring a label is also what says a class may not carry a rule alone:
     # the drafter is shown the label above the passages and told that a
-    # labelled source states what it says rather than what the law is. A
+    # labelled source states what it says rather than what the rules are. A
     # class that declares none is unlabelled and carries rules.
     authority_label: str | None = Field(default=None, max_length=40)
     #: Whether a claim asserting a rule on a source of this class must NAME
-    #: it in the sentence. An expert reviewer asked for this structurally:
+    #: it in the sentence. A review of published answers asked for this structurally:
     #: where the source is one the field treats as authority, the claim must
     #: identify it so a reader can look it up, and a claim that does not is
     #: sent back. Which classes those are is the deployment's to say; the

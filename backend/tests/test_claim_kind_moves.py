@@ -58,7 +58,6 @@ def test_a_kind_cannot_leave_a_test_that_stays():
     assert moved is not None
     assert moved["from"] == "test" and moved["asked"] == "rule"
     assert moved["to"] == "test" and moved["kept_for_test"] is True
-    assert moved["orphaned_test"] is False
     assert moved["test_before"] is True and moved["test_after"] is True
     assert moved["sequence"] == 5
     assert row.claim_kind == "test" and isinstance(row.test, dict)
@@ -72,7 +71,7 @@ def test_a_test_below_the_floor_goes_with_the_kind():
     moved = _apply_structure(row, {"kind": "rule"}, PARTS, {})
     assert moved is not None
     assert moved["from"] == "test" and moved["to"] == "rule"
-    assert moved["kept_for_test"] is False and moved["orphaned_test"] is False
+    assert moved["kept_for_test"] is False
     assert row.claim_kind == "rule" and row.test is None
 
 
@@ -88,7 +87,7 @@ def test_a_patch_that_carries_a_new_test_is_not_an_orphan():
     moved = _apply_structure(
         row, {"kind": "rule", "test": _two_conditions()}, PARTS, {})
 
-    assert moved is not None and moved["orphaned_test"] is False
+    assert moved is not None and moved["kept_for_test"] is False
     assert moved["test_after"] is False, "kind rule keeps no test"
 
 
@@ -107,4 +106,4 @@ def test_a_move_away_from_test_with_no_object_is_recorded_but_not_orphaned():
     moved = _apply_structure(row, {"kind": "fact"}, PARTS, {})
     assert moved is not None
     assert moved["from"] == "test" and moved["to"] == "fact"
-    assert moved["orphaned_test"] is False
+    assert moved["kept_for_test"] is False

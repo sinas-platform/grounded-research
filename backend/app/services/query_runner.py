@@ -1362,7 +1362,7 @@ _EMPHASIS = {ord("*"): None, ord("_"): None}
 _RENDERING_VARIANTS = {**_QUOTE_MARKS, **_DASHES, **_SOFT_HYPHEN, **_EMPHASIS}
 
 #: A character reference, numeric or named. Deliberately strict: it must end
-#: in a semicolon, so the ampersand in `AM & S Europe` is left alone.
+#: in a semicolon, so the ampersand in `Ashgrove & Co` is left alone.
 _ENTITY = re.compile(
     r"&(?:#\d{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
 
@@ -6264,11 +6264,6 @@ def _apply_structure(row: AnswerClaim, item: dict, parts: list[dict],
         "to": row.claim_kind,
         # The patch asked the kind to leave `test` and the object held it.
         "kept_for_test": asked != row.claim_kind,
-        # Should never be true now; kept so a reader of an older record and
-        # of this one reads the same key.
-        "orphaned_test": bool(
-            was_kind == "test" and row.claim_kind != "test"
-            and isinstance(row.test, dict)),
         "test_before": was_test,
         "test_after": isinstance(row.test, dict),
     }
@@ -6865,8 +6860,6 @@ async def _revise_answer(
             # state this exists to surface was found by reading stored rows,
             # and nothing reported it.
             "claim_kind_moves": kind_moves,
-            "orphaned_tests": [m["sequence"] for m in kind_moves
-                               if m.get("orphaned_test")],
             # Claims the reviser asked to drop and declined to explain. They
             # were not removed. If this is where the drops go, the requirement
             # is suppressing the disposition rather than documenting it, and

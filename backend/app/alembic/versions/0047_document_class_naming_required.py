@@ -1,6 +1,6 @@
 """A class says whether a claim resting on it must name it.
 
-An expert reviewer asked for the rule structurally rather than lexically:
+A review of published answers asked for the rule structurally rather than lexically:
 every proposition carries a source, and where that source is one the field
 treats as authority it must be named in the claim — the parties and the
 reference — so a reader can look it up and weigh it. An empty field sends the

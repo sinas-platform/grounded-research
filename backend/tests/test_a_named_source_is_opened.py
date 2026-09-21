@@ -11,7 +11,7 @@ drafter told to cite one has nothing verbatim to quote and can only refuse,
 however apt the document is. The refusal then looks like a considered
 judgement and is an artefact of never having seen the text.
 
-WHY IT MATTERED. An expert reviewer named this failure six times over, and
+WHY IT MATTERED. A review of published answers named this failure six times over, and
 each time identified the missing material by its RANK in the retrieved set:
 "sources at ranks 11 and 31, unused"; "T-125/03, rank 33"; "ranks 26, 41, 51".
 The documents were retrieved every time. They were never read.

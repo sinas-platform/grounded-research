@@ -1,6 +1,6 @@
 """A claim asserting a rule names the source it rests on.
 
-The requirement is an expert reviewer's, and was asked for structurally
+The requirement came from a review of published answers, asked for structurally
 rather than lexically: every proposition carries a source, and where that
 source is one the field treats as authority the claim must name it — the
 parties and the reference — so a reader can look it up and weigh it.

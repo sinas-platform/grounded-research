@@ -22,7 +22,7 @@ ANSWER = "answer-1"
 
 @pytest.fixture
 def ledger(monkeypatch):
-    state = {"entries": {}, "cited": set(), "raise_on": None}
+    state = {"entries": {}, "cited": set(), "accepted": set(), "raise_on": None}
 
     async def fake_load(run_id):
         if state["raise_on"] == "entries":
@@ -34,8 +34,12 @@ def ledger(monkeypatch):
             raise RuntimeError("claims unreadable")
         return state["cited"]
 
+    async def fake_accepted(run_id):
+        return state["accepted"]
+
     monkeypatch.setattr(obligations, "_load", fake_load)
     monkeypatch.setattr(obligations, "_cited", fake_cited)
+    monkeypatch.setattr(obligations, "_refusals_accepted", fake_accepted)
     return state
 
 
@@ -289,3 +293,57 @@ async def test_an_unreadable_ledger_does_not_block(ledger):
     ledger["entries"] = {"a.md": entry()}
     ledger["raise_on"] = "entries"
     assert await actionable() == []
+
+
+# -- a refusal the review accepted -------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_refusal_accounts_for_the_source(ledger):
+    """The drafter said why the source does not carry the point and the
+    review agreed. Listing it as owed told the reviser, every cycle, that the
+    question was not fully answered, and spent a cycle on it."""
+    ledger["entries"] = {"a.md": entry(), "b.md": entry()}
+    ledger["accepted"] = {"a.md"}
+    assert await unaccounted() == ["b.md"]
+    assert await obligations.actionable(RUN, ANSWER) == ["b.md"]
+
+
+@pytest.fixture
+def objection_ledger(monkeypatch):
+    from app.services import objections
+    rows: list[dict] = []
+
+    async def fake_ledger(run_id):
+        return rows
+
+    monkeypatch.setattr(objections, "ledger", fake_ledger)
+    return rows
+
+
+@pytest.mark.asyncio
+async def test_only_an_accepted_source_refusal_counts(objection_ledger):
+    """A stall is a disagreement, an answered refusal is not ruled on yet, a
+    resolved objection is a citation that `_cited` checks live, and a
+    standing objection is about a claim, not a document."""
+    objection_ledger.extend([
+        {"kind": "source", "subject": "accepted.md", "state": "accepted"},
+        {"kind": "source", "subject": "stalled.md", "state": "stalled"},
+        {"kind": "source", "subject": "answered.md", "state": "answered"},
+        {"kind": "source", "subject": "resolved.md", "state": "resolved"},
+        {"kind": "standing", "subject": "claim-1", "state": "accepted"},
+    ])
+    assert await obligations._refusals_accepted(RUN) == {"accepted.md"}
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_objection_ledger_accounts_for_nothing(monkeypatch):
+    """`objections.ledger` answers an empty list when it cannot read, so the
+    owed list stays what it was before this read existed."""
+    from app.services import objections
+
+    async def failing_load(run_id):
+        raise RuntimeError("objections unreadable")
+
+    monkeypatch.setattr(objections, "_load", failing_load)
+    assert await obligations._refusals_accepted(RUN) == set()

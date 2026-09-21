@@ -2,11 +2,11 @@
 
 Front matter is parsed at upload and never consulted again. Ingestion puts the
 document, header included, into a prompt and asks a model to return the
-properties, so a value the document states outright arrives by transcription.
-On one corpus that cost 693 disagreements on `decision_date` out of 20,688,
-3.3%, while `language` disagreed 0 times in 14,318 and CELEX 0 in 5,215. Codes
-the model copies; the one field it has to decide about is the one it gets
-wrong, and that field is what recency and supersession are decided on.
+properties, so a value the document states outright arrives by transcription,
+and a stored value can disagree with the document's own header. A code is
+copied as it stands. A field the model has to decide about, such as which of
+several dates in the body is the document's own, is where it goes wrong, and
+that field is what recency and supersession are decided on.
 
 This module is the deterministic half. It is pure: a header, a mapping and
 what is already stored go in, a plan comes out, and the caller writes it. No
@@ -39,7 +39,7 @@ def stored_text(value) -> str | None:
     or None when it is not one value. Pure.
 
     Values are written as `{"_": x}` so a scalar or a list fits the JSONB
-    column, and every row on the corpus this was measured on has that shape.
+    column, and that is the shape ingestion writes.
     The dict path is therefore left exactly as it was: changing how an
     existing row reads would change what the header replaces.
 
@@ -160,11 +160,10 @@ class Plan:
 def replacement_reason(on_date: str, prior: str | None) -> str:
     """The `reason` a written value carries.
 
-    Deliberately the shape the 7 September joined-case split already used:
-    `backfill <date> <operation>; prior value: {"_": "<old>"}`. Reusing it
-    means a reader who finds a replaced value knows where to look for the one
-    it replaced, and that this operation is reversible the same way that one
-    was, rather than having to learn a second convention.
+    `backfill <date> <operation>; prior value: {"_": "<old>"}`. A reader who
+    finds a replaced value knows where to look for the one it replaced, and
+    any backfill that writes the same shape is reversible the same way, rather
+    than each one needing its own convention.
     """
     stem = f"backfill {on_date} declared_properties"
     if prior is None:
@@ -184,10 +183,10 @@ def plan_declared_values(
     property name.
 
     The precedence is the answer to the only question this design had to
-    settle, and the corpus settled it: of the 693 stored dates that disagree
-    with their header, every one is `auto` and none is locked, while all 689
-    `manual` values sit elsewhere. So a person's decision outranks a header, a
-    header outranks a model, and nothing is overwritten quietly.
+    settle. A `manual` value is a person's decision and a locked one was locked
+    on purpose, while an `auto` value is a model's reading of the document the
+    header belongs to. So a person's decision outranks a header, a header
+    outranks a model, and nothing is overwritten quietly.
     """
     plan = Plan()
     for entry in mapping:

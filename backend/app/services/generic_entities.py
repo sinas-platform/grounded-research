@@ -160,8 +160,8 @@ def written_as_a_word(name: str) -> bool:
     "Lower-case" is asked of the character, not of the ASCII range it might
     sit in. The test was `re.match(r"^[a-z]", name)`, which `état`, `échange`
     and `établissement` all fail: lower-case words the check read as names
-    and left as entities. The corpus this runs on is about a third French, so
-    the words it could least judge were a large part of the ones it exists to
+    and left as entities. In a collection with more than one language in it, the
+    words it could least judge were a large part of the ones it exists to
     catch.
     """
     return bool(name) and name == name.lower() and name[:1].islower()

@@ -419,6 +419,9 @@ async def resolve(run_id: uuid.UUID, subjects: list[str],
     for subject in subjects or []:
         entry = entries.get(objection_id(kind, subject))
         if entry is not None and entry.get("state") != RESOLVED:
+            # What the citation replaced, so losing the citation can put it
+            # back. A request already settled by argument stays settled.
+            entry["resolved_from"] = entry.get("state")
             entry["state"] = RESOLVED
             changed = True
     if changed:
@@ -440,23 +443,32 @@ async def reopen_uncited(run_id: uuid.UUID, cited: set[str] | list[str],
     published without it and without the request being put again.
 
     Only a request met by its own citation reopens. An accepted refusal and a
-    stall were settled by an argument, not by a claim, and stay settled.
-    The history is kept: the exchanges are the argument's, and the cycle of
-    each reopening is recorded beside them.
+    stall were settled by an argument, not by a claim. If the document was
+    cited after one of those, `resolve` recorded the settled state it
+    replaced, and losing the citation returns the request to that state
+    rather than opening it. The history is kept: the exchanges are the
+    argument's, and the cycle of each reopening is recorded beside them.
 
     Returns the documents reopened.
     """
     have = set(cited or [])
     entries = await _load(run_id)
     back: list[str] = []
+    changed = False
     for oid, entry in entries.items():
         if (entry.get("kind") == "source" and entry.get("state") == RESOLVED
                 and entry.get("subject") not in have):
+            before = entry.get("resolved_from")
+            changed = True
+            if before in (ACCEPTED, STALLED):
+                entry["state"] = before
+                entries[oid] = entry
+                continue
             entry["state"] = OPEN
             entry["reopened"] = (entry.get("reopened") or []) + [int(cycle)]
             entries[oid] = entry
             back.append(str(entry.get("subject") or ""))
-    if back:
+    if changed:
         await _store(run_id, entries)
     return back
 

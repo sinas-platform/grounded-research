@@ -723,3 +723,38 @@ def test_the_gate_reopens_before_it_decides_what_is_settled():
     src = inspect.getsource(qr._gate_answer)
     assert src.index("objections.reopen_uncited(") < src.index(
         "objections.settled_subjects(")
+
+
+@pytest.fixture
+def stored_ledger(monkeypatch):
+    """Copies on every read and write, as the run row's JSON does, so a
+    change that is never stored is a change that did not happen."""
+    import copy
+    store: dict = {}
+
+    async def _load(_run_id):
+        return copy.deepcopy(store)
+
+    async def _store(_run_id, entries):
+        store.clear()
+        store.update(copy.deepcopy(entries))
+
+    monkeypatch.setattr(objections, "_load", _load)
+    monkeypatch.setattr(objections, "_store", _store)
+    return store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["accepted", "stalled"])
+async def test_a_settled_argument_cited_later_goes_back_to_settled(stored_ledger, settle):
+    """Settled by argument, then cited anyway, then the citation lost. The
+    request returns to how the argument ended; it is not opened again."""
+    oid = await _ask(subject="a.md")
+    store = await objections._load(RUN)
+    store[oid]["state"] = settle
+    await objections._store(RUN, store)
+    await objections.resolve(RUN, ["a.md"])
+    assert (await _state(oid))["state"] == objections.RESOLVED
+    assert await objections.reopen_uncited(RUN, set(), cycle=3) == []
+    assert (await _state(oid))["state"] == settle
+    assert "a.md" in await objections.settled_subjects(RUN)

@@ -80,7 +80,7 @@ _SECTION_RANK = {s: i for i, s in enumerate(SECTIONS)}
 #: `procedure` covers a process that is still to be run as well as one that
 #: has been. It was worded as a report of how a process ran, which is only
 #: half of what a reader asks for: a review of published answers found them
-#: explaining what the law is and never what a reader does about it, and a
+#: explaining what the rules are and never what a reader does about it, and a
 #: kind that only describes the past gives such a claim nowhere to sit. The
 #: widening is to the same kind rather than a new one because the steps are
 #: the same steps either way; only the tense differs.

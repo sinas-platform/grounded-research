@@ -360,6 +360,7 @@ class _Claim:
         self.section = "analysis"
         self.part_index = 0
         self.claim_kind = "rule"
+        self.test = None
 
 
 @pytest.fixture
@@ -429,6 +430,51 @@ def round_(monkeypatch):
     return SimpleNamespace(run=run, client=client, tele=tele, claims=claims,
                            run_row=run_row,
                            cycle=lambda: tele["validate"]["revision_1"])
+
+
+@pytest.mark.asyncio
+async def test_a_kind_move_a_test_holds_is_recorded_for_the_cycle(
+        round_, ledger):
+    """The cycle's own record, not the helper's return value.
+
+    `claim_kind_moves` and `orphaned_tests` are what a reader opens when an
+    answer prints a test as prose; the state they exist to surface was found
+    by reading stored rows because nothing reported it, and the row no
+    longer reaches it, the object holds the kind. A test on the helper alone
+    leaves the written record undefended: the helper can be right and the
+    cycle still write the wrong key, or write nothing at all.
+    """
+    claim = round_.claims[0]
+    claim.claim_kind = "test"
+    claim.test = {"name": "the two-part test",
+                  "conditions": [{"text": "the first"}, {"text": "the second"}]}
+    await round_.run({"revise": [{
+        "seq": 1, "text": "Claim 1 says a thing, as a rule now.",
+        "kind": "rule", "rationale": "the review asked for the rule",
+        "evidence": [{"filename": "a.md", "line_from": 1, "line_to": 2}]}]})
+    cycle = round_.cycle()
+    assert cycle["orphaned_tests"] == []
+    move = next(m for m in cycle["claim_kind_moves"] if m["sequence"] == 1)
+    assert (move["from"], move["asked"], move["to"]) == ("test", "rule", "test")
+    assert move["kept_for_test"] is True
+    # The object held the kind that justifies it, which is why the move is
+    # listed at all.
+    assert move["test_before"] is True and move["test_after"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_cycle_that_moves_no_kind_says_so_rather_than_nothing(
+        round_, ledger):
+    """An empty list says the cycle moved no kind; a missing key says the run
+    predates the record. They are different facts and a reader has to be able
+    to tell them apart, so the keys are written every cycle."""
+    await round_.run({"revise": [{
+        "seq": 1, "text": "Claim 1 says the same thing, better.",
+        "kind": "rule", "rationale": "narrowed",
+        "evidence": [{"filename": "a.md", "line_from": 1, "line_to": 2}]}]})
+    cycle = round_.cycle()
+    assert cycle["claim_kind_moves"] == []
+    assert cycle["orphaned_tests"] == []
 
 
 @pytest.mark.asyncio

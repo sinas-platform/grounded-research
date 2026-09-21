@@ -437,8 +437,8 @@ async def test_a_kind_move_a_test_holds_is_recorded_for_the_cycle(
         round_, ledger):
     """The cycle's own record, not the helper's return value.
 
-    `claim_kind_moves` and `orphaned_tests` are what a reader opens when an
-    answer prints a test as prose; the state they exist to surface was found
+    `claim_kind_moves` is what a reader opens when a kind moved in a cycle;
+    the state it was written for, a test left under another kind, was found
     by reading stored rows because nothing reported it, and the row no
     longer reaches it, the object holds the kind. A test on the helper alone
     leaves the written record undefended: the helper can be right and the
@@ -453,7 +453,7 @@ async def test_a_kind_move_a_test_holds_is_recorded_for_the_cycle(
         "kind": "rule", "rationale": "the review asked for the rule",
         "evidence": [{"filename": "a.md", "line_from": 1, "line_to": 2}]}]})
     cycle = round_.cycle()
-    assert cycle["orphaned_tests"] == []
+    assert "orphaned_tests" not in cycle
     move = next(m for m in cycle["claim_kind_moves"] if m["sequence"] == 1)
     assert (move["from"], move["asked"], move["to"]) == ("test", "rule", "test")
     assert move["kept_for_test"] is True
@@ -474,7 +474,7 @@ async def test_a_cycle_that_moves_no_kind_says_so_rather_than_nothing(
         "evidence": [{"filename": "a.md", "line_from": 1, "line_to": 2}]}]})
     cycle = round_.cycle()
     assert cycle["claim_kind_moves"] == []
-    assert cycle["orphaned_tests"] == []
+    assert "orphaned_tests" not in cycle
 
 
 @pytest.mark.asyncio

@@ -1,6 +1,6 @@
 """A claim that asserts a rule names the source it rests on.
 
-THE REQUIREMENT. An expert reviewer asked for it structurally rather than
+THE REQUIREMENT. A review of published answers asked for it structurally rather than
 lexically: every proposition carries a source, and where that source is one
 the field treats as authority it must be named in the claim — the parties and
 the reference, not a bracket at the end. An unnamed source makes the claim

@@ -4405,17 +4405,15 @@ async def _look_owed(
             .where(Document.filename.in_(names)))).all()
     text_of = {str(f): str(c or "") for f, c in rows}
     notes = {u["doc"]: str(u.get("note") or "") for u in owed}
-    found: dict[str, dict] = {}
-    for name in names:
-        body = text_of.get(name, "")
-        if len(body) < 40:
-            continue
-        hit = await _ask_document(
-            sinas, owed_prompt(notes.get(name, ""),
-                               Cited(filename=name, text=body)), name)
-        if hit:
-            found[name] = hit
-    return found
+    # Each owed document is read on its own and none depends on another, so
+    # they are read at once. Read one after another, three owed documents
+    # were three whole-document calls in a row on every review cycle.
+    readable = [n for n in names if len(text_of.get(n, "")) >= 40]
+    hits = await asyncio.gather(*[
+        _ask_document(sinas, owed_prompt(notes.get(n, ""),
+                                         Cited(filename=n, text=text_of[n])), n)
+        for n in readable])
+    return {n: h for n, h in zip(readable, hits) if h}
 
 
 async def _look_higher(sinas: _Sinas, gap, counts: dict[str, int]) -> dict | None:

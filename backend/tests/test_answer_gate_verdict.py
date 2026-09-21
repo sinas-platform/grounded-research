@@ -425,10 +425,17 @@ _TWO = {1, 2}
 def test_a_pair_is_two_different_claims_that_exist():
     assert qr._tension_pairs([{"claims": [1, 2], "quote": "q"}], _TWO) == [
         {"claims": [1, 2], "quote": "q"}]
-    # one claim, three, the same claim twice, a claim not in the answer
-    for claims in ([1], [1, 2, 3], [2, 2], [1, 9], []):
-        assert qr._tension_pairs([{"claims": claims}], {1, 2, 3}
-                                 if len(claims) == 3 else _TWO) == []
+    # one claim, three that all exist, the same claim twice, a claim not in
+    # the answer, none, and claims that are not a list
+    for claims in ([1], [1, 2, 3], [2, 2], [1, 9], [], 1, "1, 2"):
+        assert qr._tension_pairs([{"claims": claims}], {1, 2, 3}) == [], claims
+
+
+def test_an_entry_that_named_three_is_not_read_as_two():
+    """Reading the numbers drops what is not one and folds repeats, so the
+    count has to come first."""
+    for claims in ([1, 2, 1], [1, 2, None], [1, 2, "x"], [1, 2, True]):
+        assert qr._tension_pairs([{"claims": claims}], _TWO) == [], claims
 
 
 def test_the_same_pair_in_either_order_is_one_pair():

@@ -3677,7 +3677,8 @@ async def _record_gate_cycle(
         # `old_format` marks a reply that was still the one sentence the field
         # used to be, so the cycles before the package is reinstalled can be
         # counted.
-        "tension": tension or {"raw": None, "pairs": [], "old_format": False},
+        "tension": {"raw": None, "pairs": [], "old_format": False,
+                    **(tension or {})},
         # The cycle that judged nothing because nothing was left to judge.
         # Written every time, false included: a missing key would say the run
         # predates the field, and an absent cycle would say the gate never
@@ -4031,7 +4032,13 @@ def _tension_pairs(raw, claim_seqs: set) -> list[dict]:
     for x in raw:
         if not isinstance(x, dict):
             continue
-        nums = _seq_list(x.get("claims"))
+        # Counted before `_seq_list` reads it, because reading drops what is
+        # not a claim number and folds repeats: [1, 2, 1] and [1, 2, null]
+        # would come out as a clean pair from an entry that named three.
+        claims = x.get("claims")
+        if not isinstance(claims, (list, tuple)) or len(claims) != 2:
+            continue
+        nums = _seq_list(claims)
         if len(nums) != 2 or not set(nums) <= claim_seqs:
             continue
         pair = sorted(nums)

@@ -14,13 +14,18 @@ from contextlib import contextmanager
 
 import pytest
 from app.retrieval_first import (
-    _ROUND1_GROUPS,
-    _ROUND2_GROUPS,
     _invoke_json,
     _parse,
     _repair_prompt,
     _require,
 )
+
+
+# Example field groups, the shape `_require` takes: a reply must carry at
+# least one field of every group. The planner's own groups are in
+# `app.hypotheses`; these only exercise the rule.
+_ROUND1_GROUPS = (("value_probes", "named_entities", "known_sources"), ("websearch_queries",))
+_ROUND2_GROUPS = (("anchor_entity_ids", "websearch_queries", "class_boost"),)
 
 
 class _Stub:
@@ -381,31 +386,14 @@ def test_round_2_still_rejects_an_object_answering_nothing():
 
 
 # ── a plan with nothing in it is not a plan ──────────────────────────────────
-#
-# `plan_question` needs a client and a corpus, so these cover the condition it
-# applies rather than the function. Both rounds can answer every field and
-# still leave nothing to retrieve with.
 
 
-def _plan_is_usable(anchors, queries):
-    """The condition plan_question raises on, as it is written there."""
-    return bool(anchors or queries)
+def test_a_plan_with_no_hypothesis_is_rejected():
+    """`plan` needs a client and a corpus; the condition it raises on is
+    pinned where it is written, and the merge it applies is pure."""
+    import inspect
 
+    from app import hypotheses
 
-def test_a_plan_with_neither_anchors_nor_queries_is_rejected():
-    assert not _plan_is_usable([], [])
-
-
-def test_anchors_alone_are_enough():
-    """The graph channel can carry a question on its own."""
-    assert _plan_is_usable(["e1"], [])
-
-
-def test_queries_alone_are_enough():
-    """So can the text channel, which is what a question naming no entities
-    is left with."""
-    assert _plan_is_usable([], ["a query"])
-
-
-def test_both_present_is_usable():
-    assert _plan_is_usable(["e1"], ["a query"])
+    assert "planning produced no hypotheses" in inspect.getsource(hypotheses.plan)
+    assert hypotheses.union_rules([[], []]) == []

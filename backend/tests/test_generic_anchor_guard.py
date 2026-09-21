@@ -20,13 +20,13 @@ def _match(i, docs, generic=False, recognised=True):
             "docs": docs, "generic": generic, "recognised": recognised}
 
 
-def test_an_entity_nothing_ever_recognised_is_never_force_picked():
-    """Written everywhere, recognised nowhere: the top-up must not read the
-    word's ubiquity as the name's strength. The model may still pick it."""
-    matches = {m["id"]: m for m in [
-        _match(1, 9000, recognised=False), _match(2, 120), _match(3, 80)]}
-    assert rf._pick_anchors([], matches) == ["e2", "e3"]
-    assert rf._pick_anchors(["e1"], matches) == ["e1", "e2", "e3"]
+def test_a_rule_whose_source_is_a_generic_term_walks_from_nowhere():
+    """Written everywhere, recognised nowhere: a generic term names the
+    word, not the thing, so a rule whose source resolves to one gets no
+    anchor rather than the shelf that contains the word."""
+    from app import hypotheses
+
+    assert 'if not m.get("generic")' in inspect.getsource(hypotheses.plan)
 
 
 def test_recognition_is_read_off_entity_stats_not_counted():
@@ -55,47 +55,12 @@ def test_no_resolver_and_no_scorer_counts_mentions_per_question():
     mention table any more: both resolvers order their cut by a stored
     document count, the anchor annotation reads a stored flag, and the
     retriever's inverse document frequency reads the stored count."""
-    for fn in (rf._entities_matching_sql, rf._resolve_value_probes,
-               rf._annotate_matches, rf.retrieve_and_rank):
+    from app import hypotheses
+
+    for fn in (rf._entities_matching_sql, rf._annotate_matches, hypotheses._graph_from):
         src = inspect.getsource(fn)
-        head = src[:src.index("frontier")] if fn is rf.retrieve_and_rank else src
-        assert "count(DISTINCT document_id)" not in head, fn.__name__
-        assert "entity_stats" in head, fn.__name__
-
-
-# -- the anchor pick ----------------------------------------------------------
-
-
-def test_the_union_never_force_picks_a_generic_entity():
-    """The old union took the top matches by document count — which selects
-    a generic term precisely for being junk: ubiquity read as strength."""
-    matches = {m["id"]: m for m in [
-        _match(1, 14704, generic=True), _match(2, 120), _match(3, 80)]}
-    picked = rf._pick_anchors([], matches)
-    assert "e1" not in picked
-    assert picked == ["e2", "e3"]
-
-
-def test_the_model_may_still_pick_a_generic_entity_deliberately():
-    """A question genuinely about the marked entity is the one case the
-    mark must not foreclose. The model saw the label; its pick stands."""
-    matches = {m["id"]: m for m in [_match(1, 14704, generic=True), _match(2, 120)]}
-    assert rf._pick_anchors(["e1"], matches) == ["e1", "e2"]
-
-
-def test_a_model_pick_outside_the_matches_is_dropped():
-    matches = {m["id"]: m for m in [_match(2, 120)]}
-    assert rf._pick_anchors(["nonsense"], matches) == ["e2"]
-
-
-def test_at_most_six_are_unioned_beyond_the_picks():
-    matches = {m["id"]: m for m in [_match(i, 100 - i) for i in range(1, 10)]}
-    assert len(rf._pick_anchors([], matches)) == 6
-
-
-def test_the_union_is_ordered_strongest_first():
-    matches = {m["id"]: m for m in [_match(1, 10), _match(2, 500), _match(3, 90)]}
-    assert rf._pick_anchors([], matches) == ["e2", "e3", "e1"]
+        assert "count(DISTINCT document_id)" not in src, fn.__name__
+        assert "entity_stats" in src, fn.__name__
 
 
 # -- the wiring, pinned by reading the source ---------------------------------
@@ -103,15 +68,16 @@ def test_the_union_is_ordered_strongest_first():
 SRC = inspect.getsource(rf)
 
 
-def test_the_match_line_says_what_a_generic_entity_is():
-    """The model can only decline to anchor junk if it is told which match
-    is junk, in the line where it reads the match."""
-    assert "GENERIC TERM: matches the word, almost never the thing" in SRC
+def test_the_mention_channel_counts_recognised_mentions_only():
+    """A blind string match is an occurrence of a word, not a sighting of
+    the thing (measured: "Thus" held 14,704 blind matches and 2 recognised
+    mentions), so the walk counts the recognised tiers and the generic
+    mark is read off the entity, not recomputed."""
+    from app import hypotheses
 
-
-def test_the_mention_channel_gates_generic_entities_to_recognised_tiers():
-    assert "metadata ? 'generic_term'" in SRC
-    assert "NOT (m.link_method = ANY(:blind))" in SRC
+    hsrc = inspect.getsource(hypotheses)
+    assert "metadata ? 'generic_term'" in SRC and "metadata ? 'generic_term'" in hsrc
+    assert "NOT (m.link_method = ANY(:blind))" in hsrc
 
 
 def test_recognition_is_the_complement_of_the_blind_tiers():
@@ -126,7 +92,9 @@ def test_every_match_is_annotated_through_one_pass():
     """Probe matches and name matches reach the planner through the same
     annotation, so no resolver can hand it an unlabelled match — and an id
     the annotation query cannot find defaults to safe values."""
-    assert "_annotate_matches(" in SRC
+    from app import hypotheses
+
+    assert "_annotate_matches(" in inspect.getsource(hypotheses.plan)
     assert 'm.setdefault("generic", False)' in SRC
 
 

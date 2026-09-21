@@ -37,8 +37,10 @@ def test_the_whole_title_is_the_key_when_there_is_no_identifier():
 def test_the_field_names_carry_no_domain():
     """The engine ships to every deployment; what a source is called is the
     deployment's business, said in its schema and its guidance."""
+    from app.hypotheses import HYPOTHESES_PROMPT
+
     for word in ("case", "decision", "part", "legal", "court"):
-        assert word not in rf._ROUND1_PROMPT.lower(), word
+        assert word not in HYPOTHESES_PROMPT.lower(), word
 
 
 def test_nothing_is_split_on_punctuation():
@@ -66,9 +68,11 @@ def test_the_resolver_never_cuts_a_name():
 
 
 def test_the_planner_is_asked_for_the_identifier():
-    assert '"known_sources"' in rf._ROUND1_PROMPT
-    assert '"identifier"' in rf._ROUND1_PROMPT and '"title"' in rf._ROUND1_PROMPT
-    assert "known_sources" in rf._ROUND1_GROUPS[0]
+    from app.hypotheses import HYPOTHESES_GROUPS, HYPOTHESES_PROMPT
+
+    assert '"source"' in HYPOTHESES_PROMPT
+    assert '"identifier"' in HYPOTHESES_PROMPT and '"title"' in HYPOTHESES_PROMPT
+    assert "issues" in HYPOTHESES_GROUPS[0]
 
 
 def test_a_lookup_returns_the_closest_names_not_the_most_mentioned():
@@ -77,10 +81,8 @@ def test_a_lookup_returns_the_closest_names_not_the_most_mentioned():
     the most-mentioned entity containing a short key is rarely the one
     meant. Containment filters, trigram similarity ranks, mentions only
     break ties — in both resolvers."""
-    for fn in (rf._entities_matching_sql, rf._resolve_value_probes):
-        src = inspect.getsource(fn)
-        assert "similarity(e.canonical_form, :key)" in src, fn.__name__
-    assert "ORDER BY closeness DESC, docs DESC" in inspect.getsource(rf._resolve_value_probes)
+    src = inspect.getsource(rf._entities_matching_sql)
+    assert "similarity(e.canonical_form, :key)" in src
 
 
 def test_a_name_lookup_returns_what_was_named_not_its_neighbourhood():

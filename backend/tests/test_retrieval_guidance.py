@@ -14,11 +14,8 @@ Run from the backend directory:
 
 import pytest
 
-from app.retrieval_first import (
-    _ROUND1_PROMPT,
-    _ROUND2_PROMPT,
-    _playbook_block,
-)
+from app.hypotheses import HYPOTHESES_PROMPT
+from app.retrieval_first import _playbook_block
 
 EVERYWHERE = ("house-retrieval", "Use 2 to 4 terms.", True)
 SCOPED = ("one-class-conventions", "Numbering for one class.", False)
@@ -58,20 +55,18 @@ def test_several_playbooks_are_separated():
     assert "Use 2 to 4 terms." in block and "Second one." in block
 
 
-@pytest.mark.parametrize("prompt", [_ROUND1_PROMPT, _ROUND2_PROMPT])
-def test_both_planning_prompts_take_the_guidance(prompt):
-    """Both rounds emit `websearch_queries`, and the guidance is largely about
-    how to write them, so both carry it."""
-    assert "{guidance}" in prompt
+def test_the_hypotheses_prompt_takes_the_guidance():
+    """The guidance says how this collection cites its sources, which is
+    what the prompt asks the planner to write for each rule."""
+    assert "{guidance}" in HYPOTHESES_PROMPT
 
 
-def test_both_prompts_still_format_with_every_slot_filled():
+def test_the_prompt_still_formats_with_every_slot_filled():
     """A slot added to a prompt without a matching keyword raises KeyError at
     the point of use, which is inside a paid run rather than here."""
-    assert _ROUND1_PROMPT.format(
+    assert HYPOTHESES_PROMPT.format(
         corpus_map="schema", question="q", domain="some-domain ",
         guidance="G")
-    assert _ROUND2_PROMPT.format(matches="m", question="q", guidance="G")
 
 
 def test_a_dossier_only_scope_is_a_restriction_not_the_sentinel():
@@ -101,7 +96,7 @@ def test_the_candidate_list_the_planner_sees_is_ordered():
 
     Measured on two runs of one question at temperature zero: four shared
     anchors out of ten and twelve, retrieved sets overlapping by half, the
-    divergence starting at rank 10 — and the expert review's findings name
+    divergence starting at rank 10 — and the review's findings name
     documents at ranks 11, 26, 31, 33, 41 and 51.
 
     `retrieve_and_rank` already learned this one stage later; its own comment
@@ -118,12 +113,10 @@ def test_the_candidate_list_the_planner_sees_is_ordered():
         "the name resolver's LIMIT 6 must be ordered, or which six entities a "
         "name resolves to is whatever order the rows arrived in")
 
-    probes = inspect.getsource(rf._resolve_value_probes)
-    assert "ORDER BY closeness DESC, docs DESC, e.id" in probes
+    from app import hypotheses
 
-    plan = inspect.getsource(rf.plan_question)
-    assert '(-x["docs"], x["id"])' in plan, (
-        "the 40 matches shown to the planner must break ties on id")
+    # the rules run in the order the samples produced them, one copy each
+    assert "if key and key not in seen" in inspect.getsource(hypotheses.union_rules)
 
 
 def test_equal_counts_sort_by_id_not_by_arrival():

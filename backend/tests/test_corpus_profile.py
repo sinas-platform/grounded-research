@@ -231,10 +231,10 @@ def test_a_plan_made_without_the_profile_says_so_on_the_run():
     corpus."""
     import inspect
 
-    from app import retrieval_first
+    from app import hypotheses
     from app.services import query_runner
 
-    plan_src = inspect.getsource(retrieval_first.plan_question)
+    plan_src = inspect.getsource(hypotheses.plan)
     assert '"warnings"' in plan_src and "map_problem" in plan_src
     run_src = inspect.getsource(query_runner)
     assert 'await _tele(run_id, "retrieval", warnings=' in run_src

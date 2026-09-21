@@ -144,5 +144,5 @@ async def test_the_re_read_asks_the_document_reader_not_the_judge():
             return '{"found": false, "line_from": 0, "line_to": 0, "quote": ""}'
 
     await _ask_document(_Sinas(), reread_prompt(PARTS[1], CITED[0]),
-                        CITED[0].filename)
+                        CITED[0].filename, CITED[0].text)
     assert asked == ["sgr/passage-extractor-agent"]

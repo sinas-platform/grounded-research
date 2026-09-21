@@ -132,8 +132,8 @@ _BARE_SERIAL = re.compile(r'"(\d{6,}\.md)"')
 # either side were `[A-Z][A-Za-z.]+`, which cannot match a capital carrying an
 # accent: `Générale` matches `G` and then stops. So a French caption passed
 # this check without a word, in the one place a capitalised name is certainly
-# a party. A check that reads only one language is not a check on a corpus
-# that is a third French, and the cost of this one lands outside the run,
+# a party. A check that reads only one language is not a check on a collection
+# that is not all in one language, and the cost of this one lands outside the run,
 # where a leak is public and permanent.
 #
 # `c/`, `c.` and `contre` are how the same relation is written in French. The
@@ -415,7 +415,7 @@ def test_the_checks_can_see_an_offender():
     assert _CAPTION.search("Strintzis Lines Shipping v. Commission")
     assert not _CAPTION.search("the tribunal held in Case C-606/18")
     # The shape that passed before: an accented capital, and a marker that is
-    # not `v`. Ten French benchmark questions are the reason this is here.
+    # not `v`. Captions in another language are the reason this is here.
     assert _CAPTION.search("Société Ashgrove c/ Autorité")
     assert _CAPTION.search("Établissements Dunmore c. Kestrel")
     assert _CAPTION.search("Bellhaven contre Northmoor")

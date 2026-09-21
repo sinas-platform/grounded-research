@@ -217,6 +217,30 @@ class CorpusProfile(Base):
     )
 
 
+class Proposition(Base):
+    """A statement a document establishes, applies or decides: one sentence
+    in the collection's working language, with the line span of the version
+    it rests on. Extracted for documents whose class declares
+    `propositions`; the retrieval stage matches a question's hypotheses
+    against these. Keyed on the version, because a line span is a fact
+    about one text. See `services/propositions`.
+    """
+
+    __tablename__ = "proposition"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document.id", ondelete="CASCADE"), nullable=False, index=True)
+    document_version_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("document_version.id", ondelete="CASCADE"), nullable=False, index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    line_from: Mapped[int | None] = mapped_column(Integer)
+    line_to: Mapped[int | None] = mapped_column(Integer)
+    language: Mapped[str | None] = mapped_column(String(16))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
 class EntityStats(Base):
     """What the corpus holds of one entity: how many documents mention it,
     and whether anything other than a blind string match ever recognised it.

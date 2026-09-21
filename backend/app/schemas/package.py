@@ -186,6 +186,12 @@ class PackageDocumentClassEntry(_Strict):
     # number 1,2,3 or 10,20,30 and leave room to insert a class between two
     # others without renumbering its corpus.
     standing: int | None = Field(default=None, ge=1)
+    # Whether documents of this class carry propositions — the statements
+    # they establish, apply or decide — that ingestion extracts and retrieval
+    # matches a question's hypotheses against. False by default: which
+    # classes hold the propositions a researcher looks for is knowledge about
+    # a collection, and an undeclared class is left alone.
+    propositions: bool = False
     attribution_cues: list[str] = Field(default_factory=list)
     # Properties whose value a document of this class states about itself, in
     # its front matter. Each entry is {key, property, on_conflict}: which

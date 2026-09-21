@@ -326,6 +326,7 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 "authority_label": dc.authority_label,
                 "naming_required": dc.naming_required,
                 "standing": dc.standing,
+                "propositions": dc.propositions,
                 "declared_properties": [d.model_dump()
                                         for d in dc.declared_properties] or None,
                 "filename_rules": [r.model_dump()
@@ -899,6 +900,7 @@ async def export_package(
                     # when pasted over the original — and an unranked class is
                     # inert, so the rule would go quiet with nothing saying so.
                     "standing": dc.standing,
+                    "propositions": bool(dc.propositions),
                     "attribution_cues": list(dc.attribution_cues or []),
                     # Both of these are declarations the deployment wrote and
                     # the import stored; an export that drops one hands back a

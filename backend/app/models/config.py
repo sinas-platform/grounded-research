@@ -50,6 +50,13 @@ class DocumentClass(Base, TimestampMixin):
     #: per DOCUMENT by walking the graph. This is declared per CLASS, is the
     #: same for every document of it, and needs no graph.
     standing: Mapped[int | None] = mapped_column(Integer)
+    #: Whether documents of this class carry propositions — statements the
+    #: document establishes, applies or decides — that ingestion extracts and
+    #: retrieval matches hypotheses against. The deployment's declaration,
+    #: like the three above; false by default so an undeclared class is left
+    #: alone. See `services/propositions`.
+    propositions: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false")
     #: Which front-matter keys this class reads directly, as a list of
     #: {key, property, on_conflict}. Empty or null means every property is
     #: extracted, which is what every class did before this existed.

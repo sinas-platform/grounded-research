@@ -34,6 +34,32 @@ _ON_CONFLICT = ("replace", "fill_only")
 _DEFAULT_ON_CONFLICT = "fill_only"
 
 
+def stored_text(value) -> str | None:
+    """A stored property value as the text a header value is compared with,
+    or None when it is not one value. Pure.
+
+    Values are written as `{"_": x}` so a scalar or a list fits the JSONB
+    column, and every row on the corpus this was measured on has that shape.
+    The dict path is therefore left exactly as it was: changing how an
+    existing row reads would change what the header replaces.
+
+    What it adds is an answer for the shapes the column also accepts and the
+    old reader could not take. `(value or {}).get("_")` on a bare string,
+    number or list raised `AttributeError`, and the per-document isolation
+    around ingestion turned that into a failed document with nothing to say
+    why. A bare scalar is its own value. A bare list is not one value, so it
+    is not compared and is never overwritten: the caller leaves it alone and
+    reports it.
+    """
+    if isinstance(value, dict):
+        return str(value.get("_", ""))
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return None
+    return str(value)
+
+
 @dataclass(frozen=True)
 class Existing:
     """What is already stored for one property."""

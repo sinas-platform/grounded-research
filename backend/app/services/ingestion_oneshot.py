@@ -500,7 +500,7 @@ async def _write_declared_properties(
     is the part that reads and writes rows.
     """
     from app.services.declared_properties import (
-        Existing, plan_declared_values, replacement_reason)
+        Existing, plan_declared_values, replacement_reason, stored_text)
     from app.services.front_matter import split_front_matter
 
     if not class_id or not class_props:
@@ -520,18 +520,33 @@ async def _write_declared_properties(
             PropertyValue.document_id == document_id))).scalars().all()
     by_prop_id = {r.property_id: r for r in rows}
     existing = {}
+    unreadable: list[str] = []
     for name, p in by_name.items():
         r = by_prop_id.get(p["id"])
-        if r is not None:
-            existing[name] = Existing(
-                value=str((r.value or {}).get("_", "")),
-                method=r.method, locked=bool(r.locked))
+        if r is None:
+            continue
+        text = stored_text(r.value)
+        if text is None:
+            unreadable.append(name)
+            continue
+        existing[name] = Existing(
+            value=text, method=r.method, locked=bool(r.locked))
+    # A value that is not one value is neither compared nor replaced. Leaving
+    # it out of `existing` alone would read as "nothing stored" and the write
+    # below would overwrite the row, so its mapping entry goes too.
+    planned = [m for m in mapping if m.get("property") not in unreadable]
 
-    plan = plan_declared_values(header, mapping, existing)
+    plan = plan_declared_values(header, planned, existing)
     today = datetime.now(timezone.utc).date().isoformat()
+    unknown: list[str] = []
     for w in plan.write:
         p = by_name.get(w.property)
         if p is None:
+            # Refused at import since the schema checks declared targets, so
+            # reaching here means the class lost the property after import.
+            # Recorded, because a declaration that does nothing and says
+            # nothing is indistinguishable from one that worked.
+            unknown.append(w.property)
             continue
         if not write:
             continue
@@ -549,7 +564,12 @@ async def _write_declared_properties(
                 value=wrap_property_value(w.value),
                 method=w.method, confidence=w.confidence,
                 reason=replacement_reason(today, w.replaces)))
-    return {"mapped": len(mapping), **plan.as_dict()}
+    report = {"mapped": len(mapping), **plan.as_dict()}
+    if unreadable:
+        report["left_unreadable"] = unreadable
+    if unknown:
+        report["unknown_targets"] = unknown
+    return report
 
 async def oneshot_ingest_document(
     session: AsyncSession,

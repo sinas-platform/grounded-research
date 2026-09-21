@@ -150,3 +150,133 @@ def test_an_unknown_on_conflict_is_refused_rather_than_guessed():
         plan_declared_values(HEADER, [{"key": "decision_date",
                                        "property": "decision_date",
                                        "on_conflict": "overwrite"}], {})
+
+
+# -- reading what is already stored ------------------------------------------
+#
+# Values are written as {"_": x}. The reader used to be
+# `str((value or {}).get("_", ""))`, which raised on any value that is not a
+# dict, and the per-document isolation around ingestion turned that into a
+# failed document with nothing to say why.
+
+from app.services.declared_properties import stored_text  # noqa: E402
+
+
+def _old_reader(value):
+    return str((value or {}).get("_", ""))
+
+
+@pytest.mark.parametrize("value", [
+    {"_": "2019-01-01"}, {"_": 1973}, {"_": ["a", "b"]}, {"_": None}, {},
+])
+def test_every_stored_shape_reads_exactly_as_it_did(value):
+    """Every row on the measured corpus is a dict. Changing how one reads
+    would change what the header replaces, so the dict path is pinned to the
+    old reader, quirks included."""
+    assert stored_text(value) == _old_reader(value)
+
+
+def test_a_bare_value_no_longer_fails_the_document():
+    with pytest.raises(AttributeError):
+        _old_reader("2019-01-01")
+    assert stored_text("2019-01-01") == "2019-01-01"
+    assert stored_text(1973) == "1973"
+    assert stored_text(None) == ""
+
+
+def test_a_bare_list_is_not_one_value():
+    """Not compared, so never overwritten by a single header value."""
+    assert stored_text(["a", "b"]) is None
+
+
+# -- the path end to end, against a stub session ------------------------------
+
+import asyncio  # noqa: E402
+import uuid  # noqa: E402
+from types import SimpleNamespace  # noqa: E402
+
+from app.services import ingestion_oneshot as io  # noqa: E402
+
+HANDED, NOTE = uuid.uuid4(), uuid.uuid4()
+CLASS_PROPS = [{"name": "handed_down", "id": HANDED}, {"name": "note", "id": NOTE}]
+CONTENT = "---\ndate: 2020-05-01\nnote: from the header\nx: y\n---\nBody.\n"
+
+
+class _Session:
+    """First execute: the class's mapping. Second: the document's rows."""
+
+    def __init__(self, mapping, rows):
+        self._results = [mapping, rows]
+        self.added = []
+
+    async def execute(self, _stmt):
+        payload = self._results.pop(0)
+        return SimpleNamespace(
+            scalar_one_or_none=lambda: payload,
+            scalars=lambda: SimpleNamespace(all=lambda: payload))
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+def _row(pid, value):
+    return SimpleNamespace(property_id=pid, value=value, method="auto",
+                           locked=False, confidence=0.5,
+                           document_version_id=None, reason=None)
+
+
+def _run(mapping, rows):
+    session = _Session(mapping, rows)
+    report = asyncio.run(io._write_declared_properties(
+        session, document_id=uuid.uuid4(), version_id=uuid.uuid4(),
+        class_id=uuid.uuid4(), content=CONTENT, class_props=CLASS_PROPS,
+        write=True))
+    return report, session
+
+
+REPLACE = [{"key": "date", "property": "handed_down", "on_conflict": "replace"},
+           {"key": "note", "property": "note", "on_conflict": "replace"}]
+
+
+def test_a_bare_stored_value_is_compared_and_replaced_like_any_other():
+    handed = _row(HANDED, "2019-01-01")
+    report, _ = _run(REPLACE, [handed])
+    assert handed.value == {"_": "2020-05-01"}
+    assert report.get("replaced") == 1
+
+
+def test_a_stored_list_is_left_alone_and_reported():
+    """Leaving it out of `existing` alone would read as nothing stored, and
+    the row would be overwritten by the header's single value."""
+    note = _row(NOTE, ["a", "b"])
+    report, session = _run(REPLACE, [note])
+    assert note.value == ["a", "b"]
+    assert report["left_unreadable"] == ["note"]
+    assert not any(getattr(a, "property_id", None) == NOTE for a in session.added)
+
+
+def test_a_target_the_class_no_longer_has_is_recorded():
+    """The schema refuses this at import. It can still arise if a class loses
+    a property afterwards, and then it must say so."""
+    mapping = [{"key": "x", "property": "gone", "on_conflict": "replace"}]
+    report, _ = _run(mapping, [])
+    assert report["unknown_targets"] == ["gone"]
+
+
+# -- the declaration is checked where it is written ---------------------------
+
+def _class(**kw):
+    from app.schemas.package import PackageDocumentClassEntry
+    base = {"name": "A Class", "properties": [{"name": "handed_down"}]}
+    return PackageDocumentClassEntry(**{**base, **kw})
+
+
+def test_a_header_value_may_map_to_a_property_the_class_declares():
+    c = _class(declared_properties=[{"key": "date", "property": "handed_down"}])
+    assert c.declared_properties[0].property == "handed_down"
+
+
+def test_a_header_value_may_not_map_to_a_property_the_class_does_not_declare():
+    with pytest.raises(Exception) as err:
+        _class(declared_properties=[{"key": "date", "property": "handed_dwon"}])
+    assert "does not declare" in str(err.value)

@@ -281,9 +281,9 @@ def _name_words(text: str) -> set[str]:
     module had the fold and this one did not, and the two ran in the same
     gate about sixty lines apart.
 
-    The length threshold is applied AFTER folding, so a four-letter word that
-    carries an accent still counts as one: `état` folds to `etat` rather than
-    to a three-letter fragment.
+    The fold comes before the words are compared, so `état` in a claim and
+    `Etat` in a name are the same word; the length threshold was never the
+    issue, `NAME_WORD` already reads an accented letter as a letter.
     """
     return {w.lower() for w in NAME_WORD.findall(unaccented(text or ""))}
 

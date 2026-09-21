@@ -708,9 +708,8 @@ def test_a_name_spelled_without_its_accents_is_the_same_name():
 
 
 def test_a_four_letter_word_carrying_an_accent_still_counts_as_a_word():
-    """The length threshold is applied after folding. Applied before it,
-    `état` is a three-letter fragment and drops below the four the check
-    needs, which removes the word rather than matching it."""
+    """`État` in a claim and `Etat` in a name are one word once folded;
+    without the fold they are two, and the claim reads as naming nothing."""
     from app.services.claim_naming import carries_name, distinctive_words
 
     names = ["Etat Holdings", "Bellhaven Holdings", "Carwood Holdings",

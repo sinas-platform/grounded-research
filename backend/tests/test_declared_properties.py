@@ -280,3 +280,101 @@ def test_a_header_value_may_not_map_to_a_property_the_class_does_not_declare():
     with pytest.raises(Exception) as err:
         _class(declared_properties=[{"key": "date", "property": "handed_dwon"}])
     assert "does not declare" in str(err.value)
+
+
+# -- review findings on #192 ---------------------------------------------------
+
+from app.services.declared_properties import read_held, unknown_targets  # noqa: E402
+
+
+def test_an_unknown_target_is_seen_from_the_mapping_not_the_plan():
+    """A plan names a property only when the document states that key, so a
+    stale declaration on a document without it was never reported."""
+    mapping = [{"key": "absent", "property": "gone"}]
+    assert unknown_targets(mapping, {"handed_down": 1}) == ["gone"]
+    report, _ = _run(mapping, [])
+    assert report["unknown_targets"] == ["gone"]
+
+
+def test_an_unknown_target_is_reported_even_without_front_matter():
+    session = _Session([{"key": "x", "property": "gone"}], [])
+    report = asyncio.run(io._write_declared_properties(
+        session, document_id=uuid.uuid4(), version_id=uuid.uuid4(),
+        class_id=uuid.uuid4(), content="No header here.", class_props=CLASS_PROPS,
+        write=True))
+    assert report["no_front_matter"] is True
+    assert report["unknown_targets"] == ["gone"]
+
+
+def test_a_list_on_a_property_the_mapping_does_not_name_is_not_reported():
+    """A list on an unrelated property is a legitimate value. Reporting it
+    sends someone to investigate a row this path never meant to touch."""
+    only_date = [{"key": "date", "property": "handed_down", "on_conflict": "replace"}]
+    note = _row(NOTE, ["a", "b"])
+    report, _ = _run(only_date, [_row(HANDED, {"_": "2019-01-01"}), note])
+    assert "left_unreadable" not in report
+    assert note.value == ["a", "b"]
+    held = read_held(only_date, {"handed_down": HANDED, "note": NOTE},
+                     {HANDED: _row(HANDED, {"_": "x"}), NOTE: note})
+    assert held.unreadable == [] and "note" not in held.existing
+
+
+# -- the backfill script, which carried a copy of the reader -------------------
+
+import importlib.util  # noqa: E402
+import pathlib  # noqa: E402
+from contextlib import asynccontextmanager  # noqa: E402
+
+
+def _load_script():
+    path = pathlib.Path(__file__).resolve().parents[1] / "scripts" / "apply_declared_properties.py"
+    spec = importlib.util.spec_from_file_location("apply_declared_properties", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class _ScriptSession:
+    """Answers the script's queries in the order it makes them."""
+
+    def __init__(self, cls, props, docs, rows):
+        self._queue = [("first", cls), ("all", props), ("rows", docs), ("all", rows)]
+        self.added = []
+        self.committed = False
+
+    async def execute(self, _stmt):
+        kind, payload = self._queue.pop(0)
+        return SimpleNamespace(
+            scalars=lambda: SimpleNamespace(first=lambda: payload, all=lambda: payload),
+            all=lambda: payload)
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.committed = True
+
+
+def test_the_backfill_no_longer_aborts_on_the_values_ingestion_now_handles(monkeypatch):
+    """The finding: the script still did `.get()` on every stored value, so a
+    run over the same bare values would raise and stop."""
+    mod = _load_script()
+    mapping = REPLACE + [{"key": "x", "property": "gone"}]
+    cls = SimpleNamespace(id=uuid.uuid4(), declared_properties=mapping)
+    props = [SimpleNamespace(name="handed_down", id=HANDED),
+             SimpleNamespace(name="note", id=NOTE)]
+    handed, note = _row(HANDED, "2019-01-01"), _row(NOTE, ["a", "b"])
+    session = _ScriptSession(cls, props, [(uuid.uuid4(), CONTENT, uuid.uuid4())],
+                             [handed, note])
+
+    @asynccontextmanager
+    async def _local():
+        yield session
+
+    monkeypatch.setattr(mod, "AsyncSessionLocal", _local)
+    totals = asyncio.run(mod.run("A Class", apply=True, limit=None))
+    assert handed.value == {"_": "2020-05-01"}, "a bare scalar is compared and replaced"
+    assert note.value == ["a", "b"], "a list is left alone"
+    assert totals["left_unreadable"] == 1
+    assert totals["unknown_targets"] == ["gone"]
+    assert session.committed

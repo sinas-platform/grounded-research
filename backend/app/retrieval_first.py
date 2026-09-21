@@ -117,62 +117,6 @@ async def _retrieval_guidance() -> tuple[str, list[str]]:
     ])
 
 
-_ROUND1_PROMPT = """You are planning document retrieval for a {domain}research
-question against a corpus with this schema:
-
-{corpus_map}
-{guidance}
-Propose retrieval probes grounded in the schema. Reply ONLY JSON:
-{{"named_entities": ["<entities NAMED in the question>"],
-  "value_probes": [{{"type": "<entity type from the schema>", "match": "<substring to find real values, e.g. 'air transp'>"}}],
-  "known_sources": [{{"identifier": "<how this collection cites the source, exactly, or empty if you do not know it>", "title": "<the source's name or title>"}}],
-  "websearch_queries": ["<3-10 SHORT queries: one quoted phrase or 2-4 words each; several small queries beat one long one; one per concept, in each language the corpus uses>"]}}
-
-QUESTION: {question}"""
-
-_ROUND2_PROMPT = """Your probes were resolved against the real corpus. Matched
-values (with document counts):
-
-{matches}
-{guidance}
-Finalize the retrieval plan. Keep only anchors that serve the question;
-drop noise; add websearch queries for gaps the matches revealed.
-Reply ONLY JSON:
-{{"anchor_entity_ids": ["<ids from the matches to anchor on>"],
-  "websearch_queries": ["<final SHORT queries: one quoted phrase or 2-4 words each>"],
-  "class_boost": ["<document classes from the schema to rank up, or empty>"]}}
-
-QUESTION: {question}"""
-
-
-# What each planning round must come back having answered, as groups: the
-# reply must carry at least one field from every group.
-#
-# Round 1's four fields are not four of a kind. Three of them feed the graph
-# channel — they resolve to entity matches, which become the anchors retrieval
-# traverses from — and the fourth feeds the text channel. Losing one of the
-# three costs nothing, because the other two still produce matches and the
-# anchor list is topped up deterministically from the strongest of them.
-# Losing all three leaves no matches at all, so there are no anchors and no
-# fallback to top up from, and the graph channel is gone while the reply still
-# looks answered. That is the case worth failing on, and it is why this is a
-# group and not four separate demands.
-#
-# Round 2 stays a single group. Its anchors survive an omission through the
-# same deterministic top-up, and its queries are unioned with round 1's, so no
-# one field carries a channel alone.
-#
-# Presence is the test, not content. A question naming no entities properly
-# yields an empty `named_entities`, and a question needing no reranking an
-# empty `class_boost`; both are answers. Demanding every field would turn a
-# legitimate plan for an abstract question into a failed run.
-_ROUND1_GROUPS = (
-    ("value_probes", "named_entities", "known_sources"),
-    ("websearch_queries",),
-)
-_ROUND2_GROUPS = (("anchor_entity_ids", "websearch_queries", "class_boost"),)
-
-
 def _parse(reply: str) -> dict:
     """The planner's reply as JSON, or JSONDecodeError naming what broke."""
     cleaned = (reply or "").strip().strip("`").removeprefix("json").strip()
@@ -379,41 +323,6 @@ async def _build_corpus_map_uncached() -> tuple[str, str | None]:
     return "\n".join(lines), problem
 
 
-async def _resolve_value_probes(probes: list[dict]) -> list[dict]:
-    """Probe -> real values with document counts. Returned to the planner."""
-    from app.db import AsyncSessionLocal
-
-    out: list[dict] = []
-    async with AsyncSessionLocal() as s:
-        for pr in probes[:12]:
-            m = str(pr.get("match") or "").strip()
-            tname = str(pr.get("type") or "").strip()
-            if len(m) < 3:
-                continue
-            # `docs` is read off `entity_stats`, not counted, and the cut is
-            # closest name first: see `_entities_matching`.
-            rows = (await s.execute(text("""
-                SELECT e.id, e.canonical_form, t.name,
-                       coalesce(st.documents, 0) AS docs,
-                       similarity(e.canonical_form, :key) AS closeness
-                FROM entity e JOIN entity_type t ON t.id = e.entity_type_id
-                LEFT JOIN entity_stats st ON st.entity_id = e.id
-                WHERE e.merged_into_id IS NULL
-                  AND (:tname = '' OR t.name ILIKE :tname)
-                  AND e.canonical_form ILIKE :pat
-                ORDER BY closeness DESC, docs DESC, e.id LIMIT 12"""),
-                {"tname": tname, "pat": f"%{m}%", "key": m})).all()
-            for eid, cf, tn, docs, _closeness in rows:
-                out.append({"id": str(eid), "value": cf, "type": tn,
-                            "docs": int(docs)})
-    return out
-
-
-# The tiers that find a string without anything having recognised the
-# entity. Every other tier — a model that read the document, an identifier
-# match, a curated alias — counts as recognition. For an entity marked as
-# a generic term only recognised mentions mean anything: the word "thus"
-# occurs everywhere, THUS plc was *recognised* twice.
 BLIND_LINK_METHODS = ("gazetteer", "legacy")
 
 
@@ -447,48 +356,6 @@ async def _annotate_matches(matches: dict[str, dict]) -> dict[str, dict]:
         m.setdefault("generic", False)
         m.setdefault("recognised", False)
     return matches
-
-
-def _pick_anchors(model_picks: list[str], matches: dict[str, dict]) -> list[str]:
-    """The plan's anchors: the model's picks, then the strongest matches.
-
-    The determinism union used to take the top matches BY DOCUMENT COUNT —
-    which, for an entity marked as a generic term, selects it precisely for
-    being junk: the word's ubiquity was read as the name's strength. A
-    generic entity is never force-picked. The model may still pick one
-    deliberately (its match line says what it is), because a question
-    genuinely about that entity is the one case the mark must not foreclose.
-    """
-    anchors = [a for a in model_picks if a in matches]
-    # Never force-picked on no recognition at all, and ties broken on id.
-    # `docs` counts every mention including the gazetteer's blind string
-    # matches, so an entity recognised NOWHERE could be force-picked for
-    # being written everywhere; `recognised` says whether anything other
-    # than a blind match ever found it, and is read for every match already.
-    # Ranking still goes by `docs` — strongest means most present — and the
-    # id tie-break makes the cut the same every run rather than however the
-    # resolver's rows happened to arrive.
-    #
-    # Measured: an article's headline was registered as an entity of a
-    # substantive type, carried 470 documents and not one validated mention. Two runs of one
-    # question shared four anchors out of ten and twelve, and their retrieved
-    # sets overlapped by half, with the divergence starting at rank 10 —
-    # which is the band the expert review's findings live in.
-    #
-    # Being blind-only is not itself disqualifying: half the collection's
-    # entities have no validated mention, most of them in a handful of
-    # documents where they do no harm. What harms is the combination this
-    # sort selected for — never recognised, yet apparently everywhere.
-    # `recognised` is a mark the maintenance pass keeps on the entity, read
-    # for every match already; nothing here is new except reading it.
-    strongest = sorted(
-        (m for m in matches.values()
-         if not m.get("generic") and m.get("recognised")),
-        key=lambda x: (-x["docs"], x["id"]))
-    for m in strongest[:6]:
-        if m["id"] not in anchors:
-            anchors.append(m["id"])
-    return anchors
 
 
 async def _resolve_names(names: list) -> list[dict]:
@@ -671,74 +538,11 @@ async def _entities_matching_sql(s, n: str, name_filter: str,
 async def plan_question(
     question: str, effort: str = "medium", run_id: uuid.UUID | None = None
 ) -> dict:
-    from app.services.query_runner import _Sinas
+    """The plan is hypotheses: see `app.hypotheses`. Kept here as the name
+    the pipeline calls and stored results replay."""
+    from app import hypotheses
 
-    # Bound to the run so the two planning invokes below land in RunLLMCall.
-    # Unbound, `record_llm_call` drops them, and their spend is invisible to
-    # both `_run_cost_usd` and the cost cap that reads it.
-    sinas = _Sinas(run_id=run_id)
-    corpus_map, map_problem = await build_corpus_map()
-    guidance, guidance_skipped = await _retrieval_guidance()
-    r1 = await _invoke_json(sinas, PLAN_AGENT, _ROUND1_PROMPT.format(
-        corpus_map=corpus_map, question=question, domain=_domain_prefix(),
-        guidance=guidance),
-        _ROUND1_GROUPS, run_id, "round 1")
-    probe_matches = await _resolve_value_probes(r1.get("value_probes") or [])
-    name_matches = await _resolve_names(
-        (r1.get("named_entities") or []) + (r1.get("known_sources") or []))
-    all_matches = await _annotate_matches(
-        {m["id"]: m for m in probe_matches + name_matches})
-    match_lines = "\n".join(
-        f"- id={m['id']} [{m['type']}] {m['value']!r} ({m['docs']} docs)"
-        + (" — GENERIC TERM: matches the word, almost never the thing;"
-           " anchor only if the question is really about this entity"
-           if m.get("generic") else "")
-        for m in sorted(all_matches.values(),
-                        key=lambda x: (-x["docs"], x["id"]))[:40]
-    ) or "(no matches — rely on websearch queries)"
-    r2 = await _invoke_json(sinas, PLAN_AGENT, _ROUND2_PROMPT.format(
-        matches=match_lines, question=question, guidance=guidance),
-        _ROUND2_GROUPS, run_id, "round 2")
-    # determinism: model's picks unioned with the strongest matches, and
-    # both rounds' queries kept — reduces run-to-run swing
-    anchors = _pick_anchors(
-        [str(a) for a in (r2.get("anchor_entity_ids") or [])], all_matches)
-    queries = list(dict.fromkeys(
-        [str(q) for q in (r1.get("websearch_queries") or [])]
-        + [str(q) for q in (r2.get("websearch_queries") or [])]))[:14]
-    # A plan with nothing in it is not a plan. Both rounds can answer every
-    # field and still leave nothing to retrieve with, because a field may
-    # legitimately be empty: a question naming no entities yields an empty
-    # `named_entities`, and that is an answer. What is not an answer is every
-    # field empty at once. Retrieval then matches nothing, the briefing is
-    # empty, and the run goes on to publish over no documents; nothing
-    # downstream refuses it.
-    #
-    # Checked here rather than per round, because the rounds combine: round 1
-    # may offer no queries where round 2 does, and either round's matches can
-    # carry the anchors. Only after both is there a plan to judge.
-    if not anchors and not queries:
-        raise ValueError(
-            "planning produced no anchors and no queries: nothing to retrieve "
-            "with"
-        )
-    return {"anchors": anchors,
-            "anchor_names": {a: all_matches[a]["value"] for a in anchors},
-            "queries": queries,
-            "class_boost": [str(c) for c in (r2.get("class_boost") or [])],
-            # Named, not dropped: see `_playbook_block`.
-            "guidance_skipped": guidance_skipped,
-            # What the planner had to do without, in sentences. Stored with
-            # the result and copied onto the run, so a plan made blind says
-            # so where the run is looked at and not only in a log nobody
-            # reads: the profile was empty for the life of one corpus
-            # before anyone noticed.
-            "warnings": [map_problem] if map_problem else [],
-            # The question itself, because retrieval reads it: see the
-            # question channel in `retrieve_and_rank`. Stored with the plan
-            # so a replayed plan retrieves what the run retrieved.
-            "question": question,
-            "effort": effort}
+    return await hypotheses.plan(question, effort=effort, run_id=run_id)
 
 
 #: Shorter than this and a word of the question is `a`, `of`, `v`.
@@ -763,205 +567,11 @@ def question_terms(question: str) -> str:
 
 
 async def retrieve_and_rank(plan: dict, top_n: int = STORE_TOP) -> list[dict]:
-    """Channels: anchor mentions, graph traversal to depth k (effort),
-    websearch text. Every doc accumulates provenance reasons."""
-    from app.db import AsyncSessionLocal
+    """Every hypothesis's channels fused, then the walk: see
+    `app.hypotheses.rank`. Every result document carries why it is there."""
+    from app import hypotheses
 
-    depth = EFFORT_DEPTH.get(plan.get("effort", "medium"), 2)
-    scores: dict[str, float] = defaultdict(float)
-    reasons: dict[str, list[str]] = defaultdict(list)
-    names: dict[str, str] = {}
-
-    async with AsyncSessionLocal() as s:
-        # How common is each anchor? A mention of a widely cited instrument
-        # says almost nothing: a boilerplate reference can sit in most of a
-        # corpus, so an anchor on it pulls in the whole shelf. Review of one
-        # deployment's answers found five instruments on unrelated subjects
-        # ranked into a single answer, each on one boilerplate mention. A
-        # mention of a rarely named entity says a great deal. Weight by
-        # inverse document frequency so aboutness beats boilerplate.
-        total_docs = (await s.execute(
-            text("SELECT count(*) FROM document"))).scalar() or 1
-        # Read off `entity_stats`, not counted here: a plan carries a dozen
-        # anchors and the ubiquitous ones among them cost a scan of the
-        # mention table each. An anchor with no row yet is treated as rare,
-        # which errs towards weighting it — the safe side for a new entity.
-        df_rows = (await s.execute(text("""
-            SELECT entity_id, documents FROM entity_stats
-            WHERE entity_id = ANY(CAST(:eids AS uuid[]))"""),
-            {"eids": list(plan["anchors"])})).all()
-        import math
-        _ln_n = math.log(total_docs + 1)
-        idf = {str(eid): max(0.05, math.log((total_docs + 1) / (df + 1)) / _ln_n)
-               for eid, df in df_rows}
-
-        frontier = set(plan["anchors"])
-        seen_entities = set(frontier)
-        for hop in range(depth):
-            if not frontier:
-                break
-            w_mention = 3.0 / (hop + 1) ** 2
-            w_graph = 2.0 / (hop + 1) ** 2
-            # A generic-marked entity's gazetteer mentions are occurrences
-            # of a word, not sightings of the thing (measured: "Thus" holds
-            # 14,704 blind string matches and 2 context-validated mentions).
-            # For those entities only the validated tiers count, which is
-            # also what makes anchoring one deliberately still work: the
-            # question genuinely about THUS plc gets its two real documents
-            # instead of the shelf that contains the adverb.
-            generic_ids = {str(g) for (g,) in (await s.execute(text("""
-                SELECT id FROM entity WHERE id = ANY(CAST(:eids AS uuid[]))
-                  AND metadata ? 'generic_term'"""),
-                {"eids": list(frontier)})).all()}
-            rows = (await s.execute(text("""
-                SELECT m.document_id, d.filename, m.entity_id, count(*)
-                FROM entity_mention m JOIN document d ON d.id = m.document_id
-                WHERE m.entity_id = ANY(CAST(:eids AS uuid[]))
-                  AND m.status = 'active' AND d.staged IS NOT TRUE
-                  AND ((m.link_method IS NOT NULL
-                        AND NOT (m.link_method = ANY(:blind)))
-                       OR NOT (m.entity_id = ANY(CAST(:generic AS uuid[]))))
-                GROUP BY 1, 2, 3"""),
-                {"eids": list(frontier),
-                 "blind": list(BLIND_LINK_METHODS),
-                 "generic": list(generic_ids)})).all()
-            for did, fn, eid, hits in rows:
-                did = str(did)
-                w = idf.get(str(eid), 1.0)
-                scores[did] += w_mention * min(hits, 10) * w
-                names[did] = fn
-                label = plan["anchor_names"].get(str(eid), str(eid)[:8])
-                reasons[did].append(
-                    f"mentions {label} x{hits}" if hop == 0 else
-                    f"mentions {label} ({hop}-hop) x{hits}")
-            rows = (await s.execute(text("""
-                SELECT r.evidence_document_id, d.filename, count(*)
-                FROM relationship r
-                JOIN document d ON d.id = r.evidence_document_id
-                WHERE (r.source_id = ANY(CAST(:eids AS uuid[]))
-                   OR r.target_id = ANY(CAST(:eids AS uuid[])))
-                  AND d.staged IS NOT TRUE
-                GROUP BY 1, 2"""), {"eids": list(frontier)})).all()
-            for did, fn, hits in rows:
-                did = str(did)
-                scores[did] += w_graph * min(hits, 5)
-                names[did] = fn
-                via = ", ".join(list(plan["anchor_names"].values())[:2])
-                reasons[did].append(
-                    f"relationship evidence ({hop + 1}-hop via {via})")
-            if hop + 1 < depth:
-                # ORDER BY before LIMIT, or the 200 is an arbitrary 200:
-                # a bare LIMIT lets Postgres return whichever rows the plan
-                # reaches first, and that can differ between executions of the
-                # same query. The frontier decides the next hop, so an
-                # arbitrary cut here changes the working set downstream.
-                rows = (await s.execute(text("""
-                    SELECT DISTINCT CASE WHEN r.source_id = ANY(CAST(:eids AS uuid[]))
-                                         THEN r.target_id ELSE r.source_id END AS eid
-                    FROM relationship r
-                    WHERE r.source_id = ANY(CAST(:eids AS uuid[]))
-                       OR r.target_id = ANY(CAST(:eids AS uuid[]))
-                    ORDER BY eid
-                    LIMIT 200"""), {"eids": list(frontier)})).scalars().all()
-                frontier = {str(r) for r in rows} - seen_entities
-                seen_entities |= frontier
-
-        for q in plan["queries"]:
-            if len(q.strip()) < 3:
-                continue
-            rows = (await s.execute(text("""
-                SELECT d.id, d.filename,
-                       ts_rank(dv.content_tsvector,
-                               websearch_to_tsquery('simple', :q)) AS r
-                FROM document d
-                JOIN document_version dv ON dv.id = d.current_version_id
-                WHERE dv.content_tsvector @@ websearch_to_tsquery('simple', :q)
-                  AND d.staged IS NOT TRUE
-                ORDER BY r DESC, d.id LIMIT 60"""), {"q": q})).all()
-            for did, fn, r in rows:
-                did = str(did)
-                scores[did] += 8.0 * float(r) + 0.5
-                names[did] = fn
-                reasons[did].append(f"matched {q!r}")
-
-        # The question channel: the question's own words, ranked by the
-        # index. The only channel whose input is the same on every run of
-        # a question — the anchors and the text queries above are written
-        # by a model and a second run writes them differently — so it is
-        # the floor the rest of retrieval stands on. Measured on 18
-        # September 2026, on its own, one question: the chapter that
-        # decides it at rank 1, the two judgments the expert review had
-        # asked for at 30 and 55, and no two runs of it can differ. Reaches
-        # a document no entity ever recognised, which a sampled 29% of this
-        # collection is; see the reachability note in the same day's
-        # commits.
-        terms = question_terms(str(plan.get("question") or ""))
-        if terms:
-            rows = (await s.execute(text("""
-                SELECT d.id, d.filename,
-                       ts_rank(dv.content_tsvector,
-                               to_tsquery('simple', :terms), 1) AS r
-                FROM document d
-                JOIN document_version dv ON dv.id = d.current_version_id
-                WHERE dv.content_tsvector @@ to_tsquery('simple', :terms)
-                  AND d.staged IS NOT TRUE
-                ORDER BY r DESC, d.id LIMIT 100"""), {"terms": terms})).all()
-            # Scored against the best match, not on the index's own scale:
-            # the document that matches the question's words best counts
-            # as one strong anchor mention (3.0, the mention channel's
-            # hop-0 weight) and the rest in proportion. On the index's
-            # scale, scored like a text query, the channel touched 14 of
-            # 100 documents and moved none — measured on a replayed plan.
-            top = max((float(r) for _, _, r in rows), default=0.0) or 1.0
-            for did, fn, r in rows:
-                did = str(did)
-                scores[did] += 3.0 * float(r) / top
-                names[did] = fn
-                reasons[did].append("matched the question's own words")
-
-        # filename channel: decision docs are named after their cases
-        import re as _re
-        for a in plan["anchors"]:
-            nm = plan["anchor_names"].get(a, "")
-            toks = [t for t in _re.findall(r"[a-z0-9]{4,}", nm.lower())
-                    if t not in ("merger", "inquiry", "decision", "case")][:4]
-            if len(toks) < 2:
-                continue
-            pat = "%" + "%".join(toks[:3]) + "%"
-            rows = (await s.execute(text("""
-                SELECT id, filename FROM document
-                WHERE filename ILIKE :pat AND staged IS NOT TRUE
-                ORDER BY id
-                LIMIT 10"""),
-                {"pat": pat})).all()
-            for did, fn in rows:
-                did = str(did)
-                scores[did] += 12.0
-                names[did] = fn
-                reasons[did].append(f"filename matches {nm!r}")
-
-        if plan.get("class_boost") and scores:
-            rows = (await s.execute(text("""
-                SELECT d.id FROM document d
-                JOIN document_class c ON c.id = d.document_class_id
-                WHERE c.name = ANY(:classes)
-                  AND d.id = ANY(CAST(:dids AS uuid[]))"""),
-                {"classes": plan["class_boost"],
-                 "dids": list(scores.keys())})).scalars().all()
-            for did in rows:
-                scores[str(did)] *= 1.3
-
-    # Tie-break on the document id. Python's sort is stable, so equal scores
-    # kept the order they were inserted in -- which is the order rows came back
-    # from the queries above, and those were not ordered either. The cut at
-    # top_n then made that arbitrary order decide membership, not just
-    # position. The id is meaningless as a ranking but it is the same every
-    # time, which is the whole point.
-    ranked = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))[:top_n]
-    return [{"document_id": did, "filename": names[did],
-             "score": round(sc, 3),
-             "reason": "; ".join(dict.fromkeys(reasons[did]))[:480]}
-            for did, sc in ranked]
+    return await hypotheses.rank(plan, top_n=top_n)
 
 
 async def build_briefing(ranked: list[dict], effort: str) -> list[dict]:

@@ -25,9 +25,16 @@ def _sql_blocks(fn) -> list[str]:
             for m in re.findall(r'text\("""(.*?)"""\)', src, re.S)]
 
 
+def _channels():
+    from app import hypotheses
+
+    return (hypotheses._proposition_words, hypotheses._text_words,
+            hypotheses._summary_words, hypotheses._graph_from, hypotheses._walk)
+
+
 def test_every_limit_has_an_order_to_cut_on():
     offenders = []
-    for block in _sql_blocks(rf.retrieve_and_rank):
+    for block in [b for fn in _channels() for b in _sql_blocks(fn)]:
         if not re.search(r"\bLIMIT\b", block, re.I):
             continue
         if not re.search(r"\bORDER BY\b", block, re.I):
@@ -40,20 +47,22 @@ def test_every_limit_has_an_order_to_cut_on():
 def test_the_order_is_total_where_the_sort_key_can_tie():
     """`ts_rank` ties readily -- several documents can score identically on one
     query -- so ranking on it alone leaves the cut arbitrary among equals."""
-    ranked_by_score = [b for b in _sql_blocks(rf.retrieve_and_rank)
-                       if re.search(r"ORDER BY r DESC", b, re.I)]
-    assert ranked_by_score, "expected the text channel to rank by ts_rank"
+    ranked_by_score = [b for fn in _channels() for b in _sql_blocks(fn)
+                       if re.search(r"ORDER BY (sc|ts_rank\(|sum\()", b, re.I)]
+    assert len(ranked_by_score) >= 4, "expected the word channels and the walk to rank by a score"
     for block in ranked_by_score:
-        assert re.search(r"ORDER BY r DESC,\s*\S+", block, re.I), (
-            "ts_rank alone is not a total order: " + block[:110])
+        assert re.search(r"DESC,\s*(did|d\.id)\b", block, re.I), (
+            "a score alone is not a total order: " + block[:110])
 
 
 def test_the_final_ranking_breaks_ties_on_something_stable():
     """Python's sort is stable, so equal scores kept insertion order -- the
     order rows arrived from the queries above. Cutting at top_n then let that
     decide membership rather than only position."""
-    src = inspect.getsource(rf.retrieve_and_rank)
-    m = re.search(r"sorted\(scores\.items\(\),\s*key=lambda kv:\s*(.+?)\)\[:top_n\]", src)
+    from app import hypotheses
+
+    src = inspect.getsource(hypotheses.rank) + inspect.getsource(hypotheses.rrf)
+    m = re.search(r"sorted\(fused,\s*key=lambda kv:\s*(.+?)\)\[:top_n\]", src)
     assert m, "the final ranking is not where it was"
     key = m.group(1)
     assert "," in key, f"score alone is not a total order: key={key}"

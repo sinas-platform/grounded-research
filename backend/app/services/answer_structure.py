@@ -70,12 +70,27 @@ _SECTION_RANK = {s: i for i, s in enumerate(SECTIONS)}
 #: What a claim DOES in the answer. Six kinds say how the claim stands to
 #: its source — it states a general proposition the source lays down
 #: (`rule`), applies one to the matter at hand (`application`), reports
-#: something that happened or is the case (`fact`), reports how a process ran
-#: (`procedure`), reasons from other claims (`inference`), or answers the
-#: question (`conclusion`) — plus `abstention`, which says the sources do not
-#: answer it. Two more are structural rather than evidential: `test`, a rule
-#: stated as ordered conditions, and `label`, which only says what a source
-#: is.
+#: something that happened or is the case (`fact`), sets out the steps of a
+#: process and who takes them (`procedure`), reasons from other claims
+#: (`inference`), or answers the question (`conclusion`) — plus `abstention`,
+#: which says the sources do not answer it. Two more are structural rather
+#: than evidential: `test`, a rule stated as ordered conditions, and `label`,
+#: which only says what a source is.
+#:
+#: `procedure` covers a process that is still to be run as well as one that
+#: has been. It was worded as a report of how a process ran, which is only
+#: half of what a reader asks for: a review of published answers found them
+#: explaining what the rules are and never what a reader does about it, and a
+#: kind that only describes the past gives such a claim nowhere to sit. The
+#: widening is to the same kind rather than a new one because the steps are
+#: the same steps either way; only the tense differs.
+#:
+#: It does not reach what a source REQUIRES. A requirement laid down in the
+#: abstract is a `rule`, and stays one: `procedure` is the sequence and the
+#: actors, not the obligation. The line matters beyond tidiness, because
+#: `app.services.standing` judges `rule` claims and nothing else, so a
+#: requirement filed as a procedure is a requirement that no longer has to
+#: rest on the best source available.
 #:
 #: These are the ENGINE's words, not a deployment's. The first three used to
 #: be `legal_principle`, `factual` and `procedural`, which made the engine's
@@ -99,7 +114,8 @@ CLAIM_KIND_GLOSS: dict[str, str] = {
     "rule": "a general proposition the source lays down",
     "application": "that proposition applied to the matter at hand",
     "fact": "something the source reports as having happened or being so",
-    "procedure": "how a process ran — who did what, when, before whom",
+    "procedure": "the steps a process takes and who takes them, whether it "
+                 "has run or is still to be run",
     "conclusion": "the answer to the question, or to one part of it",
     "abstention": "that the sources do not answer the question",
     "test": "a rule stated as two or more ordered conditions",

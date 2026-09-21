@@ -39,6 +39,23 @@ import unicodedata
 NAMED_KINDS = ("rule", "test", "application")
 
 
+def unaccented(text: str) -> str:
+    """`text` with its accents removed and nothing else touched. Pure.
+
+    The half of `_fold` that is about identity rather than about punctuation,
+    split out because it is not only this module's problem. A word-level
+    check cannot use `_fold`, which returns one run of characters with the
+    word boundaries gone, and the check next door wrote its own comparison
+    without this step and so read `Générale` and `Generale` as two names.
+
+    Shared rather than copied: two spellings of "are these the same name" is
+    how one of them ends up being the English-only one.
+    """
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", str(text or ""))
+        if not unicodedata.combining(c))
+
+
 def _fold(text: str) -> str:
     """Case, accents and punctuation removed, so a match is about the
     characters that identify and not about how they were typed.
@@ -47,9 +64,7 @@ def _fold(text: str) -> str:
     without them is the same source, and a check that says otherwise is the
     English-only failure in a different costume.
     """
-    lowered = unicodedata.normalize("NFKD", str(text or "").lower())
-    stripped = "".join(c for c in lowered if not unicodedata.combining(c))
-    return re.sub(r"[^a-z0-9]+", "", stripped)
+    return re.sub(r"[^a-z0-9]+", "", unaccented(str(text or "").lower()))
 
 
 def _unpad(folded: str) -> str:

@@ -683,6 +683,42 @@ def test_a_claim_writing_only_the_common_part_has_not():
     assert not carries_name("the Authority decided", names[0], d)
 
 
+def test_a_name_spelled_without_its_accents_is_the_same_name():
+    """The check next door already folded accents and this one did not, and
+    the two run in the same gate about sixty lines apart. A claim writing a
+    party without its accents is writing that party, and reading it as a
+    source the claim never named is the English-only failure in a different
+    costume.
+
+    The distinguishing word here is the accented one and nothing else, so the
+    assertion cannot pass on a token the two spellings happen to share.
+    """
+    from app.services.claim_naming import carries_name, distinctive_words
+
+    stored = ["Étoile Holdings", "Bellhaven Holdings", "Carwood Holdings",
+              "Dunmore Holdings"]
+    d = distinctive_words(stored)
+    assert "holdings" not in d, "the common word must stay common"
+    assert carries_name("the Etoile Holdings decision", stored[0], d)
+
+    plain = ["Etoile Holdings", "Bellhaven Holdings", "Carwood Holdings",
+             "Dunmore Holdings"]
+    dp = distinctive_words(plain)
+    assert carries_name("the Étoile Holdings decision", plain[0], dp)
+
+
+def test_a_four_letter_word_carrying_an_accent_still_counts_as_a_word():
+    """`État` in a claim and `Etat` in a name are one word once folded;
+    without the fold they are two, and the claim reads as naming nothing."""
+    from app.services.claim_naming import carries_name, distinctive_words
+
+    names = ["Etat Holdings", "Bellhaven Holdings", "Carwood Holdings",
+             "Dunmore Holdings"]
+    d = distinctive_words(names)
+    assert "etat" in d
+    assert carries_name("the État Holdings decision", names[0], d)
+
+
 def test_a_document_with_no_name_is_judged_on_its_identifier_alone():
     from app.services.claim_naming import carries_name
 

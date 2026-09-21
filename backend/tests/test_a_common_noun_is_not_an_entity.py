@@ -83,9 +83,14 @@ def test_an_unmeasurable_name_is_left_alone():
 def test_the_threshold_sits_clear_of_both_populations():
     """Above an even split, so a word written both ways is left alone, and
     short of always, so a word that sometimes opens a sentence is still
-    caught. Where it sits between those was set clear of the populations
-    recorded in issue 1474 in the originating deployment's tracker."""
+    caught.
+
+    Where it sits between those was set clear of the populations recorded in
+    issue 1474 in the originating deployment's tracker, and those figures do
+    not live here. So the value is pinned: moving it is a decision that has to
+    be checked against them again, and this failing is what says so."""
     assert 0.5 < LOWERCASE_SHARE < 1.0
+    assert LOWERCASE_SHARE == 0.60
 
 
 def test_a_partial_word_is_not_a_match():

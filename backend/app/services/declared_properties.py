@@ -1,12 +1,16 @@
 """Properties a document states about itself, read rather than asked about.
 
-Front matter is parsed at upload and never consulted again. Ingestion puts the
-document, header included, into a prompt and asks a model to return the
-properties, so a value the document states outright arrives by transcription,
-and a stored value can disagree with the document's own header. A code is
-copied as it stands. A field the model has to decide about, such as which of
-several dates in the body is the document's own, is where it goes wrong, and
-that field is what recency and supersession are decided on.
+A property its class does not declare is asked of a model: ingestion puts the
+document, header included, into a prompt and asks for the properties, so a
+value the document states outright arrives by transcription, and the stored
+value can disagree with the document's own header. A code is copied as it
+stands. A field the model has to decide about, such as which of several dates
+in the body is the document's own, is where it goes wrong, and that field is
+what recency and supersession are decided on.
+
+A key the class declares is read from the header instead. Ingestion does that
+before the model's reply is written (`_write_declared_properties`), and
+`scripts/apply_declared_properties.py` does it for documents already stored.
 
 This module is the deterministic half. It is pure: a header, a mapping and
 what is already stored go in, a plan comes out, and the caller writes it. No

@@ -1,10 +1,10 @@
 """A document that states a property is read, not asked about.
 
-Front matter is parsed at upload and never consulted again. Ingestion puts the
-whole document, header included, into a prompt and asks a model to return the
-properties, so a stored value can disagree with the document's own header. The
-fixtures below have a header saying 1973-03-26 and a stored 1973-02-22, weeks
-out, which is what a date taken from the body looks like.
+A property its class does not declare is asked of a model: ingestion puts the
+whole document, header included, into a prompt and asks for the properties, so
+a stored value can disagree with the document's own header. The fixtures
+below have a header saying 1973-03-26 and a stored 1973-02-22, weeks out,
+which is what a date taken from the body looks like.
 
 A code is copied as it stands. A field the model has to decide about, such as
 which of several dates in the body is the document's own, is where it goes

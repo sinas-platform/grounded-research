@@ -496,8 +496,8 @@ async def _write_declared_properties(
     Split out rather than inlined because the same work has to be available to
     a script: a stored value that disagrees with its header can be in a
     document ingested before its class declared anything, and a fix that only
-    runs on arrival would never reach it. The planning is pure and lives in `declared_properties`; this
-    is the part that reads and writes rows.
+    runs on arrival would never reach it. The planning is pure and lives in
+    `declared_properties`; this is the part that reads and writes rows.
     """
     from app.services.declared_properties import (
         plan_declared_values, read_held, replacement_reason, unknown_targets)

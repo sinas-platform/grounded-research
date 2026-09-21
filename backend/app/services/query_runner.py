@@ -4921,6 +4921,9 @@ async def _gate_answer(
     for src in named:
         fresh[src["filename"]] = src["point"]
         await obligations.record(run_id, src["filename"], src["point"])
+    # A request met by a citation the answer has since lost is not met. Read
+    # before `settled`, or the lost citation keeps it out of this round's feed.
+    await objections.reopen_uncited(run_id, cited, cycle=cycle_no)
     # A request the drafter refused and this gate accepted is over. It is not
     # re-raised and its document is not fed again — enforced here rather than
     # left to the prompt, because a gate that forgets is exactly the failure

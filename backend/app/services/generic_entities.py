@@ -39,6 +39,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import unicodedata
 from datetime import datetime
 
 from sqlalchemy import text
@@ -74,6 +75,17 @@ EXCLUDED_TYPES = frozenset({"Relevant Market"})
 MIN_DOCUMENTS = 350
 
 
+def _composed(s: str) -> str:
+    """`s` in NFC, without rebuilding it when it is already there. Pure.
+
+    The case tier hands the same sample of whole documents to every candidate
+    it judges, so an unconditional normalise recomposed a large string once
+    per candidate. `is_normalized` is a scan and returns on the first
+    character that is not, where the normalise allocates a copy every time.
+    """
+    return s if unicodedata.is_normalized("NFC", s) else unicodedata.normalize("NFC", s)
+
+
 def case_evidence(name: str, text: str) -> dict:
     """How often this name is written lower-case where it appears.
 
@@ -84,10 +96,20 @@ def case_evidence(name: str, text: str) -> dict:
     """
     if not name or not text:
         return {"as_written": 0, "lowercase": 0, "lowercase_share": None}
-    if name == name.lower() and re.match(r"^[a-z]", name):
+    # Composed, both sides, before anything is counted. A combining mark is
+    # not a letter to the boundary below, so in decomposed text `Kestrel`
+    # matches inside `Kestrel` + U+0301 + `e` — the same word the composed
+    # form correctly rejects. Which form arrives depends on where the text
+    # was extracted, which is not a thing a count should vary with.
+    name = _composed(name)
+    text = _composed(text)
+    if written_as_a_word(name):
         return {"as_written": 0, "lowercase": 0, "lowercase_share": 1.0,
                 "note": "the canonical form is itself lower-case"}
-    boundary = r"(?<![A-Za-z]){}(?![A-Za-z])"
+    # A whole word, in any script. `[A-Za-z]` let an accented letter act as a
+    # boundary, so a name could match inside a longer word that continues
+    # with one.
+    boundary = r"(?<![^\W\d_]){}(?![^\W\d_])"
     pat = boundary.format(re.escape(name))
     any_case = len(re.findall(f"(?i){pat}", text))
     lowercase = len(re.findall(boundary.format(re.escape(name.lower())), text))
@@ -134,8 +156,15 @@ def written_as_a_word(name: str) -> bool:
     anywhere it was read, because the canonical form is what the extractor
     saw. Nothing here is a judgement about how often a word appears in one
     case or another, which is why it is the test to mark on first.
+
+    "Lower-case" is asked of the character, not of the ASCII range it might
+    sit in. The test was `re.match(r"^[a-z]", name)`, which `état`, `échange`
+    and `établissement` all fail: lower-case words the check read as names
+    and left as entities. In a collection with more than one language in it, the
+    words it could least judge were a large part of the ones it exists to
+    catch.
     """
-    return bool(name) and name == name.lower() and bool(re.match(r"^[a-z]", name))
+    return bool(name) and name == name.lower() and name[:1].islower()
 
 
 def is_generic(name: str, documents: int, evidence: dict) -> bool:
@@ -184,8 +213,18 @@ _CANDIDATES = text("""
     JOIN entity_type et ON et.id = e.entity_type_id
     WHERE e.merged_into_id IS NULL
       AND e.canonical_form = lower(e.canonical_form)
-      AND e.canonical_form ~ '^[a-z]'
 """)
+#: `AND e.canonical_form ~ '^[a-z]'` used to sit under the line above, and it
+#: made the Python test below unreachable for exactly the words that test was
+#: widened to catch: an accented lower-case word never came back from this
+#: query, so `written_as_a_word` never saw one. The condition was also the
+#: same question asked twice, and asked in the place least able to answer it,
+#: since a POSIX class here depends on the database's locale. `lower()` is
+#: kept because it is the cheap half: what it does to a capital outside
+#: ASCII depends on the database's collation too, and on a C-locale database
+#: it leaves such a capital alone, but that only widens the candidate set,
+#: and deciding what a lower-case first character is belongs to
+#: `written_as_a_word`, which asks the character.
 
 
 async def mark_generic(session, when: str, dry_run: bool = True) -> dict:
@@ -294,6 +333,10 @@ async def mark_generic_by_case(
     ))).all()]
     sample = "\n".join(t for (t,) in (await session.execute(
         _SAMPLE_TEXT, {"n": sample_documents})).all())
+    # Composed once for the whole pass: every candidate below is judged
+    # against this same sample, and composing it per candidate rebuilt a
+    # large string once per entity for no change in the answer.
+    sample = _composed(sample)
     rows = (await session.execute(_TIER2_CANDIDATES)).mappings().all()
     marked = skipped = already = excluded = identified = unmeasured = 0
     examples: list[str] = []
@@ -312,7 +355,7 @@ async def mark_generic_by_case(
         if "generic_term" in meta:
             already += 1
             continue
-        evidence = case_evidence(name, sample)
+        evidence = case_evidence(name, sample)  # sample already composed
         # Every casing counts toward the floor, matching the share's own
         # denominator: 20 lower-case plus 10 all-caps is 30 observations.
         seen = int(evidence.get("any_case") or 0)

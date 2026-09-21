@@ -45,6 +45,13 @@ def test_import_writes_it_and_export_hands_it_back():
     assert '"propositions": bool(dc.propositions)' in src, "the export round-trips it"
 
 
+def test_a_control_character_is_not_text():
+    """A NUL inside one extracted sentence refused a load of 60,000
+    documents at document 4,000; the row is text or it is nothing."""
+    rows = props.normalise([{"holding": "The\x00 tribunal\x07 held.", "lines": [1, 1]}])
+    assert rows[0]["text"] == "The tribunal held."
+
+
 def test_normalisation_keeps_order_and_drops_what_is_not_a_statement():
     rows = props.normalise([
         {"holding": "  The tribunal   held the first thing. ", "lines": [12, 14]},

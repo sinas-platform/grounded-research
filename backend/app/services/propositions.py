@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from collections.abc import Iterable
 
@@ -25,6 +26,10 @@ log = logging.getLogger("sgr.propositions")
 
 #: A proposition longer than this is a paragraph, not a statement.
 MAX_CHARS = 2000
+
+#: Control characters are not text: a NUL inside one extracted sentence
+#: refused the whole load, and nothing a reader wants sits in that range.
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 
 def normalise(items: Iterable[dict]) -> list[dict]:
@@ -38,7 +43,7 @@ def normalise(items: Iterable[dict]) -> list[dict]:
     for item in items:
         if not isinstance(item, dict):
             continue
-        t = " ".join(str(item.get("holding") or item.get("text") or "").split())
+        t = " ".join(_CONTROL.sub("", str(item.get("holding") or item.get("text") or "")).split())
         if not t or len(t) > MAX_CHARS:
             continue
         lines = item.get("lines") or []

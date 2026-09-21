@@ -220,9 +220,11 @@ _CANDIDATES = text("""
 #: query, so `written_as_a_word` never saw one. The condition was also the
 #: same question asked twice, and asked in the place least able to answer it,
 #: since a POSIX class here depends on the database's locale. `lower()` is
-#: kept because it is the cheap half and it is locale-independent for the
-#: comparison being made; deciding what a lower-case first character is
-#: belongs to `written_as_a_word`, which asks the character.
+#: kept because it is the cheap half: what it does to a capital outside
+#: ASCII depends on the database's collation too, and on a C-locale database
+#: it leaves such a capital alone, but that only widens the candidate set,
+#: and deciding what a lower-case first character is belongs to
+#: `written_as_a_word`, which asks the character.
 
 
 async def mark_generic(session, when: str, dry_run: bool = True) -> dict:

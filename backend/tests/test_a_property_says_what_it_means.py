@@ -167,6 +167,7 @@ def test_what_counts_as_not_current_stays_the_engines_own_word():
     WHAT its value must say to mean "not current law" is the contract a class
     writes its values against, and it lives in the engine."""
     assert set(st.STALE_STATUSES) == {"repealed", "superseded"}
+    assert set(st.CURRENT_STATUSES) == {"in_force", "amended"}
     assert st.currency_notes([_row("a.md", how_it_stands="in force")],
                              ROLES) == {}
 
@@ -185,8 +186,42 @@ def test_a_status_the_contract_does_not_know_is_counted_not_swallowed():
             _row("d.md", how_it_stands="repealed")]
     assert st.currency_notes(rows, ROLES) == {"d.md": "repealed"}
     found = st.unrecognised_statuses(rows, ROLES)
-    assert found["by_value"] == {"abroge": 2, "in force": 1}
-    assert found["documents"] == 3
+    assert found["by_value"] == {"abroge": 2}
+    assert found["documents"] == 2
+
+
+def test_a_document_in_force_is_not_an_unknown_status():
+    """The known-good state is part of the contract. Before it was, every
+    document in force was reported as a mapping gap, so the report was mostly
+    noise and a real gap had to be found among it."""
+    rows = [_row(f"{i}.md", how_it_stands=v) for i, v in enumerate(
+        ("in_force", "in force", "In-Force", " IN  FORCE ", "amended",
+         "Amended"))]
+    assert st.currency_notes(rows, ROLES) == {}
+    found = st.unrecognised_statuses(rows, ROLES)
+    assert found["by_value"] == {} and found["documents"] == 0
+
+
+def test_the_engine_does_not_learn_another_languages_words():
+    """Current law in another language is still the deployment's to map. It
+    stays in the report, because a value the contract does not know is
+    exactly what the report exists to show."""
+    found = st.unrecognised_statuses(
+        [_row("a.md", how_it_stands="en vigueur"),
+         _row("b.md", how_it_stands="modifié")], ROLES)
+    assert found["by_value"] == {"en vigueur": 1, "modifié": 1}
+    assert found["documents"] == 2
+
+
+def test_a_status_is_compared_in_the_contracts_spelling():
+    for written in ("in force", "In-Force", "in_force", "  IN   FORCE "):
+        assert st.status_token(written) == "in_force", written
+    assert st.status_token("en vigueur") == "en_vigueur"
+    assert st.status_token(None) == ""
+    # A stale value written with the same looseness still gets its note, in
+    # the contract's word.
+    assert st.currency_notes([_row("a.md", how_it_stands=" Superseded ")],
+                             ROLES) == {"a.md": "superseded"}
 
 
 def test_a_status_declared_many_is_read_as_its_values():

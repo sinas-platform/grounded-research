@@ -1619,9 +1619,8 @@ spec:
           contributes to answering the question. A claim that names a
           decision but draws no conclusion relevant to the question is
           unresponsive.
-        - tension: if some claims point one way and others the opposite
-          way, and no claim reconciles them into an overall position,
-          describe the conflict in one sentence. Otherwise null.
+        - tension: pairs of claims that cannot both be true, each pair
+          named by the two claims' sequence numbers. Empty list if none.
         - unused_sources: uncited documents whose description makes them
           plainly more direct or more authoritative for a point the answer
           already makes than the source cited for that point. Name the

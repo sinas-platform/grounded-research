@@ -199,6 +199,26 @@ async def test_a_cycle_with_nothing_fed_records_an_empty_list(telemetry):
     assert telemetry["validate"]["gate_1"]["system_waived"] == []
 
 
+@pytest.mark.asyncio
+async def test_a_cycle_with_no_tension_records_it_empty(telemetry):
+    """Written every cycle, like every other key here. A cycle after one that
+    found a contradiction must read as having found none, not as unknown."""
+    found = {"raw": [{"claims": [1, 2], "quote": "q"}],
+             "pairs": [{"claims": [1, 2], "quote": "q"}]}
+    await qr._record_gate_cycle("run-1", parts=[], tension=found)
+    await qr._record_gate_cycle("run-1", parts=[])
+    assert telemetry["validate"]["gate_1"]["tension"] == {**found, "old_format": False}
+    assert telemetry["validate"]["gate_2"]["tension"] == {
+        "raw": None, "pairs": [], "old_format": False}
+
+
+@pytest.mark.asyncio
+async def test_a_partial_tension_record_still_carries_every_key(telemetry):
+    await qr._record_gate_cycle("run-1", parts=[], tension={"old_format": True})
+    assert telemetry["validate"]["gate_1"]["tension"] == {
+        "raw": None, "pairs": [], "old_format": True}
+
+
 # -- the amend must not sit behind an early return -----------------------------
 
 

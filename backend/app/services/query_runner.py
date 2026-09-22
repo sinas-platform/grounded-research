@@ -3596,6 +3596,7 @@ async def _record_gate_cycle(
     reread: dict | None = None,
     standing_counts: dict | None = None,
     objection_ledger: list[dict] | None = None,
+    tension: dict | None = None,
     no_claims: bool = False,
 ) -> None:
     """One write per gate cycle, covering every key a cycle can set.
@@ -3697,6 +3698,14 @@ async def _record_gate_cycle(
         # raised, refused, accepted — and a last-write would show only where
         # it stopped.
         "objections": objection_ledger or [],
+        # What the gate returned for tension, as it came, and the pairs that
+        # survived parsing. Raw beside parsed because the parse drops entries,
+        # and a dropped entry is exactly the one worth reading back.
+        # `old_format` marks a reply that was still the one sentence the field
+        # used to be, so the cycles before the package is reinstalled can be
+        # counted.
+        "tension": {"raw": None, "pairs": [], "old_format": False,
+                    **(tension or {})},
         # The cycle that judged nothing because nothing was left to judge.
         # Written every time, false included: a missing key would say the run
         # predates the field, and an absent cycle would say the gate never
@@ -4023,6 +4032,46 @@ def _seq_list(raw) -> list[int]:
         n = int(f)
         if n not in out:
             out.append(n)
+    return out
+
+
+def _tension_pairs(raw, claim_seqs: set) -> list[dict]:
+    """The gate's tension verdict as pairs of claims that exist. Pure.
+
+    An entry counts only if it names exactly two different claims, both in
+    the answer being judged. The reviser is told to read the passages behind
+    both and keep one, which it cannot do for a claim that is not there, so
+    an entry naming a missing claim, or one claim, or three, is dropped
+    rather than guessed at. A sentence with no claim numbers, which is what
+    this field used to be, gives no pairs either: nothing here reads numbers
+    out of prose. The gate passes that sentence on by itself. The raw verdict
+    goes into the cycle record beside the pairs, so a dropped entry can still
+    be read.
+
+    A pair named twice, in either order, is one pair. A bare object is read
+    as a list of one, for the reason `_seq_list` reads a scalar as a list.
+    """
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return []
+    out: list[dict] = []
+    for x in raw:
+        if not isinstance(x, dict):
+            continue
+        # Counted before `_seq_list` reads it, because reading drops what is
+        # not a claim number and folds repeats: [1, 2, 1] and [1, 2, null]
+        # would come out as a clean pair from an entry that named three.
+        claims = x.get("claims")
+        if not isinstance(claims, (list, tuple)) or len(claims) != 2:
+            continue
+        nums = _seq_list(claims)
+        if len(nums) != 2 or not set(nums) <= claim_seqs:
+            continue
+        pair = sorted(nums)
+        if any(p["claims"] == pair for p in out):
+            continue
+        out.append({"claims": pair, "quote": str(x.get("quote") or "").strip()})
     return out
 
 
@@ -4681,10 +4730,12 @@ async def _gate_answer(
            '"gap": "<what is missing, if not covered>"}],')
         + ' "missing": "<if not publishable: what the claims fail to deliver on>",'
         ' "unresponsive": [<sequence numbers of claims that only describe a source without advancing the answer>],'
-        ' "tension": "<ONLY a pair of claims that CANNOT BOTH BE TRUE — quote the '
-'two incompatible propositions verbatim. Claims that restate the same rule, '
-'overlap, emphasise different aspects, or address different procedural '
-'stages are NOT in tension; when in doubt, null. Or null.>",'
+        ' "tension": [{"claims": [<the sequence numbers of two claims that '
+'CANNOT BOTH BE TRUE>], "quote": "<the two incompatible propositions, '
+'verbatim>"}] (only such pairs: claims that restate the same rule, overlap, '
+'emphasise different aspects, or address different procedural stages are NOT '
+'in tension; when in doubt, leave the pair out; an empty list if there are '
+'none),'
         ' "dangling": [<sequence numbers of claims that lean on another claim that is not there: they open with or depend on phrases like "that logic", "applying this reasoning", "the same principle" whose antecedent claim is absent or says something else>],'
         ' "no_conclusion": <true if no claim draws the overall conclusion the question asks for>,'
         ' "concludes_at": <the sequence number of the claim that draws that overall conclusion, or null if no claim does. A claim that states the answer to the question, not one that reports what a single source says.>,'
@@ -4862,10 +4913,29 @@ async def _gate_answer(
             "document; each must state what that source contributes to answering the "
             "question, or be dropped."
         )
-    if data.get("tension"):
+    # At least one of the two is wrong, and the passages are what decide
+    # which. Asking for a claim that reconciles them got one: the reviser
+    # rewrote one side to say a later case had squared the two, and no later
+    # cycle raised the conflict again.
+    raw_tension = data.get("tension")
+    tension = _tension_pairs(raw_tension, set(claims_by_seq))
+    settle = ("Read the passages behind both, keep the side the sources "
+              "support, and narrow or drop the other.")
+    for pair in tension:
+        a, b = pair["claims"]
         correctness.append(
-            "Unreconciled tension: " + str(data["tension"]) + " Add a claim that "
-            "reconciles these positions (grounded in evidence), or revise them."
+            f"Claims {a} and {b} cannot both be true. {settle}"
+            + (f" The conflict: {pair['quote']}" if pair["quote"] else "")
+        )
+    # The one sentence this field used to be. The gate's system prompt asks
+    # for it until the package is next installed, and a contradiction found in
+    # the old shape is still a contradiction, so it goes to the reviser with
+    # the same remedy and no claim numbers rather than being dropped.
+    old_format = isinstance(raw_tension, str) and bool(raw_tension.strip())
+    if old_format:
+        correctness.append(
+            f"Two claims cannot both be true. {settle} "
+            f"The conflict: {raw_tension.strip()}"
         )
     dang = [s for s in (data.get("dangling") or []) if isinstance(s, (int, str))]
     if dang:
@@ -5173,6 +5243,8 @@ async def _gate_answer(
         # two-way loop is when a point turned, and an end-state snapshot cannot
         # answer it.
         objection_ledger=ledger_record,
+        tension={"raw": raw_tension, "pairs": tension,
+                 "old_format": old_format},
         closing=_closing_record(data, claims_by_seq, parts))
     # The three numbers the standing rule has to be able to show, run-scoped
     # and flat beside the per-cycle counts above: how many standing

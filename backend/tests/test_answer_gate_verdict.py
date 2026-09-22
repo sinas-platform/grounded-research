@@ -97,10 +97,7 @@ def gate_env(monkeypatch):
             return SimpleNamespace(
                 scalars=lambda: SimpleNamespace(all=lambda: []),
                 scalar_one_or_none=lambda: None,
-                # (sequence, text, claim id): the gate reads the id so the
-                # closing record can name the claim rather than its position.
-                all=lambda: [(1, "The Commission may inspect business premises.",
-                              _CLAIM_ID)],
+                all=lambda: list(tele["claims"]),
             )
 
     @asynccontextmanager
@@ -119,6 +116,11 @@ def gate_env(monkeypatch):
     # and its storage out, and `tele["objections"]` is what it holds.
     ledger: dict = {}
     tele["objections"] = ledger
+    # (sequence, text, claim id): the gate reads the id so the closing record
+    # can name the claim rather than its position. One claim unless a test
+    # needs two, which the tension tests do: a pair needs both ends.
+    tele["claims"] = [(1, "A harbour pass lets its holder onto the quay.",
+                       _CLAIM_ID)]
 
     async def _load(_run_id):
         return dict(ledger)
@@ -326,12 +328,14 @@ async def test_a_system_waived_debt_does_not_block(gate_env, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_correctness_defects_are_separated_from_quality_issues(gate_env):
+    gate_env["claims"].append(_SECOND_CLAIM)
     _ok, _missing, issues, correctness, _unc, _cause = await _gate(
         json.dumps(
             {
                 "publishable": True,
-                "tension": "claims 1 and 6 state different liability standards",
-                "unused_sources": ["C-89-11P.md: the judgment on the point in claim 3"],
+                "tension": [{"claims": [1, 2],
+                             "quote": "different liability standards"}],
+                "unused_sources": ["harbour-rules.md: the ruling on the point in claim 3"],
             }
         )
     )
@@ -339,6 +343,124 @@ async def test_correctness_defects_are_separated_from_quality_issues(gate_env):
     assert any("Owed source unused" in i for i in issues)
     # quality issues must never appear in the blocking list
     assert not any("Stronger source unused" in c for c in correctness)
+
+
+# -- tension: two claims that cannot both be true ------------------------------
+
+_SECOND_CLAIM = (2, "A harbour pass never lets its holder onto the quay.",
+                 uuid.UUID("22222222-2222-2222-2222-222222222222"))
+
+
+@pytest.mark.asyncio
+async def test_a_contradiction_is_sent_back_to_the_passages(gate_env):
+    """At least one of the two claims is wrong, and the passages decide which.
+    The remedy used to ask for a claim reconciling them, and got one: a
+    rewrite saying a later case had squared the two, after which no cycle
+    raised the conflict again."""
+    gate_env["claims"].append(_SECOND_CLAIM)
+    raw = [{"claims": [2, 1], "quote": "lets its holder on; never lets its holder on"}]
+    _ok, _missing, _issues, correctness, _pts, _cause = await _gate(
+        json.dumps({"publishable": True, "tension": raw}))
+    [line] = [c for c in correctness if "cannot both be true" in c]
+    assert line.startswith("Claims 1 and 2 cannot both be true.")
+    assert "keep the side the sources support" in line
+    assert "narrow or drop the other" in line
+    assert line.endswith("The conflict: lets its holder on; never lets its holder on")
+    assert not any("reconcil" in c.lower() for c in correctness)
+    assert gate_env["validate"]["gate_1"]["tension"] == {
+        "raw": raw,
+        "pairs": [{"claims": [1, 2], "quote": "lets its holder on; never lets its holder on"}],
+        "old_format": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_pair_the_answer_does_not_have_is_recorded_not_raised(gate_env):
+    """Claim 6 is not in this answer. Telling the reviser to read the passages
+    behind it sends it after a claim that is not there, so the entry does not
+    reach the reviser. It stays in the cycle record exactly as it came."""
+    gate_env["claims"].append(_SECOND_CLAIM)
+    raw = [{"claims": [1, 6], "quote": "x"}]
+    _ok, _missing, _issues, correctness, _pts, _cause = await _gate(
+        json.dumps({"publishable": True, "tension": raw}))
+    assert not any("cannot both be true" in c for c in correctness)
+    assert gate_env["validate"]["gate_1"]["tension"] == {
+        "raw": raw, "pairs": [], "old_format": False}
+
+
+@pytest.mark.asyncio
+async def test_a_sentence_in_the_old_format_still_reaches_the_reviser(gate_env):
+    """Until the package is reinstalled the gate's system prompt still asks
+    for one sentence. A contradiction found in that shape is still one, so it
+    gets the same remedy without claim numbers, and the cycle is marked so
+    the window can be counted."""
+    gate_env["claims"].append(_SECOND_CLAIM)
+    raw = "claims 1 and 2 state different liability standards"
+    _ok, _missing, _issues, correctness, _pts, _cause = await _gate(
+        json.dumps({"publishable": True, "tension": raw}))
+    assert [c for c in correctness if "cannot both be true" in c] == [
+        "Two claims cannot both be true. Read the passages behind both, keep "
+        "the side the sources support, and narrow or drop the other. "
+        "The conflict: claims 1 and 2 state different liability standards"]
+    assert gate_env["validate"]["gate_1"]["tension"] == {
+        "raw": raw, "pairs": [], "old_format": True}
+
+
+@pytest.mark.asyncio
+async def test_a_blank_sentence_is_not_a_contradiction(gate_env):
+    await _gate(json.dumps({"publishable": True, "tension": "  "}))
+    assert gate_env["validate"]["gate_1"]["tension"]["old_format"] is False
+
+
+@pytest.mark.asyncio
+async def test_no_tension_is_recorded_as_none(gate_env):
+    await _gate(json.dumps({"publishable": True}))
+    assert gate_env["validate"]["gate_1"]["tension"] == {
+        "raw": None, "pairs": [], "old_format": False}
+
+
+_TWO = {1, 2}
+
+
+def test_a_pair_is_two_different_claims_that_exist():
+    assert qr._tension_pairs([{"claims": [1, 2], "quote": "q"}], _TWO) == [
+        {"claims": [1, 2], "quote": "q"}]
+    # one claim, three that all exist, the same claim twice, a claim not in
+    # the answer, none, and claims that are not a list
+    for claims in ([1], [1, 2, 3], [2, 2], [1, 9], [], 1, "1, 2"):
+        assert qr._tension_pairs([{"claims": claims}], {1, 2, 3}) == [], claims
+
+
+def test_an_entry_that_named_three_is_not_read_as_two():
+    """Reading the numbers drops what is not one and folds repeats, so the
+    count has to come first."""
+    for claims in ([1, 2, 1], [1, 2, None], [1, 2, "x"], [1, 2, True]):
+        assert qr._tension_pairs([{"claims": claims}], _TWO) == [], claims
+
+
+def test_the_same_pair_in_either_order_is_one_pair():
+    raw = [{"claims": [2, 1], "quote": "first"}, {"claims": [1, 2], "quote": "second"}]
+    assert qr._tension_pairs(raw, _TWO) == [{"claims": [1, 2], "quote": "first"}]
+
+
+def test_claim_numbers_are_read_the_way_every_other_list_is():
+    """Strings that are numbers count, as they do in `covered_by`; a bool and
+    a fraction name no claim."""
+    assert qr._tension_pairs([{"claims": ["1", "2"]}], _TWO) == [
+        {"claims": [1, 2], "quote": ""}]
+    assert qr._tension_pairs([{"claims": [True, 2]}], _TWO) == []
+    assert qr._tension_pairs([{"claims": [1.5, 2]}], _TWO) == []
+
+
+def test_a_single_object_is_a_list_of_one():
+    assert qr._tension_pairs({"claims": [1, 2]}, _TWO) == [
+        {"claims": [1, 2], "quote": ""}]
+
+
+def test_prose_and_nothing_give_no_pairs():
+    """The old shape was a sentence. Nothing here reads numbers out of it."""
+    for raw in (None, "", "claims 1 and 2 conflict", 7, [], ["1 and 2"], [[1, 2]]):
+        assert qr._tension_pairs(raw, _TWO) == []
 
 
 @pytest.mark.asyncio

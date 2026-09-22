@@ -7558,6 +7558,22 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
     note (one cheap phrasing call, in the question's language) over the top
     of the stored retrieval. The note is explicitly NOT an answer; validated
     claims are not included — sources with reasons only."""
+    from app.models import Answer
+
+    # What was argued and did not settle, on the same terms as a publish. The
+    # ledger holds it whichever way the run ends, and the publish path was the
+    # only one that wrote it out, so a stalled essential objection that
+    # co-occurred with a failed gate reached nobody. A partial run is where a
+    # reader most needs to know which point stayed contested.
+    #
+    # Read before anything else is written and allowed to fail: this function
+    # is what moves the run out of its in-flight status, and a ledger that
+    # cannot be read must not strand it there.
+    try:
+        notes = await _open_notes(await objections.notes(run_id))
+    except Exception as exc:  # noqa: BLE001
+        _log.warning("run %s: open notes not recorded on partial: %s", run_id, exc)
+        notes = []
     async with AsyncSessionLocal() as session:
         run = await session.get(QueryRun, run_id)
         question, parent_id = run.question, run.parent_result_id
@@ -7565,6 +7581,9 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
             # A partial is as terminal as a publish; reviewers read its
             # claims by number too.
             await _compact_claim_sequences(session, run.answer_id)
+            answer = await session.get(Answer, run.answer_id)
+            if answer is not None:
+                answer.open_notes = notes or None
             await session.commit()
         validated_claims: list[str] = []
         if run.answer_id:
@@ -7689,7 +7708,11 @@ async def _mark_partial(run_id: uuid.UUID, sinas: _Sinas, p: PartialOutcome) -> 
     await _tele(run_id, "partial", cause=p.cause, explanation=p.explanation,
                 message=message.strip()[:2000],
                 validated_claims=len(validated_claims),
-                sources=[fn for fn, _ in sources])
+                sources=[fn for fn, _ in sources],
+                # Written on every partial, empty included, as the publish
+                # path writes it: an empty list says the ledger was read and
+                # held nothing open.
+                open_notes=notes)
     await _mark(run_id, status="partial",
                 error=None, completed_at=_now())
     _log.info("query run %s partial (%s)", run_id, p.cause)

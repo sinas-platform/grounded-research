@@ -1442,13 +1442,25 @@ def _canonical_offsets(text: str) -> tuple[str, list[int]]:
     # where it would only allocate. This runs over full documents.
     drawn = (_rendered_chars(text) if "&" in text
              else [(ch, i) for i, ch in enumerate(text)])
+    # A soft hyphen followed by whitespace is a word broken across a line,
+    # `mainte\xad` then `nance`. Dropping the hyphen and keeping the break
+    # left `mainte nance`, which no copy of the rendered text has, so a quote
+    # reading `maintenance` stopped matching there. The whitespace
+    # after a soft hyphen therefore joins rather than separates. The verifier
+    # joins span lines with a space before this runs, so a line break may
+    # arrive here as a space: both count.
+    joining = False
     for ch, i in drawn:
         rep = _RENDERING_VARIANTS.get(ord(ch), ch)
         if rep is None:            # soft hyphen: nothing draws it, no copy has it
+            if ord(ch) == 0x00AD:
+                joining = True
             continue
         if rep.isspace():
-            pending = True
+            if not joining:
+                pending = True
             continue
+        joining = False
         if pending:
             # A run of whitespace stands as one space, and a leading run as
             # nothing, which is what `.strip()` did.

@@ -165,7 +165,7 @@ def test_a_claims_value_that_is_a_string_is_not_iterated_as_characters():
 
     for shape, expected in [('7', 'int'), ('"abc"', 'str'),
                             ('{"text":"x"}', 'dict'), ('null', 'absent')]:
-        data = json.loads('{"claims": %s}' % shape)
+        data = json.loads(f'{{"claims": {shape}}}')
         claims = data.get("claims")
         bad = "" if isinstance(claims, list) else (
             "absent" if claims is None else type(claims).__name__)

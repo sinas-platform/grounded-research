@@ -96,10 +96,6 @@ class EntityMentionIn(BaseModel):
     confidence: float | None = None
 
 
-class EntityMentionOut(TimestampedOut, EntityMentionIn):
-    pass
-
-
 class EntityMentionWithEntityOut(TimestampedOut):
     document_id: uuid.UUID
     document_version_id: uuid.UUID | None = None

@@ -102,12 +102,26 @@ interface AnswerMarkdown {
   citations: { n: number; document_id: string }[];
 }
 
+// The plan is hypotheses: the issues the question contains and the rule
+// expected to govern each, with the source it is expected to sit in. Each
+// rule runs the same searches; there are no free-form queries any more.
+interface Hypothesis {
+  issue?: string;
+  rule: string;
+  source?: { identifier?: string; title?: string };
+}
+
 interface RetrievalPlan {
-  queries?: string[];
+  hypotheses?: Hypothesis[];
   anchor_names?: Record<string, string>;
-  class_boost?: string[];
   effort?: string;
 }
+
+const ruleLines = (plan?: RetrievalPlan): string[] =>
+  (plan?.hypotheses ?? []).map((h) => {
+    const src = h.source?.identifier || h.source?.title;
+    return src ? `${h.rule} — ${src}` : h.rule;
+  });
 
 interface ResultFull {
   id: string;
@@ -303,12 +317,12 @@ function buildStages(
   // A synthesis run answers from a result some earlier run retrieved. That
   // retrieval is still readable through the result, so show it here rather
   // than making someone hunt for the upstream run in the list.
-  if (run.mode === 'synthesis' && plan?.queries?.length) {
+  if (run.mode === 'synthesis' && plan?.hypotheses?.length) {
     rows.push([{
-      id: 'retrieve', title: 'Retrieved earlier', sub: 'the searches behind this document set',
+      id: 'retrieve', title: 'Retrieved earlier', sub: 'the hypotheses behind this document set',
       state: 'done',
-      items: plan.queries,
-      count: `${plan.queries.length} searches`,
+      items: ruleLines(plan),
+      count: `${plan.hypotheses.length} hypotheses`,
       wide: true,
     }]);
     edges.push(['query', 'retrieve']);
@@ -316,13 +330,13 @@ function buildStages(
 
   if (retrievalFirst) {
     const rDone = !!tel.retrieval?.completed || !!run.parent_result_id;
-    const queries = plan?.queries ?? [];
+    const rules = ruleLines(plan);
     rows.push([{
-      id: 'retrieve', title: 'Retrieve', sub: 'plan the searches, then gather the documents',
+      id: 'retrieve', title: 'Retrieve', sub: 'state the hypotheses, then gather the documents',
       state: rDone ? 'done' : failed ? 'error' : run.status === 'pending' ? 'pending' : 'active',
-      items: queries,
+      items: rules,
       count: tel.retrieval?.documents != null
-        ? `${tel.retrieval.documents} documents · ${tel.retrieval.queries ?? queries.length} searches`
+        ? `${tel.retrieval.documents} documents · ${tel.retrieval.hypotheses ?? rules.length} hypotheses`
         : undefined,
       wide: true,
     }]);
@@ -367,7 +381,7 @@ function buildStages(
     wide: true,
   }]);
   const beforeResult = run.mode === 'synthesis'
-    ? (plan?.queries?.length ? 'retrieve' : 'query')
+    ? (plan?.hypotheses?.length ? 'retrieve' : 'query')
     : retrievalFirst ? 'retrieve' : 'merge';
   edges.push([beforeResult, 'result']);
 
@@ -1130,15 +1144,22 @@ function Inspector({
       <>
         <Label>What ran</Label>
         <div className="text-stone-700">
-          The question is turned into a set of targeted searches over the corpus, which
-          are then run and ranked into one document set — no search agents involved.
+          The question is turned into hypotheses — the issues it contains and the rule
+          expected to govern each — and every rule runs the same searches over the corpus,
+          fused into one document set. No search agents involved.
           {upstream && ' This run answers from a document set an earlier run retrieved; the plan below is that run’s.'}
         </div>
-        <Label>Searches run ({plan?.queries?.length ?? tel.retrieval?.queries ?? 0})</Label>
-        {(plan?.queries ?? []).map((q, i) => (
-          <div key={i} className="border-l-2 border-primary-100 pl-2.5 py-0.5 mb-1 text-stone-700">{q}</div>
+        <Label>Hypotheses ({plan?.hypotheses?.length ?? tel.retrieval?.hypotheses ?? 0})</Label>
+        {(plan?.hypotheses ?? []).map((h, i) => (
+          <div key={i} className="border-l-2 border-primary-100 pl-2.5 py-0.5 mb-1 text-stone-700">
+            {h.issue && <div className="text-stone-400 text-xs">{h.issue}</div>}
+            <div>{h.rule}</div>
+            {(h.source?.identifier || h.source?.title) && (
+              <div className="text-stone-500 text-xs">{h.source?.identifier || h.source?.title}</div>
+            )}
+          </div>
         ))}
-        {!plan?.queries?.length && (
+        {!plan?.hypotheses?.length && (
           <div className="text-stone-400 italic text-xs">Not recorded for this run.</div>
         )}
         {!!anchors.length && (
@@ -1147,16 +1168,6 @@ function Inspector({
             <div className="flex flex-wrap gap-1">
               {anchors.map((a) => (
                 <span key={a} className="text-[10.5px] px-1.5 py-0.5 rounded bg-stone-100 text-stone-600">{a}</span>
-              ))}
-            </div>
-          </>
-        )}
-        {!!plan?.class_boost?.length && (
-          <>
-            <Label>Document classes favoured</Label>
-            <div className="flex flex-wrap gap-1">
-              {plan.class_boost.map((c) => (
-                <span key={c} className="text-[10.5px] px-1.5 py-0.5 rounded bg-primary-50 text-primary-700">{c}</span>
               ))}
             </div>
           </>
@@ -1416,9 +1427,9 @@ function Inspector({
         {[
           ['Question', ''],
           ...(run.mode === 'synthesis'
-            ? (plan?.queries?.length ? [['Retrieved earlier', `${plan.queries.length} searches`]] : [])
+            ? (plan?.hypotheses?.length ? [['Retrieved earlier', `${plan.hypotheses.length} hypotheses`]] : [])
             : !tel.decompose
-              ? [['Retrieve', plan?.queries?.length ? `${plan.queries.length} searches` : tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
+              ? [['Retrieve', plan?.hypotheses?.length ? `${plan.hypotheses.length} hypotheses` : tel.retrieval?.documents != null ? `${tel.retrieval.documents} documents` : '']]
               : [
                 ['Plan', tel.decompose?.subqueries ? `${tel.decompose.subqueries.length} sub-search${tel.decompose.subqueries.length > 1 ? 'es' : ''}` : ''],
                 ...((tel.decompose?.subqueries ?? run.subqueries ?? []) as string[]).map((sq: string, i: number) => {

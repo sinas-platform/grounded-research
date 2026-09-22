@@ -21,8 +21,7 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -118,7 +117,7 @@ async def materialize_run(session: AsyncSession, run: IngestionRun) -> int:
     """Insert one IngestionRunUnit per selected document. Returns count."""
     f = RunFilter(**(run.filter or {}))
     doc_ids = await _select_documents(session, f)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     units = [
         IngestionRunUnit(
             run_id=run.id,
@@ -178,7 +177,7 @@ async def _run_pipeline_inprocess(
                 await session.commit()
         reports = await batch_oneshot_ingest(run_id, doc_ids)
         by_doc = {}
-        for rep, did in zip(reports, doc_ids):
+        for rep, did in zip(reports, doc_ids, strict=False):
             by_doc[did] = rep
         for did in doc_ids:
             rep = by_doc.get(did) or {}
@@ -308,7 +307,7 @@ async def _finalize_unit(
         if unit is not None and unit.status == "running":
             unit.status = "failed" if error else "succeeded"
             unit.error = error
-            unit.completed_at = datetime.now(timezone.utc)
+            unit.completed_at = datetime.now(UTC)
             if run is not None:
                 # Atomic SQL increments: parallel finalizers raced the ORM's
                 # read-modify-write and lost counts (20-doc test, 16 Aug).
@@ -337,12 +336,12 @@ async def submit_run(session: AsyncSession, run: IngestionRun) -> None:
     )
     if not units:
         run.status = "completed"
-        run.completed_at = datetime.now(timezone.utc)
+        run.completed_at = datetime.now(UTC)
         return
 
     run.status = "running"
-    run.started_at = datetime.now(timezone.utc)
-    now = datetime.now(timezone.utc)
+    run.started_at = datetime.now(UTC)
+    now = datetime.now(UTC)
     for u in units:
         u.status = "running"
         u.started_at = now
@@ -373,7 +372,7 @@ async def _mark_run_terminal_if_done(run_id: uuid.UUID) -> None:
         )
         if pending == 0:
             run.status = "completed"
-            run.completed_at = datetime.now(timezone.utc)
+            run.completed_at = datetime.now(UTC)
             await session.commit()
             # Replay the unresolved-relationship queue now that this run has
             # taught the resolver new names and aliases. Cites parked early
@@ -390,22 +389,3 @@ async def _mark_run_terminal_if_done(run_id: uuid.UUID) -> None:
             except Exception:  # noqa: BLE001
                 log.exception("post-run key replay failed (run %s)", run_id)
 
-
-async def progress_snapshot(run: IngestionRun) -> dict[str, Any]:
-    """Read-only progress: unit counts by status. The worker advances all
-    state; a GET never drives anything."""
-    async with AsyncSessionLocal() as session:
-        counts = dict(
-            (
-                await session.execute(
-                    select(IngestionRunUnit.status, func.count())
-                    .where(IngestionRunUnit.run_id == run.id)
-                    .group_by(IngestionRunUnit.status)
-                )
-            ).all()
-        )
-    return {
-        "status": run.status,
-        "parts": list(run.stages or ALL_PARTS),
-        "units": counts,
-    }

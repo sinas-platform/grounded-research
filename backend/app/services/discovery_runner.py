@@ -25,7 +25,7 @@ import asyncio
 import logging
 import random
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sinas import SinasClient
@@ -124,7 +124,7 @@ async def materialize_run(session: AsyncSession, run: DiscoveryRun) -> int:
     """Insert DiscoveryRunUnit rows for the selected docs. Returns count."""
     f = RunFilter(**(run.filter or {}))
     doc_ids = await _select_documents(session, f, run.parent_class_id, run.sample_size)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     units = [
         DiscoveryRunUnit(
             run_id=run.id,
@@ -188,7 +188,7 @@ async def submit_scan(
     )
     if not units:
         run.status = "completed"
-        run.completed_at = datetime.now(timezone.utc)
+        run.completed_at = datetime.now(UTC)
         return
 
     namespace, agent_name = KIND_TO_AGENT[run.kind]
@@ -208,9 +208,9 @@ async def submit_scan(
 
     run.sinas_batch_ids = {**(run.sinas_batch_ids or {}), "scan": batch_id}
     run.status = "scanning"
-    run.started_at = datetime.now(timezone.utc)
+    run.started_at = datetime.now(UTC)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for idx, u in enumerate(units):
         u.status = "running"
         u.started_at = now
@@ -257,7 +257,7 @@ async def _reconcile_units_from_batch(
                 if not ok:
                     unit.error = execution.get("error") or f"sinas: {exec_status}"
                 unit.chat_id = execution.get("chat_id") or unit.chat_id
-                unit.completed_at = datetime.now(timezone.utc)
+                unit.completed_at = datetime.now(UTC)
             await session.commit()
         if len(executions) < 500:
             break
@@ -268,7 +268,7 @@ async def _claim_consolidate_transition(run_id: uuid.UUID) -> bool:
     """Atomically transition the run into consolidating phase. Returns True if
     THIS call won the race (and should submit the consolidator), False if
     another GET already did."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             update(DiscoveryRun)
@@ -360,7 +360,7 @@ async def _mark_completed(run_id: uuid.UUID) -> None:
         run.scanned_docs = scanned
         run.failed_docs = failed
         run.status = "completed"
-        run.completed_at = datetime.now(timezone.utc)
+        run.completed_at = datetime.now(UTC)
         await session.commit()
 
 
@@ -399,7 +399,7 @@ async def progress(run: DiscoveryRun, client: SinasClient) -> dict[str, Any]:
                         if r is not None:
                             r.status = "failed"
                             r.error = f"consolidate submit: {exc}"
-                            r.completed_at = datetime.now(timezone.utc)
+                            r.completed_at = datetime.now(UTC)
                             await s.commit()
                     snapshot["status"] = "failed"
                     return snapshot

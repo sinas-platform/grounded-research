@@ -62,7 +62,9 @@ ANNOTATION_ROLES = (
 class PackagePropertyEntry(_Strict):
     name: str
     description: str | None = None
-    schema: dict[str, Any] = Field(default_factory=dict)
+    # `schema` is what the package and the API say; the attribute is `schema_`
+    # because BaseModel already owns `schema`.
+    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
     guidance: str | None = None
     manual: bool = False
     required: bool = False

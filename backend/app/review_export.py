@@ -33,7 +33,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import re
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -369,10 +368,10 @@ def _write_index(wb: Workbook, entries: list[dict], meta: list[dict],
     for c in range(1, 9):
         ws.cell(ws.max_row, c).font = BOLD
         ws.cell(ws.max_row, c).fill = HEAD
-    for entry, m in zip(entries, meta):
+    for entry, m in zip(entries, meta, strict=False):
         # live references, so the index reflects each tab as it is filled in
         t = m["tab"]
-        ref = (lambda r: f"='{t}'!B{r}") if m.get("acceptable_row") else (lambda r: "")
+        ref = (lambda r, t=t: f"='{t}'!B{r}") if m.get("acceptable_row") else (lambda r: "")
         ws.append([str(entry.get("id", "")), entry.get("title", ""),
                    entry.get("scope", ""), (entry.get("question") or "").strip(),
                    ref(m["completed_row"]) if m.get("completed_row") else m["status"],

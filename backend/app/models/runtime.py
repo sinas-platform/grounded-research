@@ -53,7 +53,7 @@ class Document(Base, TimestampMixin, OwnedMixin):
     # retrieval does not. Flips false when a manual IngestionRun completes.
     staged: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
 
-    versions: Mapped[list["DocumentVersion"]] = relationship(
+    versions: Mapped[list[DocumentVersion]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
         foreign_keys="DocumentVersion.document_id",

@@ -18,8 +18,8 @@ Run from the backend directory:
 """
 
 import inspect
-from types import SimpleNamespace
 import uuid
+from types import SimpleNamespace
 
 import pytest
 from app.api.v1.answers import get_answer_markdown
@@ -210,9 +210,8 @@ async def test_an_answer_edited_after_publication_is_not_served_as_published(
     answer would go out as published prose that nothing had checked — the one
     thing publication is supposed to mean.
     """
-    from fastapi import HTTPException
-
     from app.api.v1 import answers as mod
+    from fastapi import HTTPException
 
     class _Result:
         def __init__(self, value):

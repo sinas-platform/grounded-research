@@ -15,7 +15,6 @@ Run from the backend directory: `python -m pytest tests/test_matching_documents.
 import uuid
 
 import pytest
-
 from app.api.v1.retrieval import matching_documents
 from app.schemas.runtime import MatchingDocumentsIn
 

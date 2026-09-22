@@ -17,8 +17,13 @@ Run from the backend directory:
 
 from __future__ import annotations
 
-from app.services.generic_entities import (LOWERCASE_SHARE, MIN_DOCUMENTS,
-                                           case_evidence, is_generic, mark)
+from app.services.generic_entities import (
+    LOWERCASE_SHARE,
+    MIN_DOCUMENTS,
+    case_evidence,
+    is_generic,
+    mark,
+)
 
 # Written to the shape real text has: a common word appears
 # lower-case far more often than it begins a sentence, which is why the

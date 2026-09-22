@@ -41,10 +41,9 @@ import textwrap
 
 import pytest
 from app.services import answer_structure as st
-from app.services import declared_roles
+from app.services import declared_roles, standing
 from app.services import drafting_chat as dc
 from app.services import query_runner as qr
-from app.services import standing
 
 PARTS = [
     {"index": 0, "label": "Whether it applies", "text": "Whether it applies"},

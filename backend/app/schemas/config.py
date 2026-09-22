@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-from app.schemas.common import ORMModel, TimestampedOut
+from app.schemas.common import TimestampedOut
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_]{0,63}$")
 
@@ -54,7 +54,9 @@ class DocumentClassOut(TimestampedOut, DocumentClassUpdate):
 class DocumentClassPropertyIn(BaseModel):
     name: str
     description: str | None = None
-    schema: dict[str, Any] = Field(default_factory=dict)
+    # `schema` is what the package and the API say; the attribute is `schema_`
+    # because BaseModel already owns `schema`.
+    schema_: dict[str, Any] = Field(default_factory=dict, alias="schema")
     guidance: str | None = None
     manual: bool = False
     required: bool = False
@@ -180,11 +182,3 @@ class PlaybookScopeIn(BaseModel):
 class PlaybookScopeOut(TimestampedOut, PlaybookScopeIn):
     pass
 
-
-class PlaybookSummaryOut(ORMModel):
-    id: uuid.UUID
-    kind: PlaybookKindLit
-    name: str
-    description: str = ""
-    applies_to_document_classes: list[uuid.UUID] = Field(default_factory=list)
-    applies_to_dossier_classes: list[uuid.UUID] = Field(default_factory=list)

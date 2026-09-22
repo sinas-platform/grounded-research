@@ -89,6 +89,7 @@ def test_the_bulk_pipeline_builds_its_properties_the_same_way():
     own property dict without guidance or cardinality, so a prompt fix landing
     only in the one-shot never reached them."""
     import inspect
+
     from app import bulk_pipeline
 
     src = inspect.getsource(bulk_pipeline.stage_extract)

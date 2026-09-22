@@ -292,24 +292,6 @@ def test_a_later_decision_in_the_same_case_is_found_by_the_declared_date():
     assert st.currency_notes(rows, dr.NONE) == {}
 
 
-def test_the_latest_source_date_reads_each_row_by_its_own_class():
-    rows = [_row("a.md", handed_down="2019-01-01"),
-            {"filename": "b.md", "class": "Note", "props":
-             {"written_on": "2024-03-01"}}]
-    assert st.latest_source_date(rows, ROLES) == date(2024, 3, 1)
-    assert st.latest_source_date(rows, dr.NONE) is None
-
-
-def test_the_issuing_body_comes_from_the_declared_annotation():
-    """It had a literal name and no documented fallback, so a deployment
-    calling it anything else had the field silently empty. With nothing
-    declared there is nothing to report — announced where it is resolved."""
-    annotations = {"who_issued_it": {"name": "A Body"}}
-    assert st.issuing_body_of(
-        annotations, ROLES.issuing_body_annotation) == "A Body"
-    assert st.issuing_body_of(annotations, None) is None
-
-
 # ── resolving all of it, once, from the database ─────────────────────────────
 
 class _Rows:

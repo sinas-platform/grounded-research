@@ -2,13 +2,13 @@ from fastapi import APIRouter
 
 from app.api.v1 import (
     annotations,
-    bulk,
     answers,
+    bulk,
     config,
     discovery,
     documents,
-    entities,
     dossiers,
+    entities,
     health,
     info,
     ingestion,

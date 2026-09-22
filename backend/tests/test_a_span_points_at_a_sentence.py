@@ -14,8 +14,7 @@ Run from the backend directory:
 
 from __future__ import annotations
 
-from app.services.query_runner import (_canonical, _canonical_offsets,
-                                       _locate_chars, _verified_quote)
+from app.services.query_runner import _canonical, _canonical_offsets, _locate_chars, _verified_quote
 
 PARA = ("The instrument records ambient pressure once every four seconds. "
         "Readings that fall outside the calibrated range are flagged for "

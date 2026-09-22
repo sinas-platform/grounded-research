@@ -87,7 +87,7 @@ def unknown_targets(mapping: list[dict], declared: set[str] | dict) -> list[str]
 @dataclass(frozen=True)
 class Held:
     """What the planner may compare, and what it must leave alone."""
-    existing: dict[str, "Existing"]
+    existing: dict[str, Existing]
     planned: list[dict]
     unreadable: list[str]
     unknown: list[str]

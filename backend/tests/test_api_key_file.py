@@ -16,7 +16,6 @@ those call sites should have to know where the value came from.
 from __future__ import annotations
 
 import pytest
-
 from app.config import Settings
 
 

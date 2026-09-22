@@ -28,11 +28,11 @@ document, with no chats and no tool loops.
 from __future__ import annotations
 
 import asyncio
-import logging
-from datetime import datetime, timezone
 import json
+import logging
 import re
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -500,7 +500,11 @@ async def _write_declared_properties(
     `declared_properties`; this is the part that reads and writes rows.
     """
     from app.services.declared_properties import (
-        plan_declared_values, read_held, replacement_reason, unknown_targets)
+        plan_declared_values,
+        read_held,
+        replacement_reason,
+        unknown_targets,
+    )
     from app.services.front_matter import split_front_matter
 
     if not class_id or not class_props:
@@ -528,7 +532,7 @@ async def _write_declared_properties(
         mapping, {n: p["id"] for n, p in by_name.items()}, by_prop_id)
 
     plan = plan_declared_values(header, held.planned, held.existing)
-    today = datetime.now(timezone.utc).date().isoformat()
+    today = datetime.now(UTC).date().isoformat()
     for w in plan.write:
         p = by_name.get(w.property)
         if p is None:

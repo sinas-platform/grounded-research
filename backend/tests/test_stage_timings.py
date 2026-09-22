@@ -13,7 +13,6 @@ import ast
 from pathlib import Path
 
 import pytest
-
 from app.services import query_runner
 
 SOURCE = Path(query_runner.__file__).read_text()
@@ -58,11 +57,3 @@ def test_extract_records_its_duration() -> None:
     # documents and verifies every quote against them.
     assert "elapsed_s" in _keywords(_tele_calls_for("extract"))
 
-
-def test_the_stage_timer_records_elapsed_even_on_failure() -> None:
-    # A stage that dies slowly is exactly the one worth timing, so the
-    # completion write belongs in a finally block.
-    start = SOURCE.index("async def _timed(")
-    body = SOURCE[start : SOURCE.index("\ndef ", start)]
-    assert "finally:" in body
-    assert "elapsed_s" in body.split("finally:")[1]

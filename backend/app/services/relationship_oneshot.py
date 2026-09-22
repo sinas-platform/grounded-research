@@ -28,7 +28,6 @@ what the document states; discovery stays with the discovery agent.
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import uuid
 from typing import Any

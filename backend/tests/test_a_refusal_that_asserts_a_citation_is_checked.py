@@ -27,7 +27,6 @@ citations are a stubbed set.
 import uuid
 
 import pytest
-
 from app.services import drafting_chat, objections
 from app.services import query_runner as qr
 

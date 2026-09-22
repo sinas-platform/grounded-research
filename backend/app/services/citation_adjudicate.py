@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
@@ -194,7 +194,7 @@ async def adjudicate(defs: list[str] | None = None, *,
                             await session.flush()
                             r.resolved_relationship_id = rel.id
                         r.status = "resolved"
-                        r.resolved_at = datetime.now(timezone.utc)
+                        r.resolved_at = datetime.now(UTC)
                         await learn_aliases(session, eid, [r.target_key])
                     index.learn(eid, r.target_key)
                     report["linked"] += 1

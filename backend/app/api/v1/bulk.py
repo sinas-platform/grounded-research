@@ -13,7 +13,6 @@ GET  /bulk/jobs/{id} progress counts derived from the database
 
 from __future__ import annotations
 
-import hashlib
 import io
 import json
 import subprocess
@@ -24,12 +23,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, status
 from pydantic import BaseModel
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller
 from app.db import get_session
-from app.models import Document, DocumentVersion
 
 router = APIRouter(prefix="/bulk", tags=["bulk"])
 
@@ -103,7 +100,7 @@ async def upload_zip(file: UploadFile,
     try:
         zf = zipfile.ZipFile(io.BytesIO(raw))
     except zipfile.BadZipFile:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "not a zip")
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "not a zip") from None
     job_id = uuid.uuid4().hex[:12]
     doc_ids: list[str] = []
     unchanged = 0
@@ -140,8 +137,8 @@ async def job_status(job_id: str,
     ids_file = job_dir / "ids.txt"
     if not ids_file.exists():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "unknown job")
-    ids = [uuid.UUID(l) for l in ids_file.read_text().splitlines() if l.strip()]
-    from sqlalchemy import func, text
+    ids = [uuid.UUID(line) for line in ids_file.read_text().splitlines() if line.strip()]
+    from sqlalchemy import text
 
     extracted = (await session.execute(text(
         "SELECT count(*) FROM document WHERE id = ANY(:ids) "

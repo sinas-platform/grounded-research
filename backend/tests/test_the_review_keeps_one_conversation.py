@@ -21,10 +21,8 @@ an answer may publish and does not get to fail on a chat.
 """
 
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 
 import pytest
-
 from app.services import query_runner as qr
 
 VERDICT = '{"publishable": true, "parts": [], "unused_sources": []}'

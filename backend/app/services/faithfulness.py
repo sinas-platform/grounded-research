@@ -26,8 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity
 from app.config import get_settings
-from app.models import (AnswerClaim, ClaimEvidence, Document, DocumentClass,
-                        DocumentVersion)
+from app.models import AnswerClaim, ClaimEvidence, Document, DocumentClass, DocumentVersion
 from app.services.toc import derive_toc
 
 # Lines of context around the cited span; enough to judge support without
@@ -331,9 +330,9 @@ async def _judge_claim(
             return [{"evidence_id": ev.id, "error": f"invoke failed: {exc}"} for ev, *_ in rows]
 
     verdicts: list[dict[str, Any]] = []
-    lines = [l.strip() for l in reply.splitlines() if l.strip()]
+    lines = [line.strip() for line in reply.splitlines() if line.strip()]
     for i, (ev, *_rest) in enumerate(rows):
-        line = next((l for l in lines if l.upper().startswith(f"SPAN {i + 1}:")), None)
+        line = next((line for line in lines if line.upper().startswith(f"SPAN {i + 1}:")), None)
         if line is None:
             verdicts.append({"evidence_id": ev.id, "error": f"no verdict line for span {i + 1}"})
             continue
@@ -351,7 +350,7 @@ async def _judge_claim(
         )
         verdicts.append({"evidence_id": ev.id, "validated": ok, "reasoning": reason[:500]})
 
-    cov = next((l for l in lines if l.upper().startswith("COVERAGE:")), None)
+    cov = next((line for line in lines if line.upper().startswith("COVERAGE:")), None)
     if cov:
         body = cov.split(":", 1)[1].strip()
         full = body.upper().startswith("FULL")
@@ -509,7 +508,7 @@ async def validate_answer_evidence(
             # class against.
             cls = doc_classes.get(ev.document_id)
             head = "\n".join(
-                l for l in content.splitlines()[:15] if l.strip())[:800]
+                line for line in content.splitlines()[:15] if line.strip())[:800]
             entry["doc_heads"][fn] = (
                 (f"(classified at ingestion as: {cls})\n" if cls else "") + head)
     guidance = await _domain_guidance(

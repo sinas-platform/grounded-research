@@ -29,4 +29,4 @@ async def get_info() -> dict[str, Any]:
         return resp.json()
     except httpx.HTTPError as e:
         log.error("Upstream /info failed: %s", e)
-        raise HTTPException(status_code=502, detail="Upstream Sinas /info unreachable")
+        raise HTTPException(status_code=502, detail="Upstream Sinas /info unreachable") from e

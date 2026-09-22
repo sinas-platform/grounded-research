@@ -12,7 +12,6 @@ Run from the backend directory:
 `python -m pytest tests/test_retrieval_guidance.py`
 """
 
-import pytest
 
 from app.hypotheses import HYPOTHESES_PROMPT
 from app.retrieval_first import _playbook_block
@@ -79,6 +78,7 @@ def test_a_dossier_only_scope_is_a_restriction_not_the_sentinel():
     dossier class is then injected into every plan.
     """
     import inspect
+
     from app import retrieval_first as rf
 
     src = inspect.getsource(rf._retrieval_guidance)

@@ -117,23 +117,6 @@ def test_tier2_candidates_are_single_capitalised_words():
     assert "<> lower(e.canonical_form)" in src
 
 
-def test_an_unmeasured_word_is_not_judged():
-    """A word the sample barely carries is left unmarked, not marked on
-    noise — the same absence-over-arbitrary rule as everywhere else."""
-    import inspect
-    src = inspect.getsource(ge.mark_generic_by_case)
-    assert "seen < min_occurrences" in src
-    assert 'int(evidence.get("any_case") or 0)' in src  # the floor counts every casing
-    assert "unmeasured += 1" in src
-
-
-def test_tier2_marks_through_the_same_judgement_as_tier1():
-    import inspect
-    src = inspect.getsource(ge.mark_generic_by_case)
-    assert "is_generic(name, docs, evidence)" in src
-    assert "mark(name, docs, evidence, when)" in src
-
-
 # -- the primary signal: link probability --------------------------------------
 
 

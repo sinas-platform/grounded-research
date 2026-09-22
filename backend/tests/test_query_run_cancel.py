@@ -10,7 +10,6 @@ import asyncio
 import uuid
 
 import pytest
-
 from app.models.query import QUERY_RUN_STATUSES
 from app.services import query_runner as qr
 

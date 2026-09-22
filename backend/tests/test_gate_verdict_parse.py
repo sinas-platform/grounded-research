@@ -17,7 +17,6 @@ Run from the backend directory:
 import json
 
 import pytest
-
 from app.services.query_runner import _gate_json
 
 VERDICT = (

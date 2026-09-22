@@ -26,14 +26,13 @@ from __future__ import annotations
 
 import inspect
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-
 from app.services import generic_entities as ge
 from app.services import maintenance
 
-NOW = datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)
 
 
 class _Result:

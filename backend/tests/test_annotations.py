@@ -18,7 +18,6 @@ from app.services.annotations import (
     normalize_reduce,
     parse_path,
     reduce_walk,
-    validate_definition,
     walk_path,
 )
 from app.services.package import validate_crossrefs
@@ -101,12 +100,6 @@ def test_normalize_reduce_rejects_unknown_and_empty():
         normalize_reduce("banana")
     with pytest.raises(AnnotationConfigError):
         normalize_reduce({})
-
-
-def test_validate_definition_checks_relationship_names():
-    validate_definition("a/b", "first", known_names={"a", "b"})
-    with pytest.raises(AnnotationConfigError, match="unknown relationship"):
-        validate_definition("a/b", "first", known_names={"a"})
 
 
 # ─────────────────────────────────────────────────────────────

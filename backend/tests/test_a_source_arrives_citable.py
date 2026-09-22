@@ -249,9 +249,9 @@ def test_currency_and_jurisdiction_import_as_ordinary_class_properties():
     them without one."""
     entry = PackageDocumentClassEntry.model_validate(_class_entry())
     by_name = {p.name: p for p in entry.properties}
-    assert by_name["status"].schema["enum"] == [
+    assert by_name["status"].schema_["enum"] == [
         "in_force", "amended", "repealed", "superseded"]
-    assert by_name["superseded_by"].schema == {"type": "string"}
+    assert by_name["superseded_by"].schema_ == {"type": "string"}
     assert "ECLI" in by_name["ecli"].guidance
     assert by_name["jurisdiction"].cardinality == "one"
 

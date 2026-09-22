@@ -27,7 +27,6 @@ What these pin:
 from __future__ import annotations
 
 import inspect
-import re
 
 from app import hypotheses as h
 

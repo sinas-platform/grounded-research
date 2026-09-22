@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from app.services.query_runner import _claims_json
 
 GOOD = '{"claims": [{"text": "A claim.", "rationale": "Because.", "evidence": []}]}'

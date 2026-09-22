@@ -43,7 +43,7 @@ fallback would manufacture identities nobody chose.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -150,7 +150,7 @@ async def export_run(session, run: QueryRun) -> dict[str, Any]:
         "claims": claims_out,
         "retrieval": retrieval_out,
         "quality_issues": [str(i) for i in issues][:20],
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "produced_by": "sgr",
     }
 

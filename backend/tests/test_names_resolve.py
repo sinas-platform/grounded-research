@@ -53,16 +53,16 @@ def _bound_names(scope: ast.AST) -> set[str]:
             if a is not None:
                 out.add(a.arg)
     for node in _own_nodes(scope):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store | ast.Del):
             out.add(node.id)
         elif isinstance(node, _SCOPES) and hasattr(node, "name"):
             out.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+        elif isinstance(node, ast.Import | ast.ImportFrom):
             for al in node.names:
                 out.add((al.asname or al.name).split(".")[0])
         elif isinstance(node, ast.ExceptHandler) and node.name:
             out.add(node.name)
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+        elif isinstance(node, ast.Global | ast.Nonlocal):
             out.update(node.names)
     return out
 
@@ -90,11 +90,11 @@ def test_every_name_a_function_reads_is_one_it_can_reach():
             reads as unresolved.
             """
             for child in ast.iter_child_nodes(node):
-                if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                if isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
                     inner = visible | _bound_names(child)
                     missing = _read_names(child) - inner
                     for name in sorted(missing):
-                        unresolved.append(f"{rel}::{child.name} reads {name!r}")
+                        unresolved.append(f"{rel}::{child.name} reads {name!r}")  # noqa: B023 -- called within the iteration
                     walk(child, inner)
                 elif isinstance(child, ast.ClassDef):
                     walk(child, visible | _bound_names(child))

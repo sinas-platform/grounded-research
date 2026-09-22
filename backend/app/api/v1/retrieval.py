@@ -10,20 +10,21 @@ queries (UI, scripts) that don't want to materialize a Result first.
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, status
 from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
 from app.schemas.runtime import (
-    SgrFilter,
     IntrospectIn,
     IntrospectOut,
     MatchingDocumentOut,
     MatchingDocumentsIn,
     MatchingDocumentsOut,
+    SgrFilter,
 )
 from app.services.introspect import (
     introspect_with_filter,
@@ -133,7 +134,7 @@ async def add_files_to_result(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.models import ResultDocument, ResultTrace
     from app.services.result_filter import (
@@ -167,7 +168,7 @@ async def add_files_to_result(
                 "added_by_agent": payload.added_by_agent,
             },
             outcome={"added": len(payload.document_ids)},
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -235,7 +236,7 @@ async def append_trace(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.models import ResultTrace
     from app.services.result_filter import load_visible_result
@@ -249,7 +250,7 @@ async def append_trace(
             action=payload.action,
             parameters=payload.parameters,
             outcome=payload.outcome,
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -265,7 +266,7 @@ async def publish_result(
     session: AsyncSession = Depends(get_session),
     caller: CallerIdentity = Depends(get_caller),
 ):
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from sqlalchemy import select as sa_select
 
@@ -318,11 +319,11 @@ async def publish_result(
                 "attached_documents": len(attached),
                 "filter_coverage": coverage,
             },
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     result.status = "published"
-    result.published_at = datetime.now(timezone.utc)
+    result.published_at = datetime.now(UTC)
     await session.commit()
     return {
         "id": result.id,

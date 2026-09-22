@@ -31,7 +31,7 @@ from pathlib import Path
 from sqlalchemy import text
 
 from app.db import AsyncSessionLocal
-from app.retrieval_first import BENCH, _files_for, _load_gold
+from app.retrieval_first import _files_for, _load_gold
 
 
 def _similarity(a: str, b: str) -> float:

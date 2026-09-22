@@ -25,13 +25,11 @@ import re
 import sys
 import time
 import uuid
-from collections import defaultdict
+from collections.abc import Sequence
 from pathlib import Path
 
 from sqlalchemy import String, bindparam, select, text
 from sqlalchemy.dialects.postgresql import ARRAY
-
-from collections.abc import Sequence
 
 _log = logging.getLogger("sgr.retrieval")
 
@@ -51,7 +49,7 @@ def _domain_prefix() -> str:
 
 
 def _playbook_block(
-    entries: "Sequence[tuple[str, str, bool]]",
+    entries: Sequence[tuple[str, str, bool]],
 ) -> tuple[str, list[str]]:
     """Deployment retrieval guidance as a prompt block, and what was left out.
 
@@ -373,7 +371,7 @@ async def _resolve_names(names: list) -> list[dict]:
 
     Measured on two runs of one question at temperature zero: four shared
     anchors out of ten and twelve, retrieved sets overlapping by half, the
-    divergence starting at rank 10. The band the expert review's findings
+    divergence starting at rank 10. The band the review's findings
     live in is ranks 11 to 51.
 
     `retrieve_and_rank` learned this one stage later and says so in its own

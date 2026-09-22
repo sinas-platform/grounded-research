@@ -27,7 +27,6 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 from app.schemas.package import PackageDocumentClassEntry
 from app.services import package as pkg
 from app.services import propositions as props

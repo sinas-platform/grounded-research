@@ -11,11 +11,9 @@ Run from the backend directory: `python -m pytest tests/test_call_batching.py`
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
-from fastapi import HTTPException
-
 from app.api.v1.answers import get_answer_evidence
 from app.api.v1.synthesis import (
     BulkVerdictsIn,
@@ -23,8 +21,9 @@ from app.api.v1.synthesis import (
     record_validation_verdicts,
 )
 from app.models import AnswerClaim, ClaimEvidence
+from fastapi import HTTPException
 
-_NOW = datetime(2026, 7, 18, tzinfo=timezone.utc)
+_NOW = datetime(2026, 7, 18, tzinfo=UTC)
 
 
 def _claim(answer_id, sequence):

@@ -37,6 +37,8 @@ build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
 line-length = 100
+# Merged migrations are never edited, so they are never re-linted either.
+exclude = ["backend/app/alembic"]
 target-version = "py311"
 
 [tool.ruff.lint]

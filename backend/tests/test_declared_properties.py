@@ -27,7 +27,6 @@ obviously the better source.
 from __future__ import annotations
 
 import pytest
-
 from app.services.declared_properties import (
     DECLARED_METHOD,
     Existing,

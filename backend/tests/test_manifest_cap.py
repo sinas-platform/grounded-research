@@ -18,7 +18,6 @@ Run from the backend directory:
 """
 
 import pytest
-
 from app.services import query_runner as qr
 from app.services.query_runner import MANIFEST_CHAR_CAP
 
@@ -252,8 +251,8 @@ async def test_an_unranked_result_is_not_banded(manifest_rows):
         r["rank"] = None
     manifest_rows["rows"] = built
     text, rec = await qr._doc_manifest("p")
-    lines = [l for l in text.split("\n") if l.startswith("- ")]
-    assert len({len(l) for l in lines}) == 1, "every line the same budget"
+    lines = [line for line in text.split("\n") if line.startswith("- ")]
+    assert len({len(line) for line in lines}) == 1, "every line the same budget"
     assert rec["unranked"] == len(built)
 
 
@@ -264,7 +263,7 @@ async def test_a_ranked_result_is_still_banded(manifest_rows):
         r["rank"] = i
     manifest_rows["rows"] = built
     text, rec = await qr._doc_manifest("p")
-    lines = [l for l in text.split("\n") if l.startswith("- ")]
+    lines = [line for line in text.split("\n") if line.startswith("- ")]
     assert len(lines[0]) > len(lines[-1]), "the head keeps more than the tail"
     assert rec["unranked"] == 0
 
@@ -289,7 +288,7 @@ async def test_one_unranked_document_does_not_cost_the_others_their_budget(manif
     built[-1]["rank"] = None
     manifest_rows["rows"] = built
     text, rec = await qr._doc_manifest("p")
-    lines = [l for l in text.split("\n") if l.startswith("- ")]
+    lines = [line for line in text.split("\n") if line.startswith("- ")]
     assert len(lines[0]) > len(lines[-1]), "the ranked head still keeps more"
     assert rec["unranked"] == 1
 

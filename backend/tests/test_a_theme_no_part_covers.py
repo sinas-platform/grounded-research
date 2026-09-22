@@ -66,14 +66,12 @@ def test_the_list_is_bounded():
 # observation. So the two things that can go wrong have to be legible from the
 # record rather than inferred from a missing key.
 
-import asyncio
 import inspect
 import uuid
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-
 from app.services import query_runner as qr
 
 

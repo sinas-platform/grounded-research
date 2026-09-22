@@ -144,7 +144,7 @@ async def create_class_property(
 ):
     if (await session.get(DocumentClass, class_id)) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "document class not found")
-    row = DocumentClassProperty(document_class_id=class_id, **payload.model_dump())
+    row = DocumentClassProperty(document_class_id=class_id, **payload.model_dump(by_alias=True))
     session.add(row)
     await session.commit()
     await session.refresh(row)
@@ -164,7 +164,7 @@ async def update_class_property(
     row = await session.get(DocumentClassProperty, property_id)
     if row is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "property not found")
-    for k, v in payload.model_dump().items():
+    for k, v in payload.model_dump(by_alias=True).items():
         setattr(row, k, v)
     await session.commit()
     await session.refresh(row)

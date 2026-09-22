@@ -28,11 +28,10 @@ from app.models import (
     PropertyValue,
 )
 from app.schemas.runtime import (
-    EntityFilter,
     FieldFilter,
-    SgrFilter,
     IntrospectFieldDistribution,
     IntrospectOut,
+    SgrFilter,
 )
 from app.services.visibility import visible_clause
 

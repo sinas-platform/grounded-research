@@ -247,7 +247,7 @@ def identifiers_named(text: str, pattern: str) -> dict[str, str]:
 
 
 def identifier_key(value: str, pattern: str) -> str | None:
-    """The key of a stored identifier, or None if it does not match the shape.
+    r"""The key of a stored identifier, or None if it does not match the shape.
 
     Anchored, so a value has to BE an identifier rather than merely contain
     something shaped like one. Being strict here can only shrink the set a

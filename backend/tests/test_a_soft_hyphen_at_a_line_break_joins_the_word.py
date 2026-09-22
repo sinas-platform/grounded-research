@@ -15,7 +15,6 @@ Run from the backend directory:
 """
 
 import pytest
-
 from app.services import query_runner as qr
 
 LINES = [

@@ -8,7 +8,7 @@ set_document_summary, set_property_value, etc.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,12 +16,10 @@ from pydantic import BaseModel
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.auth import CallerIdentity, get_caller, require_permission
+from app.auth import require_permission
 from app.db import get_session
 from app.models import (
     Document,
-    DocumentClass,
-    DocumentVersion,
     Entity,
     EntityAlias,
     EntityMention,
@@ -34,12 +32,10 @@ from app.models import (
     UnresolvedEntityMention,
     UnresolvedRelationship,
 )
-from app.services.toc import normalize_line_density
 from app.schemas.runtime import (
     PropertyValueIn,
     PropertyValueOut,
     RelationshipIn,
-    RelationshipOut,
     RelationshipProposalIn,
     RelationshipProposalOut,
     UnresolvedRelationshipIn,
@@ -121,7 +117,7 @@ async def set_property_value(
     session: AsyncSession = Depends(get_session),
 ):
     raw = payload.model_dump()
-    if isinstance(raw["value"], (str, int, float, bool)) or raw["value"] is None:
+    if isinstance(raw["value"], str | int | float | bool) or raw["value"] is None:
         raw["value"] = {"_": raw["value"]}
     elif isinstance(raw["value"], list):
         raw["value"] = {"_": raw["value"]}
@@ -430,7 +426,7 @@ async def record_relationship(
         return RelationshipResolution(kind="proposal", id=prop.id, creation_mode="review")
 
     row = Relationship(
-        **data, evidence_span=span, last_verified_at=datetime.now(timezone.utc)
+        **data, evidence_span=span, last_verified_at=datetime.now(UTC)
     )
     session.add(row)
     await session.commit()

@@ -15,8 +15,6 @@ from __future__ import annotations
 import inspect
 import re
 
-from app import retrieval_first as rf
-
 
 def _sql_blocks(fn) -> list[str]:
     """Every SQL string literal in the function, normalised to one line."""

@@ -23,7 +23,6 @@ exactly this reason. This is the same look, pointed at the third case.
 from types import SimpleNamespace
 
 import pytest
-
 from app.services.reread import Cited, owed_prompt
 
 

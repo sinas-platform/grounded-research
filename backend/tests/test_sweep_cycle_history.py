@@ -24,7 +24,6 @@ Run from the backend directory:
 import uuid
 
 import pytest
-
 from app.services import query_runner as qr
 from app.services.query_runner import _cycle_key, _is_numbered
 

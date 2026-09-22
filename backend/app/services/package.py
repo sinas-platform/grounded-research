@@ -18,8 +18,9 @@ Playbook content is SGR-owned (see migration 0014). No Sinas writes.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
-from typing import Any, Iterable
+from typing import Any
 
 import yaml
 from pydantic import ValidationError
@@ -41,18 +42,17 @@ from app.models import (
     RelationshipState,
 )
 from app.schemas.config import slugify
+from app.schemas.package import (
+    ENGINE_ROLES,
+    PackageDiff,
+    PackageImportResult,
+    PackageValidateResult,
+    SgrPackage,
+)
 from app.services.annotations import (
     AnnotationConfigError,
     normalize_reduce,
     parse_path,
-)
-from app.schemas.package import (
-    ENGINE_ROLES,
-    SgrPackage,
-    PackageDiff,
-    PackageImportResult,
-    PackagePlaybookEntry,
-    PackageValidateResult,
 )
 
 
@@ -360,7 +360,7 @@ async def _apply_document_classes(ctx: _ApplyCtx) -> None:
                 p_row,
                 {
                     "description": prop.description,
-                    "schema": prop.schema,
+                    "schema": prop.schema_,
                     "guidance": prop.guidance,
                     "manual": prop.manual,
                     "required": prop.required,
@@ -456,7 +456,7 @@ async def _apply_dossier_classes(ctx: _ApplyCtx) -> None:
                 p_row,
                 {
                     "description": prop.description,
-                    "schema": prop.schema,
+                    "schema": prop.schema_,
                     "guidance": prop.guidance,
                     "manual": prop.manual,
                     "required": prop.required,

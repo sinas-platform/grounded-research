@@ -115,7 +115,6 @@ def test_legacy_stages_key_is_rejected_not_silently_ignored():
     sgr_sink hit on 7 Aug)."""
     import pydantic
     import pytest as _pytest
-
     from app.schemas.ingestion import RunCreateIn
 
     with _pytest.raises(pydantic.ValidationError):

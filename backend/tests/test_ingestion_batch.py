@@ -4,7 +4,6 @@ import asyncio
 import uuid
 
 import pytest
-
 from app.services import ingestion_batch
 from app.services.ingestion_batch import BatchWaveClient
 

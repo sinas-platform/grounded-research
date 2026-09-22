@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, text
@@ -96,7 +96,7 @@ async def replay_unresolved(
                 row.resolved_relationship_id = rel.id
         if write:
             row.status = "resolved"
-            row.resolved_at = datetime.now(timezone.utc)
+            row.resolved_at = datetime.now(UTC)
             report["aliases_learned"] += await learn_aliases(
                 session, hit, [row.target_key])
         key_index.learn(hit, row.target_key)
@@ -210,7 +210,7 @@ async def backfill_full_text_entities(
             await session.flush()
             row.status = "resolved"
             row.resolved_relationship_id = rel.id
-            row.resolved_at = datetime.now(timezone.utc)
+            row.resolved_at = datetime.now(UTC)
             await learn_aliases(session, hit, [row.target_key])
             key_index.learn(hit, row.target_key)
             report["touched_entities"].add(hit)

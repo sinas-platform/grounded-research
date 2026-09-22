@@ -128,7 +128,7 @@ class Settings(BaseSettings):
     )
 
     @model_validator(mode="after")
-    def _read_api_key_file(self) -> "Settings":
+    def _read_api_key_file(self) -> Settings:
         """Resolve SINAS_API_KEY_FILE into sinas_api_key.
 
         The literal env var wins when both are set: an operator overriding a

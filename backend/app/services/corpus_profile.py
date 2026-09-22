@@ -62,7 +62,7 @@ import json
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import text
@@ -223,8 +223,8 @@ async def entity_type_block(session) -> tuple[str, str | None]:
 
 def _age_s(when: datetime) -> float:
     if when.tzinfo is None:
-        when = when.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - when).total_seconds()
+        when = when.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - when).total_seconds()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -358,7 +358,7 @@ async def refresh_corpus_profile(force: bool = False) -> dict[str, Any]:
             examples.setdefault(tid, []).append(str(form))
 
         rows = profile_rows(type_ids, counts, 1.0,
-                            examples, datetime.now(timezone.utc))
+                            examples, datetime.now(UTC))
         await _guarded_write(session, rows)
 
     stats["types"] = len(rows)

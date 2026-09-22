@@ -20,12 +20,11 @@ answers, and the work is bounded by the documents the answer already cites.
 from __future__ import annotations
 
 import pytest
-
 from app.services.reread import (
     Cited,
+    apply_reread,
     needs_reread,
     reread_prompt,
-    apply_reread,
 )
 
 PARTS = [

@@ -8,7 +8,7 @@ advanced by polling.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -77,7 +77,7 @@ async def _create_and_submit(
         done_units=0,
         failed_units=0,
         started_by=caller.user_id,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
         sinas_batch_ids={"mode": "provider"} if batch else None,
     )
     session.add(run)

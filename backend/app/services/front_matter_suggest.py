@@ -11,7 +11,7 @@ agent needed.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -33,7 +33,6 @@ from app.services.front_matter import (
     upgrade_cardinality,
 )
 
-
 # Read content_md in chunks so 35k-doc corpora don't materialize in one query.
 _BATCH = 200
 
@@ -50,7 +49,7 @@ async def run_front_matter_suggest(
     (run, candidate_count, proposal_count, docs_with_front_matter)."""
     doc_ids = await _select_documents(session, f, parent_class_id, sample_size)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     # Use status="completed" from the start: the whole scan happens inside
     # this single transaction, so there's no in-flight state worth modelling.
     # Importantly this keeps the run out of `_resume_running_runs`'s reach

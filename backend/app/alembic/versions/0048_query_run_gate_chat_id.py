@@ -14,8 +14,8 @@ conversation, and one that predates this has none either.
 Revision ID: 0048
 Revises: 0047
 """
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0048"
 down_revision = "0047"

@@ -21,8 +21,9 @@ See ADR `docs/adrs/2026-05-14-stateful-filter-on-result.md`.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Callable
+from collections.abc import Callable
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete, func, select
@@ -38,13 +39,12 @@ from app.schemas.result_filter import FilterMutationOut
 from app.schemas.runtime import (
     EntityFilter,
     FieldFilter,
-    SgrFilter,
     IntrospectOut,
     RegexFilter,
+    SgrFilter,
 )
 from app.services.introspect import count_candidates, introspect_with_filter
 from app.services.visibility import visible_clause
-
 
 # Author attribution for server-written trace rows. Agents writing narrative
 # entries via append_trace use their own namespace/name; "sgr" here is the
@@ -149,7 +149,7 @@ async def _mutate_filter(
                 "candidate_count_before": before_count,
                 "candidate_count_after": after_count,
             },
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -742,7 +742,7 @@ async def merge_results(
                 "per_child": per_child,
                 "total_documents": len(existing),
             },
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -892,7 +892,7 @@ async def expand_result_graph(
                 "added": added,
                 "total_documents": len(attached),
             },
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -942,7 +942,7 @@ async def remove_files_from_result(
                 "reason": reason,
             },
             outcome={"remaining_doc_count": remaining},
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -970,7 +970,7 @@ async def clear_result_files(
             action="clear_result_files",
             parameters={},
             outcome={"remaining_doc_count": 0},
-            occurred_at=datetime.now(timezone.utc),
+            occurred_at=datetime.now(UTC),
         )
     )
     await session.commit()
@@ -1010,7 +1010,9 @@ async def list_candidates_by_result(
     is false. Total result-set size can be very large; the page limit caps each
     call so the tool result fits.
     """
-    from sqlalchemy import asc as sa_asc, desc as sa_desc
+    from sqlalchemy import asc as sa_asc
+    from sqlalchemy import desc as sa_desc
+
     from app.models import Document, DocumentClassProperty, PropertyValue
     from app.services.introspect import apply_sgr_filter
     from app.services.visibility import visible_clause

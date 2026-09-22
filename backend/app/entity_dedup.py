@@ -27,7 +27,6 @@ import argparse
 import asyncio
 import json
 import logging
-import uuid
 from collections import defaultdict
 from pathlib import Path
 
@@ -155,7 +154,7 @@ async def _judge_and_merge(fuzzy) -> int:
     for start in range(0, len(fuzzy), _PAIRS_PER_PROMPT):
         block = fuzzy[start:start + _PAIRS_PER_PROMPT]
         lines = []
-        for i, (a, b, jac, tname) in enumerate(block, start=1):
+        for i, (a, b, _jac, tname) in enumerate(block, start=1):
             lines.append(f'PAIR {i} (type {tname}):\n'
                          f'  A: "{a.canonical_form[:200]}"\n'
                          f'  B: "{b.canonical_form[:200]}"')
@@ -176,16 +175,16 @@ async def _judge_and_merge(fuzzy) -> int:
                 continue
             block = fuzzy[pi * _PAIRS_PER_PROMPT:
                           (pi + 1) * _PAIRS_PER_PROMPT]
-            for i, (a, b, jac, tname) in enumerate(block, start=1):
+            for i, (a, b, _jac, _tname) in enumerate(block, start=1):
                 v = verdicts.get(i) or {}
                 if v.get("same") and float(v.get("confidence") or 0) >= 0.8:
                     s = await session.get(type(a), a.id)
-                    l = await session.get(type(b), b.id)
-                    if (s is None or l is None
-                            or l.merged_into_id is not None
+                    loser_row = await session.get(type(b), b.id)
+                    if (s is None or loser_row is None
+                            or loser_row.merged_into_id is not None
                             or s.merged_into_id is not None):
                         continue
-                    await apply_merge(session, s, l)
+                    await apply_merge(session, s, loser_row)
                     llm_merged += 1
         await session.commit()
     return llm_merged
@@ -226,10 +225,10 @@ async def run_apply(mode: str, tighten: bool = True, types=None) -> dict:
         async with AsyncSessionLocal() as session:
             for survivor, loser in exact:
                 s = await session.get(type(survivor), survivor.id)
-                l = await session.get(type(loser), loser.id)
-                if l is None or l.merged_into_id is not None:
+                loser_row = await session.get(type(loser), loser.id)
+                if loser_row is None or loser_row.merged_into_id is not None:
                     continue
-                await apply_merge(session, s, l)
+                await apply_merge(session, s, loser_row)
                 merged += 1
             await session.commit()
     else:
@@ -304,16 +303,16 @@ async def main() -> None:
         async with AsyncSessionLocal() as session:
             for survivor, loser in exact:
                 s = await session.get(type(survivor), survivor.id)
-                l = await session.get(type(loser), loser.id)
-                if l is None or l.merged_into_id is not None:
+                loser_row = await session.get(type(loser), loser.id)
+                if loser_row is None or loser_row.merged_into_id is not None:
                     continue
-                await apply_merge(session, s, l)
+                await apply_merge(session, s, loser_row)
                 merged += 1
             await session.commit()
         print(f"exact merges applied: {merged}")
 
     if args.apply_llm and fuzzy:
-        from app.bulk_pipeline import BatchClient, SUBMIT_MAX
+        from app.bulk_pipeline import BatchClient
         from app.services.entity_resolver import RESOLVER_AGENT
 
         job_dir = Path(args.job_dir).expanduser()
@@ -324,7 +323,7 @@ async def main() -> None:
         for start in range(0, len(fuzzy), _PAIRS_PER_PROMPT):
             block = fuzzy[start:start + _PAIRS_PER_PROMPT]
             lines = []
-            for i, (a, b, jac, tname) in enumerate(block, start=1):
+            for i, (a, b, _jac, tname) in enumerate(block, start=1):
                 lines.append(f'PAIR {i} (type {tname}):\n'
                              f'  A: "{a.canonical_form[:200]}"\n'
                              f'  B: "{b.canonical_form[:200]}"')
@@ -345,16 +344,16 @@ async def main() -> None:
                     continue
                 block = fuzzy[pi * _PAIRS_PER_PROMPT:
                               (pi + 1) * _PAIRS_PER_PROMPT]
-                for i, (a, b, jac, tname) in enumerate(block, start=1):
+                for i, (a, b, _jac, _tname) in enumerate(block, start=1):
                     v = verdicts.get(i) or {}
                     if v.get("same") and float(v.get("confidence") or 0) >= 0.8:
                         s = await session.get(type(a), a.id)
-                        l = await session.get(type(b), b.id)
-                        if (s is None or l is None
-                                or l.merged_into_id is not None
+                        loser_row = await session.get(type(b), b.id)
+                        if (s is None or loser_row is None
+                                or loser_row.merged_into_id is not None
                                 or s.merged_into_id is not None):
                             continue
-                        await apply_merge(session, s, l)
+                        await apply_merge(session, s, loser_row)
                         llm_merged += 1
             await session.commit()
         print(f"llm merges applied: {llm_merged}")

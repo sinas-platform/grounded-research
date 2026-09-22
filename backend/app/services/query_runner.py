@@ -29,8 +29,7 @@ import json
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -271,7 +270,7 @@ def _is_transient(exc: Exception) -> bool:
     # accepted and be running it, and retrying would start the same work
     # twice while only the attempt whose response arrives gets its chat
     # recorded, so the run would pay for both and see one.
-    return isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout))
+    return isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout)
 
 
 class _Sinas:
@@ -491,28 +490,6 @@ async def _tele(run_id: uuid.UUID, stage: str, **detail: Any) -> None:
         await session.commit()
 
 
-@asynccontextmanager
-async def _timed(run_id: uuid.UUID, stage: str) -> AsyncIterator[None]:
-    """Record when a stage starts, ends and how long it took.
-
-    Stages recorded their own timings inconsistently — `draft` carried
-    started/completed, `retrieval` only completed, `extract` neither — so a
-    run's telemetry could not say where its wall clock went. On a measured
-    52-minute run the logged model calls accounted for 932s; the remaining
-    ~2,800s sat between them, and nothing persisted said which stage was
-    holding it. `elapsed_s` is written even when the stage raises, because a
-    stage that dies slowly is exactly the one worth timing.
-    """
-    t0 = time.monotonic()
-    await _tele(run_id, stage, started=_iso())
-    try:
-        yield
-    finally:
-        await _tele(
-            run_id, stage, completed=_iso(), elapsed_s=round(time.monotonic() - t0, 1)
-        )
-
-
 def _chat_ids_for_cleanup(telemetry: dict | None, searches: dict | None) -> list[str]:
     """Chats found in the state the retired chat-based pipeline recorded:
     telemetry entries carrying a chat_id (discovery and its stages) and those
@@ -574,57 +551,6 @@ async def _teardown_chats(sinas: _Sinas, chat_ids: list[str]) -> None:
 
 
 # ── stages ──────────────────────────────────────────────────────────────────
-
-
-async def _stage_merge(run_id: uuid.UUID, children: list[str]) -> uuid.UUID:
-    from app.services.result_filter import merge_results
-
-    async with AsyncSessionLocal() as session:
-        run = await session.get(QueryRun, run_id)
-        if run.parent_result_id:
-            return run.parent_result_id
-        caller = _runner_caller(run)
-        question = run.question
-        await session.commit()
-
-    await _mark(run_id, status="merging")
-    child_ids = [uuid.UUID(c) for c in children]
-    async with AsyncSessionLocal() as session:
-        if len(child_ids) == 1:
-            parent_id = child_ids[0]
-        else:
-            parent = Result(
-                query=question,
-                invoked_skill_names=["query-run"],
-                owner_id=caller.user_id,
-                roles=caller.roles or [],
-            )
-            session.add(parent)
-            await session.commit()
-            await session.refresh(parent)
-            parent_id = parent.id
-            summary = await merge_results(session, caller, parent_id, child_ids)
-            await _tele(run_id, "merge", **{k: v for k, v in summary.items() if k != "parent_result_id"})
-        # publish via the API layer's logic (coverage metric) is HTTP-only;
-        # publishing directly here keeps it in-process:
-        row = await session.get(Result, parent_id)
-        if row.status != "published":
-            row.status = "published"
-            row.published_at = _now()
-            await session.commit()
-    await _mark(run_id, parent_result_id=parent_id)
-    return parent_id
-
-
-async def _stage_discovery(run_id: uuid.UUID, sinas: _Sinas) -> None:
-    async with AsyncSessionLocal() as session:
-        run = await session.get(QueryRun, run_id)
-        if not run.run_discovery or (run.telemetry or {}).get("discovery"):
-            return
-        parent = run.parent_result_id
-    chat = await sinas.chat_create("sgr/relationship-discovery-agent", "[query-run] discovery")
-    sinas.send_detached(chat, f"Surface relationship proposals for the documents of result {parent}. Write proposals only.")
-    await _tele(run_id, "discovery", fired=_iso(), chat_id=chat)
 
 
 async def _manifest_rows(parent_id: uuid.UUID) -> list[dict]:
@@ -1231,43 +1157,6 @@ def _chunk_numbered(content: str, toc, cap: int) -> tuple[list[dict], dict | Non
 
 # Retained from #95 for its tests and as the single-string capping
 # reference; production extraction now chunks via _chunk_numbered.
-def _number_and_cap(content: str, cap: int) -> tuple[str, dict | None]:
-    """Number every line, then cut at the last complete line that still fits.
-
-    Returns the numbered text and, when it had to be cut, a record of what was
-    lost.
-
-    Cutting on a line boundary rather than mid-string is the point. A slice
-    through a line leaves a fragment still carrying its line number, which the
-    model cannot tell from a complete line: it can then quote the fragment and
-    the quote verifies, because the fragment is genuinely what that line
-    contains as far as anything downstream can see. The document simply ends,
-    with no marker, in the middle of a sentence.
-
-    Nothing here raises the cap or splits the document. The caller loses
-    slightly more text than before, which is the honest direction: what it
-    loses, it now knows about.
-    """
-    lines = content.splitlines()
-    numbered = "\n".join(f"{i+1}: {line}" for i, line in enumerate(lines))
-    if len(numbered) <= cap:
-        return numbered, None
-
-    kept = numbered[:cap]
-    boundary = kept.rfind("\n")
-    # A first line longer than the cap leaves nothing whole to keep. Sending a
-    # fragment would be the failure this function exists to remove, so send
-    # nothing and let the record say the whole document was dropped.
-    kept = kept[:boundary] if boundary > 0 else ""
-    kept_lines = kept.count("\n") + 1 if kept else 0
-    return kept, {
-        "numbered_chars": len(numbered),
-        "cap": cap,
-        "dropped_chars": len(numbered) - len(kept),
-        "dropped_lines": len(lines) - kept_lines,
-    }
-
-
 async def _fetch_numbered(
     filenames: list[str], cap_chars: int = EXTRACT_DOC_CHAR_CAP
 ) -> tuple[dict[str, list[dict]], list[dict]]:
@@ -1796,7 +1685,7 @@ async def _content_anchors(
             lines = []
             if hits:
                 best = max(hits, key=lambda t: (any(c.isdigit() for c in t), len(t)))
-                pos, ln = 0, []
+                _pos, ln = 0, []
                 for m in re.finditer(re.escape(best), low):
                     ln.append(low.count("\n", 0, m.start()) + 1)
                     if len(ln) >= 3:
@@ -2537,7 +2426,7 @@ def _locator_of(evidence: dict) -> str | None:
     column width; a "locator" that is a sentence is not a locator. Pure.
     """
     raw = evidence.get("locator")
-    if raw is None or isinstance(raw, bool) or isinstance(raw, (list, dict)):
+    if raw is None or isinstance(raw, bool) or isinstance(raw, list | dict):
         return None
     s = str(raw).strip()
     if not s or s.lower() in ("null", "none", "n/a"):
@@ -2562,7 +2451,7 @@ def _evidence_entries(claim: dict, limit: int = 4) -> list[dict]:
     them read by sending two bad ones.
     """
     entries = claim.get("evidence")
-    if not isinstance(entries, (list, tuple)):
+    if not isinstance(entries, list | tuple):
         return []
     return [e for e in entries[:limit] if isinstance(e, dict)]
 
@@ -2593,7 +2482,7 @@ def _no_text_record(sequence: int, claim: dict) -> dict:
         "evidence_unreadable": sum(
             1 for e in (claim.get("evidence") or [])[:4]
             if not isinstance(e, dict)
-        ) if isinstance(claim.get("evidence"), (list, tuple)) else 0,
+        ) if isinstance(claim.get("evidence"), list | tuple) else 0,
         "type": str(claim.get("type") or "")[:50],
     }
 
@@ -4025,7 +3914,7 @@ def _seq_list(raw) -> list[int]:
     """
     if raw is None:
         return []
-    if isinstance(raw, (str, bytes)) or not isinstance(raw, (list, tuple, set)):
+    if isinstance(raw, str | bytes) or not isinstance(raw, list | tuple | set):
         raw = [raw]
     out: list[int] = []
     for x in raw:
@@ -4075,7 +3964,7 @@ def _tension_pairs(raw, claim_seqs: set) -> list[dict]:
         # not a claim number and folds repeats: [1, 2, 1] and [1, 2, null]
         # would come out as a clean pair from an entry that named three.
         claims = x.get("claims")
-        if not isinstance(claims, (list, tuple)) or len(claims) != 2:
+        if not isinstance(claims, list | tuple) or len(claims) != 2:
             continue
         nums = _seq_list(claims)
         if len(nums) != 2 or not set(nums) <= claim_seqs:
@@ -4209,8 +4098,7 @@ async def _reread_cited_for_parts(
     failure costs a finding rather than inventing one, and the run must not
     fail because a second look could not be taken.
     """
-    from app.services.reread import (
-        Cited, apply_reread, needs_reread, reread_prompt)
+    from app.services.reread import Cited, apply_reread, needs_reread, reread_prompt
 
     want = [i for i, p in enumerate(parts) if not p.get("covered")]
     if not want:
@@ -4527,7 +4415,7 @@ async def _look_owed(
                                          Cited(filename=n, text=text_of[n])),
                       n, text_of[n])
         for n in readable])
-    return {n: h for n, h in zip(readable, hits) if h}
+    return {n: h for n, h in zip(readable, hits, strict=False) if h}
 
 
 async def _look_higher(sinas: _Sinas, gap, counts: dict[str, int]) -> dict | None:
@@ -4992,7 +4880,7 @@ async def _gate_answer(
             f"Two claims cannot both be true. {settle} "
             f"The conflict: {raw_tension.strip()}"
         )
-    dang = [s for s in (data.get("dangling") or []) if isinstance(s, (int, str))]
+    dang = [s for s in (data.get("dangling") or []) if isinstance(s, int | str)]
     if dang:
         correctness.append(
             "Claims " + ", ".join(str(s) for s in dang) + " depend on reasoning "
@@ -5425,23 +5313,6 @@ def _unused_sources(data: dict, part_count: int = 0) -> list[dict]:
                     "importance": importance, "essential_because": why,
                     "part": idx})
     return out
-
-
-def _gate_remediation_msg(missing: str, issues: list[str]) -> str:
-    parts = ([f"The verified claims no longer fully answer the question. Missing: {missing}"]
-             if missing else []) + issues
-    return (
-        "Answer review found problems to fix before publication:\n- "
-        + "\n- ".join(parts)
-        + "\nGround every new or revised claim ONLY in evidence you can bind "
-        "(read documents with numbered:true and copy the visible line numbers "
-        "into spans). Revise an existing claim by re-posting its sequence "
-        "number. When the problem is voice — the cited passage reports an "
-        "advocate's or interested party's words, and the claim presents them "
-        "as the decider's own finding — the fix is re-attribution, not "
-        "dropping: restate the claim in the true voice if it still advances "
-        "the answer. Then reply REMEDIATION COMPLETE."
-    )
 
 
 def _overreach_detail(verdicts: list[dict]) -> list[dict]:
@@ -7811,7 +7682,7 @@ async def _stage_retrieve_first(run_id: uuid.UUID) -> None:
                                 owner_id=owner_id, roles=roles)
     await _mark(run_id, parent_result_id=uuid.UUID(str(rid)))
     await _tele(run_id, "retrieval", completed=_iso(),
-                documents=len(ranked), queries=len(plan.get("queries") or []))
+                documents=len(ranked), hypotheses=len(plan.get("hypotheses") or []))
 
 
 # ── entrypoint ──────────────────────────────────────────────────────────────

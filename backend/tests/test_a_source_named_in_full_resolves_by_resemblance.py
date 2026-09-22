@@ -30,7 +30,6 @@ from __future__ import annotations
 import inspect
 
 import pytest
-
 from app import retrieval_first as rf
 
 

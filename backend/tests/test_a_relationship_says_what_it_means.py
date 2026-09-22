@@ -24,12 +24,11 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from pydantic import ValidationError
-
 from app.schemas.package import ENGINE_ROLES, PackageRelationshipRoles
 from app.services import package as package_service
 from app.services import relationship_roles as roles
 from app.services.answer_structure import TIER_ANNOTATION, tier_of
+from pydantic import ValidationError
 
 # ── the block, as a package writes it ────────────────────────────────────────
 

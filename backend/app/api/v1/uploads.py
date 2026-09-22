@@ -8,8 +8,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import (APIRouter, Depends, File, Form, HTTPException,
-                     UploadFile, status)
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,7 +42,7 @@ async def upload_document(
         content = raw.decode("utf-8")
     except UnicodeDecodeError:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
-                            "uploads must be UTF-8 text (markdown)")
+                            "uploads must be UTF-8 text (markdown)") from None
 
     declared_class_id: uuid.UUID | None = None
     if document_class is not None:

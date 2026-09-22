@@ -38,7 +38,6 @@ import logging
 import os
 import re
 import socket
-import sys
 import time
 import uuid
 from collections import defaultdict
@@ -835,7 +834,7 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
     props_owners: list[str] = []
     # No session here: this block reads nothing from the database (it was
     # holding a pooled connection open across pure string work).
-    for wi, ((did, fn, content), reply) in enumerate(zip(work, r1)):
+    for wi, ((_did, fn, content), reply) in enumerate(zip(work, r1, strict=False)):
         if not reply:
             continue
         rule = one.classify_by_rules(fn, class_rules)
@@ -867,7 +866,7 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
     # round 2: chunk prompts for long docs
     chunk_prompts: list[str] = []
     chunk_keys: list[tuple[str, int]] = []
-    for wi, ((did, fn, content), reply) in enumerate(zip(work, r1)):
+    for wi, ((_did, fn, content), reply) in enumerate(zip(work, r1, strict=False)):
         if not reply:
             continue
         chunks = one._entity_chunks(content)
@@ -888,13 +887,13 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
 
     # persist via the normal pipeline with stored replies, bounded groups
     front_map: dict[str, list[str]] = defaultdict(list)
-    for (did, fn, _), reply in zip(work, r1):
+    for (_did, fn, _), reply in zip(work, r1, strict=False):
         if reply:
             front_map[fn].append(reply)
-    for fn, reply in zip(props_owners, r15):
+    for fn, reply in zip(props_owners, r15, strict=False):
         if reply:
             front_map[fn].append(reply)  # served second, after the front reply
-    chunk_map = {k: v for k, v in zip(chunk_keys, r2) if v}
+    chunk_map = {k: v for k, v in zip(chunk_keys, r2, strict=False) if v}
 
     ok = 0
     failed: dict[str, str] = {}
@@ -927,7 +926,7 @@ async def stage_extract(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
 
         reports = await await_dependency(
             f"extract-persist {start // PERSIST_GROUP}", _persist_group)
-        for (did, fn, _), rep in zip(group, reports):
+        for (_did, fn, _), rep in zip(group, reports, strict=False):
             if rep.get("error"):
                 failed[fn] = str(rep["error"])[:200]
             else:
@@ -970,7 +969,7 @@ async def stage_resolve(doc_ids: list[uuid.UUID], job_dir: Path) -> dict:
         "ground", gg.GROUNDING_AGENT, [c["prompt"] for _, c in g_items]
     ) if g_items else []
     g_done = 0
-    for (did, col), reply in zip(g_items, g_replies):
+    for (did, col), reply in zip(g_items, g_replies, strict=False):
         try:
             await db_op(
                 f"ground-apply {did}",
@@ -1135,8 +1134,8 @@ async def main() -> None:
                         format="%(asctime)s %(name)s %(message)s")
     job_dir = Path(args.job_dir).expanduser()
     job_dir.mkdir(parents=True, exist_ok=True)
-    doc_ids = [uuid.UUID(l.strip()) for l in
-               Path(args.ids_file).read_text().splitlines() if l.strip()]
+    doc_ids = [uuid.UUID(line.strip()) for line in
+               Path(args.ids_file).read_text().splitlines() if line.strip()]
     stages = args.stages.split(",")
     report: dict = {"doc_count": len(doc_ids), "stages": {}}
 

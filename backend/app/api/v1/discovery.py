@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sinas import SinasClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import CallerIdentity, get_caller, require_permission
+from app.config import get_settings
 from app.db import get_session
 from app.models import (
     ConfigProposal,
@@ -46,12 +48,12 @@ from app.schemas.discovery import (
 from app.services.discovery_runner import (
     expand_filter,
     materialize_run,
-    progress as discovery_progress,
     submit_scan,
 )
+from app.services.discovery_runner import (
+    progress as discovery_progress,
+)
 from app.services.front_matter_suggest import run_front_matter_suggest
-from sinas import SinasClient
-from app.config import get_settings
 
 router = APIRouter(prefix="/discovery", tags=["discovery"])
 
@@ -100,7 +102,7 @@ async def create_discovery_run(
         candidate_count=0,
         proposal_count=0,
         started_by=caller.user_id,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(run)
     await session.flush()
@@ -181,7 +183,7 @@ async def suggest(
                 candidate_count=0,
                 proposal_count=0,
                 started_by=caller.user_id,
-                created_at=datetime.now(timezone.utc),
+                created_at=datetime.now(UTC),
             )
             session.add(run)
             await session.flush()
@@ -367,7 +369,7 @@ async def submit_discovery_candidate(
         evidence_document_id=payload.evidence_document_id,
         evidence_span=payload.evidence_span,
         confidence=payload.confidence,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(cand)
     await session.commit()
@@ -393,7 +395,7 @@ async def submit_consolidated_proposal(
         status="pending",
         supporting_candidate_ids=[str(cid) for cid in payload.supporting_candidate_ids],
         discovery_run_id=payload.run_id,
-        created_at=datetime.now(timezone.utc),
+        created_at=datetime.now(UTC),
     )
     session.add(proposal)
     await session.commit()
@@ -498,7 +500,7 @@ async def approve_proposal(
 
     row.status = "approved"
     row.created_resource_id = created_id
-    row.reviewed_at = datetime.now(timezone.utc)
+    row.reviewed_at = datetime.now(UTC)
     row.reviewed_by = caller.user_id
     await session.commit()
     await session.refresh(row)
@@ -521,7 +523,7 @@ async def reject_proposal(
     if row.status != "pending":
         raise HTTPException(status.HTTP_409_CONFLICT, "proposal already resolved")
     row.status = "rejected"
-    row.reviewed_at = datetime.now(timezone.utc)
+    row.reviewed_at = datetime.now(UTC)
     row.reviewed_by = caller.user_id
     await session.commit()
     await session.refresh(row)
@@ -546,7 +548,7 @@ async def merge_proposal(
         raise HTTPException(status.HTTP_409_CONFLICT, "proposal already resolved")
     row.status = "merged"
     row.merged_into_id = payload.target_id
-    row.reviewed_at = datetime.now(timezone.utc)
+    row.reviewed_at = datetime.now(UTC)
     row.reviewed_by = caller.user_id
     await session.commit()
     await session.refresh(row)

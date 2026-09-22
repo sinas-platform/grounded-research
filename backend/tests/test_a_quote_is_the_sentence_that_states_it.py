@@ -20,8 +20,7 @@ Run from the backend directory:
 
 from __future__ import annotations
 
-from app.services.query_runner import (_QUOTE_FLOOR_CHARS, _QUOTE_TARGET_CHARS,
-                                       _quote_lengths)
+from app.services.query_runner import _QUOTE_FLOOR_CHARS, _QUOTE_TARGET_CHARS, _quote_lengths
 
 
 def _r(*lengths):

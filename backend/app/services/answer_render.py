@@ -112,7 +112,7 @@ def _field(doc: dict | None, key: str) -> str | None:
     v = (doc or {}).get(key)
     if v in (None, "", [], {}):
         return None
-    if isinstance(v, (list, tuple, set)):
+    if isinstance(v, list | tuple | set):
         seen = [t for t in (_str(unwrap(x)).strip() for x in v) if t]
         return ", ".join(dict.fromkeys(seen)) or None
     return _str(v)

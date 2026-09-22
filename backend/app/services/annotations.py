@@ -191,20 +191,6 @@ def normalize_reduce(reduce: str | dict) -> dict[str, str]:
     return mapping
 
 
-def validate_definition(path_text: str, reduce: str | dict, known_names: set[str]) -> Path:
-    """Full config-load validation: syntax, reducers, relationship names.
-    Returns the parsed path. Raises AnnotationConfigError with a message
-    naming exactly what is wrong."""
-    path = parse_path(path_text)
-    normalize_reduce(reduce)
-    unknown = sorted(path.names - known_names)
-    if unknown:
-        raise AnnotationConfigError(
-            "path references unknown relationship definition(s): " + ", ".join(unknown)
-        )
-    return path
-
-
 # ─────────────────────────────────────────────────────────────
 # Walk
 # ─────────────────────────────────────────────────────────────

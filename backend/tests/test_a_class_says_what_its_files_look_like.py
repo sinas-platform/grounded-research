@@ -192,10 +192,9 @@ def test_the_title_subquery_reads_the_class_s_declared_name_property():
     filename on every reader surface — the API document list, the results
     list, the rendered answer's source lines — with nothing saying why. The
     class already declares `name_property` for exactly this."""
-    from sqlalchemy import select
-
     from app.models import Document
     from app.services.document_identity import document_title_subquery
+    from sqlalchemy import select
 
     sql = str(select(Document.id, document_title_subquery()))
     assert "document_class_property.name = document_class.name_property" in sql

@@ -110,7 +110,7 @@ class BatchWaveClient:
                 *(self._submit_and_resolve(agent, chunk) for chunk in chunks),
                 return_exceptions=True,
             )
-            for chunk, outcome in zip(chunks, results):
+            for chunk, outcome in zip(chunks, results, strict=False):
                 if isinstance(outcome, BaseException):
                     log.error(
                         "provider batch wave failed for %s: %s", agent, outcome
@@ -133,7 +133,6 @@ class BatchWaveClient:
         # single retry lost anyway, and 26k documents went nowhere for an
         # hour. Sub-batch POLLING stays concurrent — only the upload window
         # is scarce.
-        last_exc: Exception | None = None
         # Twelve attempts, backoff capped at 30 minutes: a provider quota
         # window (hourly, or daily resetting midnight Pacific) must be
         # outlasted, not out-retried. Six attempts exhausted in ~16 minutes
@@ -159,7 +158,6 @@ class BatchWaveClient:
                     )
                 break
             except Exception as exc:  # noqa: BLE001
-                last_exc = exc
                 throttled = "429" in str(exc)
                 if attempt == 12 or not (throttled or attempt == 1):
                     raise
@@ -199,7 +197,7 @@ class BatchWaveClient:
                 break
 
         async with httpx.AsyncClient(timeout=120.0) as c:
-            for (message, fut), chat_id in zip(items, chat_ids):
+            for (_message, fut), chat_id in zip(items, chat_ids, strict=False):
                 try:
                     r = await c.get(f"{self.base}/chats/{chat_id}",
                                     headers=self.headers)
@@ -260,7 +258,7 @@ async def batch_relationship_pass(
         client = BatchWaveClient(run_id)
 
         async def drive_chunk(chunk: list[uuid.UUID] = chunk,
-                              client: "BatchWaveClient" = client) -> None:
+                              client: BatchWaveClient = client) -> None:
             async with AsyncSessionLocal() as session:
                 definitions = await load_definitions(session)
             async def one(did: uuid.UUID) -> None:
@@ -307,7 +305,7 @@ async def batch_grounding_pass(
         client = BatchWaveClient(run_id)
 
         async def drive_chunk(chunk: list[uuid.UUID] = chunk,
-                              client: "BatchWaveClient" = client) -> None:
+                              client: BatchWaveClient = client) -> None:
             collected: list[tuple[uuid.UUID, dict[str, Any]]] = []
             for did in chunk:
                 try:

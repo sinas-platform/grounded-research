@@ -18,9 +18,9 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
-
 from app.models import Answer, QueryRun
-from app.services import objections, query_runner as qr
+from app.services import objections
+from app.services import query_runner as qr
 
 ANSWER_ID = uuid.UUID("33333333-3333-3333-3333-333333333333")
 

@@ -17,10 +17,8 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy.exc import IntegrityError
-
-from app.services import entity_resolver
 from app.services.entity_resolver import _EntityIndex, resolve_document
+from sqlalchemy.exc import IntegrityError
 
 
 class _ExecResult:

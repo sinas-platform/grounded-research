@@ -15,10 +15,9 @@ the answer used.
 from __future__ import annotations
 
 import inspect
-
-import pytest
 import re
 
+import pytest
 from app.services import query_runner as qr
 
 

@@ -8,7 +8,6 @@ Run from the backend directory: `python -m pytest tests/test_toc.py`
 """
 
 import pytest
-
 from app.services.toc import derive_toc
 
 
@@ -124,7 +123,7 @@ def test_md_structure_wins_over_numbered_heuristics():
 
 
 def test_multilingual_wall_of_text_wraps():
-    from app.services.toc import normalize_line_density, _guess_language
+    from app.services.toc import _guess_language, normalize_line_density
 
     fr = ("La Cour constate une infraction dans le secteur de la livraison. "
           "Elle inflige une amende de 3,5 millions EUR aux parties. ") * 30

@@ -76,7 +76,7 @@ class KeyIndex:
         self._offsets: list[int] = []
 
     @classmethod
-    async def load(cls, session: AsyncSession) -> "KeyIndex":
+    async def load(cls, session: AsyncSession) -> KeyIndex:
         idx = cls()
         rows = (await session.execute(
             select(Entity.id, Entity.canonical_form, Entity.natural_key,
@@ -153,7 +153,7 @@ _shared: dict = {"index": None, "at": 0.0}
 _SHARED_TTL = 600.0
 
 
-async def shared_index(session: AsyncSession) -> "KeyIndex":
+async def shared_index(session: AsyncSession) -> KeyIndex:
     """One KeyIndex per process, rebuilt at most every ten minutes.
 
     Loading the index reads every entity and alias — built once per replay

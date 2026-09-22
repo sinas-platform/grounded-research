@@ -340,7 +340,7 @@ def test_abstention_is_offered_only_on_the_final_gate_cycle():
     from app.services import query_runner as qr
 
     src = inspect.getsource(qr._stage_validate_publish)
-    calls = [l for l in src.splitlines() if "last_attempt=" in l]
+    calls = [line for line in src.splitlines() if "last_attempt=" in line]
     assert len(calls) >= 2, "every gate-driven revision must state its cycle"
     for line in calls:
         # budgeted cycles compute the flag; a bonus cycle for an objection
@@ -376,7 +376,7 @@ def test_drafting_input_carries_no_interpretation():
     assert not hasattr(qr, "_dead_chat_diagnosis") or "synthesis-agent" not in synth
     import pytest as _pytest
     from app.config import Settings
-    with _pytest.raises(Exception):
+    with _pytest.raises(ValueError):
         Settings(SGR_DRAFT_MODE="chat")
 
 

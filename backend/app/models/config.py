@@ -73,10 +73,10 @@ class DocumentClass(Base, TimestampMixin):
     #: is the default and what most classes are.
     filename_rules: Mapped[list | None] = mapped_column(JSONB)
 
-    properties: Mapped[list["DocumentClassProperty"]] = relationship(
+    properties: Mapped[list[DocumentClassProperty]] = relationship(
         back_populates="document_class", cascade="all, delete-orphan"
     )
-    entity_types: Mapped[list["DocumentClassEntityType"]] = relationship(
+    entity_types: Mapped[list[DocumentClassEntityType]] = relationship(
         back_populates="document_class", cascade="all, delete-orphan"
     )
 
@@ -164,7 +164,7 @@ class RelationshipDefinition(Base, TimestampMixin):
     # role up, and there are a handful of rows per role at most.
     engine_role: Mapped[str | None] = mapped_column(String(40), index=True)
 
-    states: Mapped[list["RelationshipState"]] = relationship(
+    states: Mapped[list[RelationshipState]] = relationship(
         back_populates="definition", cascade="all, delete-orphan"
     )
 
@@ -232,10 +232,10 @@ class DossierClass(Base, TimestampMixin):
     classification_hints: Mapped[str | None] = mapped_column(Text)
     managed_by: Mapped[str | None] = mapped_column(String(128), index=True)
 
-    properties: Mapped[list["DossierClassProperty"]] = relationship(
+    properties: Mapped[list[DossierClassProperty]] = relationship(
         back_populates="dossier_class", cascade="all, delete-orphan"
     )
-    document_classes: Mapped[list["DossierClassDocumentClass"]] = relationship(
+    document_classes: Mapped[list[DossierClassDocumentClass]] = relationship(
         back_populates="dossier_class", cascade="all, delete-orphan"
     )
 
@@ -292,7 +292,7 @@ class Playbook(Base, TimestampMixin):
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     managed_by: Mapped[str | None] = mapped_column(String(128), index=True)
 
-    scopes: Mapped[list["PlaybookScope"]] = relationship(
+    scopes: Mapped[list[PlaybookScope]] = relationship(
         back_populates="playbook", cascade="all, delete-orphan"
     )
 

@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select
-from sqlalchemy.orm import aliased
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from app.auth import CallerIdentity, get_caller, require_permission
 from app.db import get_session
@@ -140,7 +140,7 @@ async def decide_proposal(
     if proposal is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "proposal not found")
     proposal.status = "approved" if payload.approve else "rejected"
-    proposal.reviewed_at = datetime.now(timezone.utc)
+    proposal.reviewed_at = datetime.now(UTC)
     proposal.reviewed_by = caller.user_id
 
     if payload.approve:
@@ -152,7 +152,7 @@ async def decide_proposal(
             evidence_document_id=proposal.evidence_document_id,
             evidence_span=proposal.evidence_span,
             confidence=proposal.confidence,
-            last_verified_at=datetime.now(timezone.utc),
+            last_verified_at=datetime.now(UTC),
         )
         session.add(rel)
 

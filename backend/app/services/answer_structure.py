@@ -788,21 +788,6 @@ def tier_of(annotations: dict | None,
     return None
 
 
-def issuing_body_of(annotations: dict | None, name: str | None) -> str | None:
-    """Who issued the source, out of the annotation the deployment declared
-    for it (`roles.issuing_body_annotation`). Pure.
-
-    `None` for `name` is a deployment that declares no such annotation, and
-    the answer is then None rather than a lookup under a name the engine
-    picked — there is no issuing body to report, and `resolve` has already
-    said so in the log.
-    """
-    if not name or not isinstance(annotations, dict):
-        return None
-    v = unwrap(annotations.get(name))
-    return str(v) if v not in (None, "") else None
-
-
 #: Month names as the stored values spell them, so a date a source wrote in
 #: words can be read. Five languages because the corpus holds all five; a
 #: month this does not know leaves the value unparsed rather than guessed.
@@ -1118,29 +1103,4 @@ def source_context_line(r: dict, label: str | None = None) -> str:
     return "; ".join(bits)
 
 
-def latest_source_date(rows: list[dict], roles: DeclaredRoles) -> date | None:
-    """The latest date any of these documents carries, or None. Each row's
-    date is the property ITS class declares, so two classes may date
-    themselves differently and both count."""
-    best = None
-    for r in rows:
-        d = document_date(r.get("props"), str(r.get("class") or ""), roles.date)
-        if d and (best is None or d > best):
-            best = d
-    return best
-
-
 # ── validation ───────────────────────────────────────────────────────────────
-
-def judged_text(claim_text: str, test: dict | None) -> str:
-    """What the validator reads for a claim: its text, and for a test claim
-    its conditions numbered in order, so a span pinned to condition 2 is
-    judged against condition 2 and not against the sentence around it."""
-    if not isinstance(test, dict) or not test.get("conditions"):
-        return claim_text
-    lines = [claim_text.rstrip(), "The conditions, in the source's order"
-             + (" (cumulative)" if all(c.get("cumulative") for c in test["conditions"])
-                else "") + ":"]
-    for i, c in enumerate(test["conditions"], start=1):
-        lines.append(f"  {i}. {c.get('text', '')}")
-    return "\n".join(lines)

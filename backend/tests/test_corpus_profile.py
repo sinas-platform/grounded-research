@@ -15,14 +15,13 @@ declared type from what it sampled.
 from __future__ import annotations
 
 import json
-from contextlib import asynccontextmanager
-from types import SimpleNamespace
 import logging
 import uuid
-from datetime import datetime, timedelta, timezone
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
-
 from app.services import corpus_profile as cp
 
 
@@ -146,7 +145,7 @@ class _FakeSession:
 
 def _row(name, mag, examples, age_s=0.0):
     return (name, mag, examples,
-            datetime.now(timezone.utc) - timedelta(seconds=age_s))
+            datetime.now(UTC) - timedelta(seconds=age_s))
 
 
 @pytest.mark.asyncio
@@ -245,7 +244,7 @@ def test_a_plan_made_without_the_profile_says_so_on_the_run():
 # ─────────────────────────────────────────────────────────────
 def test_the_refresh_writes_a_row_for_every_declared_type():
     a, b, c = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = cp.profile_rows(
         [a, b, c],
         sampled_counts={a: 5_000, b: 21},

@@ -78,6 +78,7 @@ def test_drafted_carries_what_was_persisted_not_what_was_offered():
     whose whole value is that something reached the answer.
     """
     import inspect
+
     from app.services import query_runner as qr
 
     src = inspect.getsource(qr._draft_from_extracts)
@@ -117,8 +118,9 @@ def test_an_added_conclusion_survives_having_no_source_of_its_own():
     cycle, until the run ended "could not be made internally consistent"
     having been handed the thing it asked for each time.
     """
-    from app.services.query_runner import _parse_patch
     import json
+
+    from app.services.query_runner import _parse_patch
 
     patch = _parse_patch(json.dumps({"add": [{
         "text": "Taken together, privilege does not extend to advice from a "
@@ -137,8 +139,9 @@ def test_an_added_conclusion_survives_having_no_source_of_its_own():
 
 def test_a_conclusion_that_follows_from_nothing_is_still_dropped():
     """Derived means resting on named claims, not resting on nothing."""
-    from app.services.query_runner import _parse_patch
     import json
+
+    from app.services.query_runner import _parse_patch
 
     patch = _parse_patch(json.dumps({"add": [{
         "text": "Taken together, the protection does not extend that far at all.",
@@ -151,8 +154,9 @@ def test_a_conclusion_that_follows_from_nothing_is_still_dropped():
 
 def test_an_ordinary_claim_still_needs_a_source(): 
     """Only derived kinds are exempt; a rule without a span is not a claim."""
-    from app.services.query_runner import _parse_patch
     import json
+
+    from app.services.query_runner import _parse_patch
 
     patch = _parse_patch(json.dumps({"add": [{
         "text": "The authority may seal business premises during an inspection.",

@@ -26,8 +26,8 @@ from types import SimpleNamespace
 _CLAIM_ID = uuid.UUID("11111111-1111-1111-1111-111111111111")
 
 import pytest
-
-from app.services import objections, query_runner as qr
+from app.services import objections
+from app.services import query_runner as qr
 
 SPLIT_CALL = "Split the question into the distinct things"
 #: The splitter answers with a heading and the full text of each part.

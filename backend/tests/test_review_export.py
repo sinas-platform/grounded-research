@@ -18,14 +18,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from openpyxl import Workbook
-
 from app.review_export import (
     CLAIM_VERDICTS,
     _tab,
     _write_index,
     _write_question,
 )
+from openpyxl import Workbook
 
 ENTRY = {"id": "Q3", "title": "Market boundary", "scope": "UK",
          "question": "Is there authority for treating grocery delivery "

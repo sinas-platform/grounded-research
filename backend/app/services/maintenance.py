@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select, text
@@ -176,10 +176,12 @@ async def run_maintenance() -> dict[str, Any]:
     change the graph that rematerialization then walks."""
     from app.services.corpus_profile import refresh_corpus_profile
     from app.services.entity_keys import shared_index
-    from app.services.key_replay import (backfill_full_text_entities,
-                                         rematerialize, replay_unresolved)
-
     from app.services.generic_entities import refresh_entity_stats
+    from app.services.key_replay import (
+        backfill_full_text_entities,
+        rematerialize,
+        replay_unresolved,
+    )
 
     stats: dict[str, Any] = {}
     async with AsyncSessionLocal() as session:
@@ -188,7 +190,7 @@ async def run_maintenance() -> dict[str, Any]:
         # the whole mention table per matched entity, nine to twelve minutes
         # of planning per question. See `generic_entities.refresh_entity_stats`.
         stats["entity_stats"] = await refresh_entity_stats(
-            session, when=datetime.now(timezone.utc))
+            session, when=datetime.now(UTC))
         ki = await shared_index(session)
         stats["replay"] = await replay_unresolved(session, key_index=ki)
         stats["full_text_backfill"] = await backfill_full_text_entities(
@@ -274,7 +276,7 @@ async def ensure_entity_stats() -> None:
             log.info("entity_stats is empty; computing it once before the "
                      "first maintenance pass")
             stats = await refresh_entity_stats(
-                session, when=datetime.now(timezone.utc))
+                session, when=datetime.now(UTC))
         log.info("entity_stats built: %s", stats)
     except Exception:  # noqa: BLE001 — grounding is better, not required
         log.exception("could not build entity_stats at boot; the planner "

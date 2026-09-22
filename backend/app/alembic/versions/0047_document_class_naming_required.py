@@ -13,8 +13,8 @@ behaves exactly as before.
 Revision ID: 0047
 Revises: 0046
 """
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 
 revision = "0047"
 down_revision = "0046"

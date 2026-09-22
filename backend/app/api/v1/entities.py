@@ -7,9 +7,9 @@ or `closed`, the rows here hold mentions the extractor couldn't auto-promote.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -146,7 +146,7 @@ async def decide_entity_proposal(
             status.HTTP_409_CONFLICT, f"proposal already {proposal.status}"
         )
     proposal.status = "approved" if payload.approve else "rejected"
-    proposal.reviewed_at = datetime.now(timezone.utc)
+    proposal.reviewed_at = datetime.now(UTC)
     proposal.reviewed_by = caller.user_id
 
     promoted_id: uuid.UUID | None = None
@@ -287,7 +287,7 @@ async def match_unresolved_to_entity(
             session.add(EntityAlias(entity_id=entity.id, alias=row.mention_text))
 
     row.status = "resolved"
-    row.resolved_at = datetime.now(timezone.utc)
+    row.resolved_at = datetime.now(UTC)
     row.resolved_by = caller.user_id
     row.resolved_entity_id = entity.id
 
@@ -330,7 +330,7 @@ async def match_unresolved_to_entity(
         )
         .values(
             status="resolved",
-            resolved_at=datetime.now(timezone.utc),
+            resolved_at=datetime.now(UTC),
             resolved_by=caller.user_id,
             resolved_entity_id=entity.id,
         )
@@ -374,7 +374,7 @@ async def promote_unresolved_to_entity(
         )
     )
     row.status = "resolved"
-    row.resolved_at = datetime.now(timezone.utc)
+    row.resolved_at = datetime.now(UTC)
     row.resolved_by = caller.user_id
     row.resolved_entity_id = entity.id
     await session.commit()
@@ -396,7 +396,7 @@ async def dismiss_unresolved(
     if row.status != "unresolved":
         raise HTTPException(status.HTTP_409_CONFLICT, f"already {row.status}")
     row.status = "dismissed"
-    row.resolved_at = datetime.now(timezone.utc)
+    row.resolved_at = datetime.now(UTC)
     row.resolved_by = caller.user_id
     await session.commit()
     return {"status": "dismissed"}

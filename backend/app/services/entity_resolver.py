@@ -245,7 +245,7 @@ async def resolve_document(
             tname = types[m.entity_type_id].name if m.entity_type_id in types else "?"
             lines = [f'MENTION {i}: "{m.surface_form}" (type: {tname})',
                      f'CONTEXT: …{_slice(content, m.span)}…', "CANDIDATES:"]
-            for letter, c in zip("ABCDEFGH", cands):
+            for letter, c in zip("ABCDEFGH", cands, strict=False):
                 ctype = types[c.entity_type_id].name if c.entity_type_id in types else "?"
                 lines.append(f"  {letter}. {c.canonical_form} (type: {ctype})")
             blocks.append("\n".join(lines))
@@ -435,7 +435,7 @@ async def _t4_create(session, index, types, document_id, needs_creation,
 # The candidate lists freeze at collect time by design (16 Aug decision).
 
 async def resolve_collect(
-    session: AsyncSession, index: "_EntityIndex",
+    session: AsyncSession, index: _EntityIndex,
     types: dict[uuid.UUID, EntityType], document_id: uuid.UUID,
 ) -> dict[str, Any]:
     doc = await session.get(Document, document_id)
@@ -460,7 +460,6 @@ async def resolve_collect(
             )
         ).scalar_one_or_none() or ""
 
-    report = {"natural_key": 0, "exact": 0, "adjudicated": 0}
 
     def link(m, eid, method, conf, ev):
         m.entity_id = eid
@@ -503,7 +502,7 @@ async def resolve_collect(
             tname = types[m.entity_type_id].name if m.entity_type_id in types else "?"
             lines = [f'MENTION {i}: "{m.surface_form}" (type: {tname})',
                      f'CONTEXT: …{_slice(content, m.span)}…', "CANDIDATES:"]
-            for letter, c in zip("ABCDEFGH", cands):
+            for letter, c in zip("ABCDEFGH", cands, strict=False):
                 ctype = types[c.entity_type_id].name if c.entity_type_id in types else "?"
                 lines.append(f"  {letter}. {c.canonical_form} (type: {ctype})")
             blocks.append("\n".join(lines))
@@ -516,7 +515,7 @@ async def resolve_collect(
 
 
 async def resolve_apply(
-    session: AsyncSession, index: "_EntityIndex",
+    session: AsyncSession, index: _EntityIndex,
     types: dict[uuid.UUID, EntityType], document_id: uuid.UUID,
     chunks: list[dict], replies: list[str | None],
     creation_ids: list[str], *, write: bool = True,
@@ -542,7 +541,7 @@ async def resolve_apply(
         return m
 
     needs_creation: list[EntityMention] = []
-    for chunk, reply in zip(chunks, replies):
+    for chunk, reply in zip(chunks, replies, strict=False):
         verdicts: dict[int, dict] = {}
         if reply:
             try:

@@ -18,7 +18,6 @@ import uuid
 from types import SimpleNamespace
 
 import pytest
-
 from app.api.v1.ingestion import _alias_match
 from app.services.ingestion_oneshot import _load_gazetteer
 

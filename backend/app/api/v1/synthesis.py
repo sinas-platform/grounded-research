@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
@@ -401,6 +401,6 @@ async def publish_answer(
         )
 
     row.status = "published"
-    row.published_at = datetime.now(timezone.utc)
+    row.published_at = datetime.now(UTC)
     await session.commit()
     return {"id": row.id, "status": row.status}

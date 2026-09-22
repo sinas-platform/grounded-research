@@ -1,3 +1,8 @@
+> **Frozen.** Development of this engine continues in the repository of the
+> deployment that runs it, under `services/grounded_research`, from this
+> repository's `dev` at 860905b. Nothing here is merged any more; open PRs
+> were merged before the move.
+
 # Sinas Grounded Research
 
 > ⚠️ **Status: alpha — built in the open.** APIs, schemas, and the package

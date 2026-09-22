@@ -1,3 +1,5 @@
+**This repository is frozen.** The engine now lives in its deployment's repository under `services/grounded_research`; work there.
+
 # SGR — agent notes
 
 Project-specific instructions for AI assistants and human contributors working on SGR. 

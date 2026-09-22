@@ -19,16 +19,14 @@ matched here before, and a deployment naming its relations anything else got no
 findings, which is byte-identical to a collection that records no supersession.
 See `app.services.relationship_roles`.
 
-THE FILTER IS THE FEATURE. Measured on 10 September 2026, the supersession
-relationship of one collection held 188 edges over 149 targets, and those
-targets reached 21,327 mentions. One target was an entity whose name is a bare
-common noun, carrying 19,311 of them, and two more were not sources of the kind
-the edge is for at all. Reading the relationship without a filter therefore
-reports nearly twenty thousand mentions of superseded authority on the strength
-of a generic string that became an entity. So a target counts only where its
-name carries an identifier the deployment declares for its class, which is the
-same machinery the naming checks use and lives in the same place: the
-deployment's package, not here.
+THE FILTER IS THE FEATURE. A supersession edge can point at something that is
+not a source of the kind the edge is for, such as a bare common noun that
+extraction made into an entity and that then acquired the relationship. That
+target is mentioned wherever the word appears, so reading the relationship
+without a filter reports superseded authority in documents that cite nothing
+superseded. So a target counts only where its name carries an identifier the
+deployment declares for its class, which is the same machinery the naming
+checks use and lives in the same place: the deployment's package, not here.
 """
 
 from __future__ import annotations
@@ -84,14 +82,13 @@ _CITED_SUPERSEDED = text("""
       AND r.source_id <> r.target_id
 """)
 # The last condition: a source cannot supersede itself, and the graph says
-# some do. Measured on 18 September 2026: 22 of one collection's 307
-# supersession edges ran from an entity to that same entity. The shape that
-# makes them is an interim order and the final judgment in one case both
-# resolving to the case's entity, so the edge extracted between the two
-# documents collapses to a loop. Read without this condition, the loop told
+# some do, as supersession edges that run from an entity to that same entity.
+# The shape that makes them is an interim order and the final judgment in one
+# case both resolving to the case's entity, so the edge extracted between the
+# two documents collapses to a loop. Read without this condition, the loop told
 # the drafter the deciding judgment of a question "is recorded as superseded
-# by" itself, and the drafter dropped the citation — the one source the
-# expert review had said was missing. The loop is a resolution artefact, not
+# by" itself, and the drafter dropped the citation. A citation the answer has
+# to keep must not be lost to a loop. The loop is a resolution artefact, not
 # a fact about the law, and no reading of it is worth passing to a reviser.
 
 

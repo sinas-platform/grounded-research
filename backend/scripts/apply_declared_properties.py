@@ -2,19 +2,19 @@
 
 Separate from ingestion on purpose. Ingestion reaches a document once, when it
 arrives, and the disagreements this exists to correct are in documents that
-arrived long ago: on one corpus, 693 stored dates differ from the date printed
-in their own header, and not one of them would be revisited by any ingestion
-run. A correction that only works on arrival is the shape this codebase keeps
+arrived before their class declared anything: a stored value that differs from
+the document's own header stays that way, because no ingestion run revisits
+it. A correction that only works on arrival is the shape this codebase keeps
 meeting, where the fix exists and reaches nothing.
 
 Dry by default. `--apply` writes.
 
-  python -m scripts.apply_declared_properties --class "Court Decision"
-  python -m scripts.apply_declared_properties --class "Court Decision" --apply
+  python -m scripts.apply_declared_properties --class "<class name>"
+  python -m scripts.apply_declared_properties --class "<class name>" --apply
 
-Every replaced value keeps the one it replaced in `reason`, in the shape the
-7 September joined-case split used, so this is reversible the same way and a
-reader who finds a replaced value knows where the old one is.
+Every replaced value keeps the one it replaced in `reason` (see
+`replacement_reason`), so a run is reversible and a reader who finds a
+replaced value knows where the old one is.
 """
 
 from __future__ import annotations

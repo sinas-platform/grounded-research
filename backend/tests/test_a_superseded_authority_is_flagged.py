@@ -1,16 +1,17 @@
 """A cited authority the collection records as superseded should say so.
 
-The reviewer's must-have has three parts and this is the third: never rely on
-superseded case law without flagging it. The first two, citing the leading
-authority together with the most recent decision confirming it, need a stance
-on citation edges that nothing extracts, and are not attempted here.
+An answer resting on case law has three things to get right: cite the leading
+authority, cite the most recent decision that confirms it, and never rely on
+superseded case law without flagging it. This covers the third. The first two
+need a stance on citation edges that nothing extracts, and are not attempted
+here.
 
-The filter is the whole feature. Measured on 10 September 2026 the
-`supersedes` relationship holds 188 edges over 149 targets reaching 21,327
-mentions, and one target is an entity whose name is the bare word "Decision",
-carrying 19,311 of them. Read without a filter the check reports nearly twenty
-thousand mentions of superseded authority because a generic string became an
-entity and the entity acquired a relationship.
+The filter is the whole feature. A `supersedes` edge can point at an entity
+that is not a source at all, such as a bare common noun that extraction made
+into an entity. That target is mentioned wherever the word appears, so read
+without a filter the check reports superseded authority in documents that
+cite nothing superseded, because a generic string became an entity and the
+entity acquired a relationship.
 
 Run from the backend directory:
 `python -m pytest tests/test_a_superseded_authority_is_flagged.py`
@@ -37,7 +38,8 @@ def test_a_named_case_is_kept():
 
 
 def test_the_generic_entity_that_carries_the_relationship_is_dropped():
-    """"Decision" is a real target of a real edge, with 19,311 mentions."""
+    """A bare common noun that carries the relationship names no authority,
+    however often it is mentioned."""
     assert identified([_row("Decision")]) == []
 
 
@@ -102,8 +104,8 @@ def test_every_relationship_read_is_filtered_to_active_edges():
 def test_an_edge_with_no_state_counts_as_active():
     """The convention is the annotation walker's, in three places there, and
     is not re-decided here: a NULL `current_state_id` is active. Dropping
-    those would silence the whole check, because no edge in the corpus
-    carries a state at all."""
+    those would silence the whole check on a graph whose edges were never
+    given a state."""
     from app.services.supersession import _CITED_SUPERSEDED
 
     sql = str(_CITED_SUPERSEDED)
@@ -111,13 +113,13 @@ def test_an_edge_with_no_state_counts_as_active():
 
 
 def test_a_source_is_never_recorded_as_superseding_itself():
-    """Measured on 18 September 2026: 22 of one collection's 307 supersession
-    edges ran from an entity to that same entity — an interim order and the
-    final judgment in one case both resolved to the case's entity, and the
-    edge extracted between the two documents collapsed to a loop. Read as a
-    finding, the loop told the drafter the deciding judgment of a question
-    was "recorded as superseded by" itself, and the drafter dropped it: the
-    one source the expert review had said was missing.
+    """A supersession edge can run from an entity to that same entity. Here an
+    interim order and the final judgment in one case both resolved to the
+    case's entity, and the edge extracted between the two documents collapsed
+    to a loop. Read as a finding, the loop told the drafter the deciding
+    judgment of a question was "recorded as superseded by" itself, and the
+    drafter dropped it. A citation the answer has to keep must not be lost to
+    a loop.
 
     Pinned on the supersession read specifically, by position: the loop
     guard must sit in the WHERE of the outer query, where `r` is the

@@ -187,6 +187,27 @@ async def _cited(answer_id: uuid.UUID) -> set[str]:
         )
 
 
+async def _refusals_accepted(run_id: uuid.UUID) -> set[str]:
+    """Documents the drafter refused to cite and the review accepted that.
+
+    The objections ledger holds that argument, and this ledger never heard
+    how it ended. An accepted refusal is a reviser's judgment with a reason,
+    ruled on by the review: everything a reviser waiver is, and one step more.
+    The feed already treats it as settled. Counting it here as owed kept
+    telling the reviser the question was not fully answered, and kept a
+    cycle running, over a source the review had agreed should stay out.
+
+    ACCEPTED only. A stall is two readers who never agreed, so it stays owed.
+    A resolved objection means the source was cited, and whether it still is
+    belongs to `_cited`.
+    """
+    from app.services import objections
+
+    return {str(e.get("subject") or "") for e in await objections.ledger(run_id)
+            if e.get("kind") == "source"
+            and e.get("state") == objections.ACCEPTED}
+
+
 @_best_effort(list)
 async def unmet(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[dict[str, Any]]:
     """Obligations neither waived nor satisfied, oldest first.
@@ -236,9 +257,11 @@ async def actionable(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[str]:
     if not entries:
         return []
     cited = await _cited(answer_id)
+    accepted = await _refusals_accepted(run_id)
     return [
         doc for doc, e in entries.items()
-        if doc not in cited and not (e.get("waived") or {})
+        if doc not in cited and doc not in accepted
+        and not (e.get("waived") or {})
     ]
 
 
@@ -261,14 +284,16 @@ async def unaccounted(run_id: uuid.UUID, answer_id: uuid.UUID) -> list[str]:
     account would let a run launder its own exhaustion into a clean answer,
     which is the reverse of what the ledger is for.
 
-    So: cited discharges, a reviser waiver discharges, and nothing else does.
+    So: cited discharges, a reviser waiver discharges, a refusal the review
+    accepted discharges, and nothing else does.
     """
     entries = await _load(run_id)
     if not entries:
         return []
     cited = await _cited(answer_id)
+    accepted = await _refusals_accepted(run_id)
     return [
         doc for doc, e in entries.items()
-        if doc not in cited
+        if doc not in cited and doc not in accepted
         and (e.get("waived") or {}).get("by") != "reviser"
     ]

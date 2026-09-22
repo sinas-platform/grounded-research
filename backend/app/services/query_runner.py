@@ -4106,7 +4106,48 @@ def _audit_coverage(named: list[int], claim_seqs: set, with_evidence: set,
 
 
 
-async def _ask_document(sinas: _Sinas, prompt: str, filename: str) -> dict | None:
+def _placed(hit: dict | None, text: str) -> dict | None:
+    """A look's hit moved to the lines its quote is on, or None. Pure.
+
+    The look sends the document whole and unnumbered and asks for the lines
+    anyway, so the numbers that come back are the model's guess. Measured on
+    one run, every reported range pointed at unrelated text hundreds of lines
+    away from a quote that was itself verbatim, and the feed then told the
+    reviser to cite those lines.
+
+    So the quote is found in the stored document with the locator the
+    extraction path uses, numbered the way that path numbers it, across the
+    whole document, and the span is replaced. A quote that cannot be found is
+    not a hit.
+
+    The quote is replaced too, by the document's own text for what matched.
+    The locator falls back to the first 200 characters, which is what
+    verification checks, so a quote whose opening is verbatim can place while
+    its tail was never checked. Handing the reviser the model's whole quote
+    would present that tail as the document's words.
+
+    Held to the floor the evidence check applies: a quote under 20 characters
+    is not placed, because `_verify_passage` would not accept it as evidence
+    either, so the reviser could not cite it, and a string that short cannot
+    be placed unambiguously in a long document.
+    """
+    if not hit:
+        return None
+    lines = (text or "").splitlines()
+    numbered = "\n".join(f"{i+1}: {line}" for i, line in enumerate(lines))
+    quote = str(hit.get("quote") or "")
+    span = _locate_passage(numbered, 1, len(lines), quote, back=0, fwd=0)
+    if span is None:
+        return None
+    chars = _locate_chars(text, span[0], span[1], quote)
+    if chars is None:
+        return None
+    return {**hit, "line_from": span[0], "line_to": span[1],
+            "quote": text[chars[0]:chars[1]]}
+
+
+async def _ask_document(sinas: _Sinas, prompt: str, filename: str,
+                        text: str) -> dict | None:
     """One whole-document look, as a hit or nothing.
 
     The half of a re-read that is not policy: make the call, read the reply,
@@ -4139,8 +4180,9 @@ async def _ask_document(sinas: _Sinas, prompt: str, filename: str) -> dict | Non
         return None
     if not (data.get("found") and str(data.get("quote") or "").strip()):
         return None
-    return {"filename": filename, "line_from": data.get("line_from"),
-            "line_to": data.get("line_to"), "quote": data.get("quote")}
+    return _placed({"filename": filename, "line_from": data.get("line_from"),
+                    "line_to": data.get("line_to"), "quote": data.get("quote")},
+                   text)
 
 
 async def _reread_cited_for_parts(
@@ -4182,7 +4224,7 @@ async def _reread_cited_for_parts(
                 if not src.text or len(src.text) < 40:
                     continue
                 hit = await _ask_document(
-                    sinas, reread_prompt(parts[i], src), src.filename)
+                    sinas, reread_prompt(parts[i], src), src.filename, src.text)
                 if hit:
                     break
             found[i] = hit
@@ -4424,7 +4466,7 @@ async def _look_deeper(
                 return out
             hit = await _ask_document(
                 sinas, deeper_prompt(ask, Cited(filename=filename, text=body)),
-                filename)
+                filename, body)
             if hit and str(hit.get("quote") or "").strip():
                 out.append({"doc": filename, "part": ask, "hit": hit})
     return out
@@ -4470,7 +4512,8 @@ async def _look_owed(
     readable = [n for n in names if len(text_of.get(n, "")) >= 40]
     hits = await asyncio.gather(*[
         _ask_document(sinas, owed_prompt(notes.get(n, ""),
-                                         Cited(filename=n, text=text_of[n])), n)
+                                         Cited(filename=n, text=text_of[n])),
+                      n, text_of[n])
         for n in readable])
     return {n: h for n, h in zip(readable, hits) if h}
 
@@ -4501,7 +4544,7 @@ async def _look_higher(sinas: _Sinas, gap, counts: dict[str, int]) -> dict | Non
             continue
         counts["looked"] += 1
         hit = await _ask_document(
-            sinas, standing_prompt(gap.text, src), src.filename)
+            sinas, standing_prompt(gap.text, src), src.filename, src.text)
         if hit:
             counts["found"] += 1
             return hit

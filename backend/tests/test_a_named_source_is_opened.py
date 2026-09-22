@@ -211,3 +211,14 @@ def _stub_class_documents(monkeypatch, rows) -> None:
         yield _Session()
 
     monkeypatch.setattr(qr, "AsyncSessionLocal", _session_local)
+
+
+@pytest.fixture(autouse=True)
+def _placement_is_tested_elsewhere(monkeypatch):
+    """These tests are about which documents are opened and how many. The
+    stub documents do not carry the stub quotes, and placing a hit on the
+    lines its quote is on is `_placed`'s job, tested with documents that do
+    in test_a_look_cites_the_lines_its_quote_is_on.py."""
+    from app.services import query_runner as qr
+
+    monkeypatch.setattr(qr, "_placed", lambda hit, text: hit)

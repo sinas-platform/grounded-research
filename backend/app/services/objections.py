@@ -408,7 +408,8 @@ async def rule_all(run_id: uuid.UUID, rulings: list[dict],
 @_best_effort(None)
 async def resolve(run_id: uuid.UUID, subjects: list[str],
                   kind: str = "source") -> None:
-    """These requests were met. Terminal, and it outranks every other state.
+    """These requests were met. It outranks every other state while the
+    citation that met it stands; see `reopen_uncited` for when it does not.
 
     Called with what the answer now cites: a source that made it into the
     answer settles its own argument, whatever either side last said about it.
@@ -418,10 +419,58 @@ async def resolve(run_id: uuid.UUID, subjects: list[str],
     for subject in subjects or []:
         entry = entries.get(objection_id(kind, subject))
         if entry is not None and entry.get("state") != RESOLVED:
+            # What the citation replaced, so losing the citation can put it
+            # back. A request already settled by argument stays settled.
+            entry["resolved_from"] = entry.get("state")
             entry["state"] = RESOLVED
             changed = True
     if changed:
         await _store(run_id, entries)
+
+
+@_best_effort(list)
+async def reopen_uncited(run_id: uuid.UUID, cited: set[str] | list[str],
+                         cycle: int = 0) -> list[str]:
+    """Source requests the answer met with a citation it no longer has.
+
+    A request is resolved when its document is cited, and a resolved request
+    is never fed again. Revision and the final sweep can each delete the claim
+    that carried the citation afterwards. The obligations ledger already reads
+    that as a debt again, because it checks the claims live, but the request
+    stayed resolved, so the feed skipped it and the drafter was never asked a
+    second time. Measured on one run: an essential judgment was cited, the
+    claim citing it failed evidence binding two cycles later, and the answer
+    published without it and without the request being put again.
+
+    Only a request met by its own citation reopens. An accepted refusal and a
+    stall were settled by an argument, not by a claim. If the document was
+    cited after one of those, `resolve` recorded the settled state it
+    replaced, and losing the citation returns the request to that state
+    rather than opening it. The history is kept: the exchanges are the
+    argument's, and the cycle of each reopening is recorded beside them.
+
+    Returns the documents reopened.
+    """
+    have = set(cited or [])
+    entries = await _load(run_id)
+    back: list[str] = []
+    changed = False
+    for oid, entry in entries.items():
+        if (entry.get("kind") == "source" and entry.get("state") == RESOLVED
+                and entry.get("subject") not in have):
+            before = entry.get("resolved_from")
+            changed = True
+            if before in (ACCEPTED, STALLED):
+                entry["state"] = before
+                entries[oid] = entry
+                continue
+            entry["state"] = OPEN
+            entry["reopened"] = (entry.get("reopened") or []) + [int(cycle)]
+            entries[oid] = entry
+            back.append(str(entry.get("subject") or ""))
+    if changed:
+        await _store(run_id, entries)
+    return back
 
 
 # -- reading it back ----------------------------------------------------------

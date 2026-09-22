@@ -657,3 +657,104 @@ async def test_a_keep_without_a_reason_is_not_a_keep(reviser):
     assert touched == 0
     assert reviser.tele["validate"]["revision_1"]["yielded_no_change"] is True
     assert reviser.claims[0].rationale is None
+
+
+# -- a request met by a citation the answer later lost -------------------------
+
+
+async def _state(oid):
+    return (await objections._load(RUN))[oid]
+
+
+@pytest.mark.asyncio
+async def test_a_request_met_by_a_citation_reopens_when_the_citation_goes(ledger):
+    """The claim that cited it can be deleted afterwards. The request then
+    stayed resolved and was never put again, while the document was owed."""
+    oid = await _ask(subject="a.md")
+    await objections.resolve(RUN, ["a.md"])
+    assert (await _state(oid))["state"] == objections.RESOLVED
+    assert "a.md" in await objections.settled_subjects(RUN)
+
+    assert await objections.reopen_uncited(RUN, set(), cycle=3) == ["a.md"]
+    entry = await _state(oid)
+    assert entry["state"] == objections.OPEN
+    assert entry["reopened"] == [3]
+    assert entry["exchanges"] == 1, "the argument's history is not reset"
+    assert "a.md" not in await objections.settled_subjects(RUN)
+
+
+@pytest.mark.asyncio
+async def test_a_citation_still_standing_keeps_it_resolved(ledger):
+    oid = await _ask(subject="a.md")
+    await objections.resolve(RUN, ["a.md"])
+    assert await objections.reopen_uncited(RUN, {"a.md"}, cycle=3) == []
+    assert (await _state(oid))["state"] == objections.RESOLVED
+
+
+@pytest.mark.asyncio
+async def test_a_request_settled_by_argument_stays_settled(ledger):
+    """An accepted refusal was settled by the drafter's reason and the
+    review's ruling, not by a claim, so losing a claim does not reopen it."""
+    oid = await _ask(subject="a.md")
+    await objections.refused(RUN, oid, "the passages read do not state the point")
+    await objections.rule(RUN, oid, "accept")
+    assert (await _state(oid))["state"] == objections.ACCEPTED
+    assert await objections.reopen_uncited(RUN, set(), cycle=3) == []
+    assert (await _state(oid))["state"] == objections.ACCEPTED
+
+
+@pytest.mark.asyncio
+async def test_only_source_requests_reopen(ledger):
+    """A standing request is resolved when its claim stops being the defect,
+    which includes the claim being dropped. That is not a lost citation."""
+    oid = await objections.raise_objection(
+        RUN, kind="standing", subject="claim-1", asked="rests on commentary",
+        cycle=1)
+    await objections.resolve(RUN, ["claim-1"], kind="standing")
+    assert await objections.reopen_uncited(RUN, set(), cycle=3) == []
+    assert (await _state(oid))["state"] == objections.RESOLVED
+
+
+def test_the_gate_reopens_before_it_decides_what_is_settled():
+    """Reopened after `settled` is read, the request would still be skipped
+    for the whole cycle in which the loss is first seen."""
+    import inspect
+
+    src = inspect.getsource(qr._gate_answer)
+    assert src.index("objections.reopen_uncited(") < src.index(
+        "objections.settled_subjects(")
+
+
+@pytest.fixture
+def stored_ledger(monkeypatch):
+    """Copies on every read and write, as the run row's JSON does, so a
+    change that is never stored is a change that did not happen."""
+    import copy
+    store: dict = {}
+
+    async def _load(_run_id):
+        return copy.deepcopy(store)
+
+    async def _store(_run_id, entries):
+        store.clear()
+        store.update(copy.deepcopy(entries))
+
+    monkeypatch.setattr(objections, "_load", _load)
+    monkeypatch.setattr(objections, "_store", _store)
+    return store
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("settle", ["accepted", "stalled"])
+async def test_a_settled_argument_cited_later_goes_back_to_settled(stored_ledger, settle):
+    """Settled by argument, then cited anyway, then the citation lost. The
+    request returns to how the argument ended; it is not opened again."""
+    oid = await _ask(subject="a.md")
+    store = await objections._load(RUN)
+    store[oid]["state"] = settle
+    await objections._store(RUN, store)
+    await objections.resolve(RUN, ["a.md"])
+    assert (await _state(oid))["state"] == objections.RESOLVED
+    assert await objections.reopen_uncited(RUN, set(), cycle=3) == []
+    assert (await _state(oid))["state"] == settle
+    assert "a.md" in await objections.settled_subjects(RUN)

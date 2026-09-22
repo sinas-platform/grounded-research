@@ -9,9 +9,9 @@ holding from a description of one.
 
 WHY THE OLD CHECK MISSED. What existed was an instruction to the drafter and,
 around it, a check that looked for attribution WORDS. Those words are
-English, and about a third of the collection is French, so a claim resting on
-a French judgment passed the check by never tripping it. A check that cannot
-fail on a third of the corpus is not a check.
+English, so a claim resting on a source in any other language passed the
+check by never tripping it. A check that cannot fail on a language it does
+not read is not a check.
 
 WHAT THIS DOES INSTEAD. It looks for the document's own identifier in the
 claim's text. An identifier is language-neutral by construction — a case
@@ -121,7 +121,7 @@ def _significant_words(name: str) -> list[str]:
     # Split on non-word characters with the UNICODE flag, not on a Latin-1
     # character class: a class written as A-Za-zÀ-ÿ treats every letter above
     # it as a separator, so "České" arrived as "eské" and the source could
-    # never be matched by name. The corpus is not Latin-1.
+    # never be matched by name. Names are not all Latin-1.
     parts = re.split(r"\W+", str(name or ""), flags=re.UNICODE)
     out = []
     for part in parts:

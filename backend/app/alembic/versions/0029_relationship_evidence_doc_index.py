@@ -6,9 +6,9 @@ relationships?" had to scan the whole table once per document.
 
 /api/v1/maintenance/completeness does exactly that: a correlated EXISTS per
 document, and it is the pre-batch gate an operator runs before treating a
-corpus as done. On 35,407 documents and 220,638 relationships it did not
-complete in 17 minutes without this index and returns in 41 seconds with it.
-The index builds in about 2 seconds.
+corpus as done. On a large collection it did not complete in 17 minutes
+without this index and returns in 41 seconds with it. The index builds in
+about 2 seconds.
 
 The completeness gate is not the only consumer. services/relationship_oneshot.py
 filters on evidence_document_id per document while deciding what has already
@@ -16,8 +16,9 @@ been extracted, so it pays the same scan on every document ingested; the bulk
 zip route runs the same EXISTS shape, and api/v1/relationships.py filters on the
 column directly.
 
-Plain btree, not partial: only 285 of 220,638 rows are NULL, so excluding them
-would save nothing. Not covering either: the EXISTS needs existence and nothing
+Plain btree, not partial: NULL rows are a small fraction of the table, so
+excluding them would save nothing. The figures are in issue 1474 in the
+originating deployment's tracker. Not covering either: the EXISTS needs existence and nothing
 else, and the planner already answers it with an index-only scan.
 
 CONCURRENTLY so an existing deployment keeps serving while it builds; that

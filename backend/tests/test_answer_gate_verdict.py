@@ -481,7 +481,7 @@ async def test_a_named_stronger_source_becomes_a_point_to_ground(gate_env):
                 ],
                 "unused_sources": [
                     "a-merger-decision.md: records the decision defining "
-                    "the market, more authoritative than m11936.md"
+                    "the market, more authoritative than harbour-notice.md"
                 ],
             }
         )
